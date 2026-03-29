@@ -1,0 +1,17 @@
+{
+  "watch": [
+    "config/**/*",
+    "database/config.js",
+    "middlewares/**/*",
+    "models/**/*",
+    "routes/**/*",
+    "service/**/*",
+    "index.js"
+  ],
+  "ignore": ["node_modules/**/*", "uploads/**/*", "*.log", ".git"],
+  "ext": "js,json",
+  "env": {
+    "NODE_ENV": "development"
+  },
+  "delay": 1000
+}
