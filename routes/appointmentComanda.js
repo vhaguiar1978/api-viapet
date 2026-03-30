@@ -101,15 +101,20 @@ router.post("/appointments/:id/items", auth, async (req, res) => {
 
     let finalDescription = description;
     let finalUnitPrice = toNumber(unitPrice);
+    let resolvedServiceId = serviceId;
+    let resolvedProductId = productId;
 
     if (type === "service") {
-      if (!serviceId) {
+      if (!resolvedServiceId && appointment.serviceId) {
+        resolvedServiceId = appointment.serviceId;
+      }
+      if (!resolvedServiceId) {
         return res.status(400).json({ message: "serviceId é obrigatório" });
       }
 
       const service = await Services.findOne({
         where: {
-          id: serviceId,
+          id: resolvedServiceId,
           establishment: req.user.establishment,
         },
       });
@@ -123,13 +128,13 @@ router.post("/appointments/:id/items", auth, async (req, res) => {
     }
 
     if (type === "product") {
-      if (!productId) {
+      if (!resolvedProductId) {
         return res.status(400).json({ message: "productId é obrigatório" });
       }
 
       const product = await Products.findOne({
         where: {
-          id: productId,
+          id: resolvedProductId,
           usersId: req.user.establishment,
         },
       });
@@ -156,8 +161,8 @@ router.post("/appointments/:id/items", auth, async (req, res) => {
       appointmentId: appointment.id,
       usersId: req.user.establishment,
       type,
-      serviceId: serviceId || null,
-      productId: productId || null,
+      serviceId: resolvedServiceId || null,
+      productId: resolvedProductId || null,
       description: finalDescription,
       quantity: qty,
       unitPrice: finalUnitPrice,
