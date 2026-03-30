@@ -2,6 +2,7 @@ import express from "express";
 import validator from "validator";
 import bcrypt from "bcryptjs";
 import Users from "../../models/Users.js";
+import Settings from "../../models/Settings.js";
 import Subscription from "../../models/Subscription.js";
 import EmailService from "../../service/email.js";
 import { ensureDefaultMedicalCatalog } from "../../service/defaultMedicalCatalog.js";
@@ -46,6 +47,20 @@ router.post("/register", async (req, res) => {
 
     userCreate.establishment = userCreate.id;
     await userCreate.save();
+
+    await Settings.create({
+      usersId: userCreate.id,
+      storeName: name,
+      intervalClinic: 30,
+      intervalAesthetics: 30,
+      openingTime: "08:00",
+      closingTime: "18:00",
+      breakStartTime: "12:00",
+      breakEndTime: "13:00",
+      notifyClient: true,
+      themeColor: "#2196F3",
+      textColor: "#1F2937",
+    });
 
     await ensureDefaultMedicalCatalog(userCreate.id);
 

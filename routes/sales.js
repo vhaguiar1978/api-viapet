@@ -21,13 +21,20 @@ router.post("/sales", auth, async (req, res) => {
     const { custumerId, items, paymentMethod, observation, appointmentId } =
       req.body;
     const idUser = req.user.id;
+    const establishment = req.user.establishment;
+
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({
+        message: "Adicione pelo menos um item para concluir a venda",
+      });
+    }
 
     // Verifica se o cliente existe e pertence ao estabelecimento
     if (custumerId) {
       const customer = await Custumers.findOne({
         where: {
           id: custumerId,
-          usersId: req.user.establishment,
+          usersId: establishment,
         },
       });
 
@@ -46,7 +53,7 @@ router.post("/sales", auth, async (req, res) => {
     // Cria a venda
     const sale = await Sales.create(
       {
-        usersId: req.user.establishment,
+        usersId: establishment,
         responsible: idUser,
         custumerId,
         appointmentId,
@@ -64,12 +71,27 @@ router.post("/sales", auth, async (req, res) => {
         const subTotal = item.price * item.quantify;
 
         // Verifica se o produto é unitário e atualiza o estoque
-        const product = await Products.findByPk(item.productId);
-        if (product && product.unitary) {
+        const product = await Products.findOne({
+          where: {
+            id: item.productId,
+            usersId: establishment,
+          },
+          transaction: t,
+        });
+        if (!product) {
+          throw new Error("Produto nao encontrado para este estabelecimento");
+        }
+        if (product.unitary && Number(product.stoke || 0) < Number(item.quantify || 0)) {
+          throw new Error(`Estoque insuficiente para o produto ${product.name}`);
+        }
+        if (product.unitary) {
           await Products.update(
             { stoke: sequelize.literal(`stoke - ${item.quantify}`) },
             {
-              where: { id: item.productId },
+              where: {
+                id: item.productId,
+                usersId: establishment,
+              },
               transaction: t,
             },
           );
@@ -77,7 +99,7 @@ router.post("/sales", auth, async (req, res) => {
 
         return SaleItem.create(
           {
-            usersId: req.user.establishment,
+            usersId: establishment,
             saleId: sale.id,
             productId: item.productId,
             quantify: item.quantify,
@@ -92,7 +114,7 @@ router.post("/sales", auth, async (req, res) => {
     const customer = await Custumers.findOne({
       where: {
         id: custumerId,
-        usersId: req.user.establishment,
+        usersId: establishment,
       },
     });
 
@@ -157,7 +179,11 @@ router.get("/sales", auth, async (req, res) => {
         const saleJSON = sale.toJSON();
         saleJSON.SaleItems = await Promise.all(
           saleJSON.SaleItems.map(async (item) => {
-            const product = await Products.findByPk(item.productId, {
+            const product = await Products.findOne({
+              where: {
+                id: item.productId,
+                usersId: req.user.establishment,
+              },
               attributes: ["name"],
             });
             return {
@@ -232,7 +258,11 @@ router.get("/sales/:id", auth, async (req, res) => {
         : null,
       SaleItems: await Promise.all(
         sale.SaleItems.map(async (item) => {
-          const product = await Products.findByPk(item.productId, {
+          const product = await Products.findOne({
+            where: {
+              id: item.productId,
+              usersId: req.user.establishment,
+            },
             attributes: ["name"],
           });
           return {
@@ -654,7 +684,12 @@ router.patch("/:id/status", auth, async (req, res) => {
     const { id } = req.params;
     const { status } = req.body;
 
-    const sale = await Sale.findByPk(id);
+    const sale = await Sale.findOne({
+      where: {
+        id,
+        usersId: req.user.establishment,
+      },
+    });
     if (!sale) {
       return res.status(404).json({ message: "Venda não encontrada" });
     }
@@ -699,12 +734,20 @@ router.delete("/sales/:id", auth, async (req, res) => {
     if (sale.status === "pago") {
       await Promise.all(
         saleItems.map(async (item) => {
-          const product = await Products.findByPk(item.productId);
+          const product = await Products.findOne({
+            where: {
+              id: item.productId,
+              usersId: req.user.establishment,
+            },
+          });
           if (product && product.unitary) {
             await Products.update(
               { stoke: sequelize.literal(`stoke + ${item.quantify}`) },
               {
-                where: { id: item.productId },
+                where: {
+                  id: item.productId,
+                  usersId: req.user.establishment,
+                },
                 transaction: t,
               },
             );

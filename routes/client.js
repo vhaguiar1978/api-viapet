@@ -602,7 +602,7 @@ router.get("/customer-data/:customerId", auth, async (req, res) => {
 });
 // Rota para buscar agendamentos do cliente por CPF e data de nascimento
 // Rota para buscar agendamentos do cliente por telefone (versão simplificada - SOMENTE NOMES)
-router.get("/client-appointments", async (req, res) => {
+router.get("/client-appointments", auth, async (req, res) => {
   try {
     console.log(req.query);
     const { phone } = req.query;
@@ -617,6 +617,7 @@ router.get("/client-appointments", async (req, res) => {
     const customer = await Custumers.findOne({
       where: {
         phone,
+        usersId: req.user.establishment,
       },
     });
 
@@ -692,12 +693,17 @@ router.get("/client-appointments", async (req, res) => {
   }
 });
 // Rota para deletar um cliente
-router.delete("/client/:id", async (req, res) => {
+router.delete("/client/:id", auth, async (req, res) => {
   try {
     const { id } = req.params;
 
     // Verifica se o cliente existe
-    const customer = await Custumers.findByPk(id);
+    const customer = await Custumers.findOne({
+      where: {
+        id,
+        usersId: req.user.establishment,
+      },
+    });
 
     if (!customer) {
       return res.status(404).json({

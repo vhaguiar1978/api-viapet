@@ -1,6 +1,6 @@
 import express from "express";
 import Admin from "../models/Admin.js";
-import authenticate from "../middlewares/auth.js";
+import adminMiddleware from "../middlewares/admin.js";
 import Settings from "../models/Settings.js";
 import Users from "../models/Users.js";
 import bcrypt from "bcrypt";
@@ -258,7 +258,7 @@ router.get("/public/site-contact", async (_req, res) => {
   }
 });
 
-router.get("/settings/admin", authenticate, async (req, res) => {
+router.get("/settings/admin", adminMiddleware, async (req, res) => {
   try {
     const settings = await getOrCreateAdminSettings();
 
@@ -281,7 +281,7 @@ router.get("/settings/admin", authenticate, async (req, res) => {
   }
 });
 
-router.post("/settings/admin", authenticate, async (req, res) => {
+router.post("/settings/admin", adminMiddleware, async (req, res) => {
   try {
     const {
       smtpHost,
@@ -326,7 +326,7 @@ router.post("/settings/admin", authenticate, async (req, res) => {
 });
 
 // Rota para listar todos os clientes do ViaPet
-router.get("/admin/clients", authenticate, async (req, res) => {
+router.get("/admin/clients", adminMiddleware, async (req, res) => {
   try {
     const clients = await Users.findAll({
       where: {
@@ -424,7 +424,7 @@ router.get("/admin/clients", authenticate, async (req, res) => {
 });
 
 // Rota para obter detalhes específicos de um cliente
-router.get("/admin/clients/:id/details", authenticate, async (req, res) => {
+router.get("/admin/clients/:id/details", adminMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
     const client = await Users.findOne({
@@ -566,7 +566,7 @@ router.get("/admin/clients/:id/details", authenticate, async (req, res) => {
   }
 });
 
-router.post("/admin/clients/:id/send-reset-link", authenticate, async (req, res) => {
+router.post("/admin/clients/:id/send-reset-link", adminMiddleware, async (req, res) => {
   try {
     const user = await Users.findOne({
       where: { id: req.params.id, role: "proprietario" },
@@ -620,7 +620,7 @@ router.post("/admin/clients/:id/send-reset-link", authenticate, async (req, res)
 });
 
 // Rota para obter links de redes sociais
-router.get("/admin/social-links", authenticate, async (req, res) => {
+router.get("/admin/social-links", adminMiddleware, async (req, res) => {
   try {
     const settings = await Admin.findOne();
 
@@ -642,7 +642,7 @@ router.get("/admin/social-links", authenticate, async (req, res) => {
   }
 });
 
-router.get("/admin/billing/settings", authenticate, async (req, res) => {
+router.get("/admin/billing/settings", adminMiddleware, async (req, res) => {
   try {
     const settings = await getOrCreateBillingSettings();
     return res.json({
@@ -657,7 +657,7 @@ router.get("/admin/billing/settings", authenticate, async (req, res) => {
   }
 });
 
-router.post("/admin/billing/settings", authenticate, async (req, res) => {
+router.post("/admin/billing/settings", adminMiddleware, async (req, res) => {
   try {
     const settings = await getOrCreateBillingSettings();
     const {
@@ -694,7 +694,7 @@ router.post("/admin/billing/settings", authenticate, async (req, res) => {
   }
 });
 
-router.get("/admin/billing/overview", authenticate, async (req, res) => {
+router.get("/admin/billing/overview", adminMiddleware, async (req, res) => {
   try {
     const settings = await getOrCreateBillingSettings();
     const users = await Users.findAll({
@@ -742,7 +742,7 @@ router.get("/admin/billing/overview", authenticate, async (req, res) => {
   }
 });
 
-router.post("/admin/clients/:id/mark-manual-paid", authenticate, async (req, res) => {
+router.post("/admin/clients/:id/mark-manual-paid", adminMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
     const user = await Users.findByPk(id);
@@ -814,7 +814,7 @@ router.post("/admin/clients/:id/mark-manual-paid", authenticate, async (req, res
   }
 });
 
-router.post("/admin/clients/:id/create-billing-charge", authenticate, async (req, res) => {
+router.post("/admin/clients/:id/create-billing-charge", adminMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
     const user = await Users.findByPk(id);
@@ -918,7 +918,7 @@ router.post("/admin/clients/:id/create-billing-charge", authenticate, async (req
 });
 
 // Rota para adicionar novo cliente
-router.post("/admin/clients", authenticate, async (req, res) => {
+router.post("/admin/clients", adminMiddleware, async (req, res) => {
   try {
     const { name, email, password, plan } = req.body;
     if (!name || !email) {
@@ -1031,7 +1031,7 @@ router.post("/admin/clients", authenticate, async (req, res) => {
 });
 
 // Rota para editar cliente
-router.put("/admin/clients/:id", authenticate, async (req, res) => {
+router.put("/admin/clients/:id", adminMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
     const { name, email, status, plan, expirationDate, phone } = req.body;
@@ -1123,7 +1123,7 @@ router.put("/admin/clients/:id", authenticate, async (req, res) => {
   }
 });
 
-router.post("/admin/clients/:id/reset-first-access", authenticate, async (req, res) => {
+router.post("/admin/clients/:id/reset-first-access", adminMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
     const user = await Users.findByPk(id);
@@ -1162,7 +1162,7 @@ router.post("/admin/clients/:id/reset-first-access", authenticate, async (req, r
 });
 
 // Rota para excluir cliente
-router.delete("/admin/clients/:id", authenticate, async (req, res) => {
+router.delete("/admin/clients/:id", adminMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
     const user = await Users.findByPk(id);
@@ -1216,7 +1216,7 @@ router.delete("/admin/clients/:id", authenticate, async (req, res) => {
 });
 
 // Rota para gerenciar plano do cliente
-router.patch("/admin/clients/:id/plan", authenticate, async (req, res) => {
+router.patch("/admin/clients/:id/plan", adminMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
     const { hasPlan, planExpirationDate } = req.body;
@@ -1251,7 +1251,7 @@ router.patch("/admin/clients/:id/plan", authenticate, async (req, res) => {
 });
 
 // Rota para renovar plano do cliente
-router.post("/admin/clients/:id/renew-plan", authenticate, async (req, res) => {
+router.post("/admin/clients/:id/renew-plan", adminMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
     const user = await Users.findByPk(id);
@@ -1298,7 +1298,7 @@ router.post("/admin/clients/:id/renew-plan", authenticate, async (req, res) => {
   }
 });
 
-router.post("/admin/clients/:id/grant-trial", authenticate, async (req, res) => {
+router.post("/admin/clients/:id/grant-trial", adminMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
     const { days = 7 } = req.body || {};
@@ -1345,7 +1345,7 @@ router.post("/admin/clients/:id/grant-trial", authenticate, async (req, res) => 
   }
 });
 
-router.post("/admin/clients/:id/grant-free", authenticate, async (req, res) => {
+router.post("/admin/clients/:id/grant-free", adminMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
     const user = await Users.findByPk(id);
@@ -1392,7 +1392,7 @@ router.post("/admin/clients/:id/grant-free", authenticate, async (req, res) => {
   }
 });
 
-router.post("/admin/clients/:id/block-plan", authenticate, async (req, res) => {
+router.post("/admin/clients/:id/block-plan", adminMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
     const user = await Users.findByPk(id);
@@ -1436,7 +1436,7 @@ router.post("/admin/clients/:id/block-plan", authenticate, async (req, res) => {
   }
 });
 
-router.get("/admin/crm-ai/subscriptions", authenticate, async (req, res) => {
+router.get("/admin/crm-ai/subscriptions", adminMiddleware, async (req, res) => {
   try {
     const users = await Users.findAll({
       where: {
@@ -1486,7 +1486,7 @@ router.get("/admin/crm-ai/subscriptions", authenticate, async (req, res) => {
   }
 });
 
-router.post("/admin/crm-ai/:id/grant-trial", authenticate, async (req, res) => {
+router.post("/admin/crm-ai/:id/grant-trial", adminMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
     const { days = 7 } = req.body;
@@ -1543,7 +1543,7 @@ router.post("/admin/crm-ai/:id/grant-trial", authenticate, async (req, res) => {
   }
 });
 
-router.post("/admin/crm-ai/:id/grant-free", authenticate, async (req, res) => {
+router.post("/admin/crm-ai/:id/grant-free", adminMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
     const user = await Users.findByPk(id);
@@ -1595,7 +1595,7 @@ router.post("/admin/crm-ai/:id/grant-free", authenticate, async (req, res) => {
   }
 });
 
-router.post("/admin/crm-ai/:id/block", authenticate, async (req, res) => {
+router.post("/admin/crm-ai/:id/block", adminMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
     const user = await Users.findByPk(id);

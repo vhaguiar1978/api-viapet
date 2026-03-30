@@ -81,14 +81,24 @@ router.post("/appointments", auth, async (req, res) => {
 
     // Adiciona valores de serviços secundários e terciários se existirem
     if (secondaryServiceId) {
-      const secondaryService = await Services.findByPk(secondaryServiceId);
+      const secondaryService = await Services.findOne({
+        where: {
+          id: secondaryServiceId,
+          establishment: req.user.establishment,
+        },
+      });
       if (secondaryService) {
         totalAmount += Number(secondaryService.price || 0);
       }
     }
 
     if (tertiaryServiceId) {
-      const tertiaryService = await Services.findByPk(tertiaryServiceId);
+      const tertiaryService = await Services.findOne({
+        where: {
+          id: tertiaryServiceId,
+          establishment: req.user.establishment,
+        },
+      });
       if (tertiaryService) {
         totalAmount += Number(tertiaryService.price || 0);
       }
@@ -541,7 +551,12 @@ router.patch("/appointments/:id/driver-status", auth, async (req, res) => {
       });
     }
 
-    const appointment = await Appointment.findByPk(id);
+    const appointment = await Appointment.findOne({
+      where: {
+        id,
+        usersId: req.user.establishment,
+      },
+    });
     if (!appointment) {
       return res.status(404).json({
         message: "Agendamento não encontrado",
@@ -625,20 +640,33 @@ router.put("/appointments/:id", auth, async (req, res) => {
     }
 
     // Buscar serviços para calcular o valor total
-    const mainService = await Services.findByPk(
-      serviceId || appointment.serviceId,
-    ); // Mantém o || aqui para evitar erro se serviceId não for fornecido em criação
+    const mainService = await Services.findOne({
+      where: {
+        id: serviceId || appointment.serviceId,
+        establishment: req.user.establishment,
+      },
+    }); // Mantém o || aqui para evitar erro se serviceId não for fornecido em criação
     let totalAmount = Number(mainService?.price || 0);
 
     if (secondaryServiceId) {
-      const secondaryService = await Services.findByPk(secondaryServiceId);
+      const secondaryService = await Services.findOne({
+        where: {
+          id: secondaryServiceId,
+          establishment: req.user.establishment,
+        },
+      });
       if (secondaryService) {
         totalAmount += Number(secondaryService.price || 0);
       }
     }
 
     if (tertiaryServiceId) {
-      const tertiaryService = await Services.findByPk(tertiaryServiceId);
+      const tertiaryService = await Services.findOne({
+        where: {
+          id: tertiaryServiceId,
+          establishment: req.user.establishment,
+        },
+      });
       if (tertiaryService) {
         totalAmount += Number(tertiaryService.price || 0);
       }
@@ -1006,14 +1034,24 @@ router.post("/appointments/package", auth, async (req, res) => {
 
       // Adiciona valores de serviços secundários e terciários se existirem
       if (secondaryServiceId) {
-        const secondaryService = await Services.findByPk(secondaryServiceId);
+        const secondaryService = await Services.findOne({
+          where: {
+            id: secondaryServiceId,
+            establishment: req.user.establishment,
+          },
+        });
         if (secondaryService) {
           totalAmount += Number(secondaryService.price || 0);
         }
       }
 
       if (tertiaryServiceId) {
-        const tertiaryService = await Services.findByPk(tertiaryServiceId);
+        const tertiaryService = await Services.findOne({
+          where: {
+            id: tertiaryServiceId,
+            establishment: req.user.establishment,
+          },
+        });
         if (tertiaryService) {
           totalAmount += Number(tertiaryService.price || 0);
         }

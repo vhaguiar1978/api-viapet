@@ -19,7 +19,7 @@ router.post("/addProduct", authenticate, owner, async (req, res) => {
       barcode,
       unit,
     } = req.body;
-    const usersId = req.user.id;
+    const usersId = req.user.establishment;
 
     // Validações
     if (!name || typeof name !== "string" || name.trim().length === 0) {
@@ -329,7 +329,12 @@ router.delete("/deleteproduct", authenticate, owner, async (req, res) => {
   const { id } = req.body;
 
   try {
-    const product = await Products.findByPk(id);
+    const product = await Products.findOne({
+      where: {
+        id,
+        usersId: req.user.establishment,
+      },
+    });
 
     if (!product) {
       return res.status(404).json({
@@ -338,7 +343,10 @@ router.delete("/deleteproduct", authenticate, owner, async (req, res) => {
     }
 
     // Verify if user has permission to delete this product
-    if (product.usersId !== req.user.id && req.user.role !== "admin") {
+    if (
+      product.usersId !== req.user.establishment &&
+      req.user.role !== "admin"
+    ) {
       return res.status(403).json({
         message: "Você não tem permissão para deletar este produto",
       });

@@ -33,7 +33,10 @@ router.post("/drivers", authenticate, async (req, res) => {
 // Read All - GET /drivers
 router.get("/drivers", authenticate, async (req, res) => {
   try {
-    const drivers = await Drivers.findAll();
+    const drivers = await Drivers.findAll({
+      where: { establishment: req.user.establishment },
+      order: [["name", "ASC"]],
+    });
     res.json(drivers);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -43,7 +46,12 @@ router.get("/drivers", authenticate, async (req, res) => {
 // Read One - GET /drivers/:id
 router.get("/drivers/:id", authenticate, async (req, res) => {
   try {
-    const driver = await Drivers.findByPk(req.params.id);
+    const driver = await Drivers.findOne({
+      where: {
+        id: req.params.id,
+        establishment: req.user.establishment,
+      },
+    });
     if (!driver) {
       return res.status(404).json({ message: "Motorista não encontrado" });
     }
@@ -65,7 +73,12 @@ router.put("/drivers/:id", authenticate, async (req, res) => {
     const establishment = req.user.establishment;
     const usersId = establishment; // usersId é o mesmo que establishment
 
-    const driver = await Drivers.findByPk(req.params.id);
+    const driver = await Drivers.findOne({
+      where: {
+        id: req.params.id,
+        establishment: req.user.establishment,
+      },
+    });
     if (!driver) {
       return res.status(404).json({ message: "Motorista não encontrado" });
     }
@@ -88,7 +101,12 @@ router.put("/drivers/:id", authenticate, async (req, res) => {
 // Delete - DELETE /drivers/:id
 router.delete("/drivers/:id", authenticate, async (req, res) => {
   try {
-    const driver = await Drivers.findByPk(req.params.id);
+    const driver = await Drivers.findOne({
+      where: {
+        id: req.params.id,
+        establishment: req.user.establishment,
+      },
+    });
     if (!driver) {
       return res.status(404).json({ message: "Motorista não encontrado" });
     }
