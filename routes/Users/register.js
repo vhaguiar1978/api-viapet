@@ -1,8 +1,8 @@
 import express from "express";
-import Users from "../../models/Users.js";
-import Subscription from "../../models/Subscription.js";
 import validator from "validator";
 import bcrypt from "bcryptjs";
+import Users from "../../models/Users.js";
+import Subscription from "../../models/Subscription.js";
 import EmailService from "../../service/email.js";
 
 const router = express.Router();
@@ -15,26 +15,21 @@ router.post("/register", async (req, res) => {
   }
 
   if (!validator.isEmail(email)) {
-    return res.status(400).json({ message: "Email inválido" });
+    return res.status(400).json({ message: "Email invalido" });
   }
 
   if (password.length < 6) {
-    return res
-      .status(400)
-      .json({ message: "A senha deve ter no mínimo 6 caracteres" });
+    return res.status(400).json({ message: "A senha deve ter no minimo 6 caracteres" });
   }
 
   try {
     const user = await Users.findOne({ where: { email } });
     if (user) {
-      return res
-        .status(400)
-        .json({ message: "Já existe uma conta cadastrada com este e-mail" });
+      return res.status(400).json({ message: "Ja existe uma conta cadastrada com este e-mail" });
     }
 
     const passHash = await bcrypt.hash(password, 10);
 
-    // Calculate expiration date 1 month from now
     const expirationDate = new Date();
     expirationDate.setMonth(expirationDate.getMonth() + 1);
 
@@ -43,50 +38,39 @@ router.post("/register", async (req, res) => {
       email,
       password: passHash,
       establishment: null,
-      expirationDate: expirationDate,
+      expirationDate,
       plan: false,
-      phone: phone,
+      phone,
     });
 
-    // Update establishment after creation
     userCreate.establishment = userCreate.id;
     await userCreate.save();
 
-    // Create trial subscription for the new user
     const trialStartDate = new Date();
     const trialEndDate = new Date();
-    trialEndDate.setMonth(trialEndDate.getMonth() + 1); // 1 month free trial
+    trialEndDate.setMonth(trialEndDate.getMonth() + 1);
 
     await Subscription.create({
       user_id: userCreate.id,
-      plan_type: 'trial',
-      status: 'active',
-      amount: 0.00, // Free trial
-      currency: 'BRL',
+      plan_type: "trial",
+      status: "active",
+      amount: 0,
+      currency: "BRL",
       trial_start: trialStartDate,
       trial_end: trialEndDate,
-      billing_cycle_start: trialEndDate, // Next billing starts after trial
+      billing_cycle_start: trialEndDate,
       next_billing_date: trialEndDate,
-      notes: 'Assinatura trial criada automaticamente no registro'
+      notes: "Assinatura trial criada automaticamente no registro",
     });
 
-    // Envia email de boas-vindas de forma assíncrona (não bloqueia o registro)
-    try {
-      await EmailService.sendWelcomeEmail(userCreate.id, email);
-    } catch (error) {
-      // Log do erro mas não impede o sucesso do registro
-      console.error(
-        "⚠️  Email de boas-vindas não pôde ser enviado:",
-        error.message
-      );
-    }
+    EmailService.sendWelcomeEmail(userCreate.id, email).catch((error) => {
+      console.error("Email de boas-vindas nao pode ser enviado:", error.message);
+    });
 
     return res.status(201).json({ message: "Conta criada com sucesso!" });
   } catch (error) {
     console.error("Erro ao criar a conta:", error);
-    return res
-      .status(500)
-      .json({ message: "Ocorreu um erro ao criar sua conta" });
+    return res.status(500).json({ message: "Ocorreu um erro ao criar sua conta" });
   }
 });
 
