@@ -241,18 +241,30 @@ router.get("/customers", auth, async (req, res) => {
       order: [["name", "ASC"]],
     });
 
-    // Busca os pets de cada cliente
-    const customersWithPets = await Promise.all(
-      customers.map(async (customer) => {
-        const pets = await Pets.findAll({
-          where: { custumerId: customer.id },
-        });
-        return {
-          ...customer.toJSON(),
-          pets,
-        };
-      })
-    );
+    const customerIds = customers.map((customer) => customer.id);
+    const pets = customerIds.length
+      ? await Pets.findAll({
+          where: {
+            usersId: req.user.establishment,
+            custumerId: { [Op.in]: customerIds },
+          },
+          order: [["name", "ASC"]],
+        })
+      : [];
+
+    const petsByCustomerId = pets.reduce((accumulator, pet) => {
+      const key = String(pet.custumerId || "");
+      if (!accumulator[key]) {
+        accumulator[key] = [];
+      }
+      accumulator[key].push(pet);
+      return accumulator;
+    }, {});
+
+    const customersWithPets = customers.map((customer) => ({
+      ...customer.toJSON(),
+      pets: petsByCustomerId[String(customer.id)] || [],
+    }));
 
     return res.status(200).json({
       message: "Clientes encontrados com sucesso",
@@ -401,39 +413,55 @@ router.get("/birthdays", auth, async (req, res) => {
     const currentMonth = today.getMonth() + 1;
     const currentDay = today.getDate();
 
-    // Buscar clientes aniversariantes do dia
-    const customers = await Custumers.findAll({
+    const customersOfTheDay = await Custumers.findAll({
       where: {
         usersId: req.user.establishment,
+        birthDate: {
+          [Op.not]: null,
+        },
+        [Op.and]: [
+          Sequelize.where(
+            Sequelize.fn("EXTRACT", Sequelize.literal('MONTH FROM "birthDate"')),
+            currentMonth,
+          ),
+          Sequelize.where(
+            Sequelize.fn("EXTRACT", Sequelize.literal('DAY FROM "birthDate"')),
+            currentDay,
+          ),
+        ],
       },
+      attributes: ["id", "name", "email", "phone", "birthDate"],
       order: [["name", "ASC"]],
     });
 
-    // Buscar pets aniversariantes do dia e seus donos
-    const pets = await Pets.findAll({
+    const petsOfTheDay = await Pets.findAll({
       where: {
         usersId: req.user.establishment,
+        birthdate: {
+          [Op.not]: null,
+        },
+        [Op.and]: [
+          Sequelize.where(
+            Sequelize.fn("EXTRACT", Sequelize.literal('MONTH FROM birthdate')),
+            currentMonth,
+          ),
+          Sequelize.where(
+            Sequelize.fn("EXTRACT", Sequelize.literal('DAY FROM birthdate')),
+            currentDay,
+          ),
+        ],
       },
+      attributes: ["id", "name", "birthdate", "custumerId"],
       order: [["name", "ASC"]],
-    });
-
-    const customersOfTheDay = customers.filter((customer) => {
-      const sourceBirthDate = customer.birthDate || customer.birthdate || customer.dataValues?.birthDate || customer.dataValues?.birthdate;
-      const birthDate = sourceBirthDate ? new Date(sourceBirthDate) : null;
-      return birthDate && birthDate.getMonth() + 1 === currentMonth && birthDate.getDate() === currentDay;
-    });
-
-    const petsOfTheDay = pets.filter((pet) => {
-      const sourceBirthDate = pet.birthdate || pet.birthDate || pet.dataValues?.birthdate || pet.dataValues?.birthDate;
-      const birthDate = sourceBirthDate ? new Date(sourceBirthDate) : null;
-      return birthDate && birthDate.getMonth() + 1 === currentMonth && birthDate.getDate() === currentDay;
     });
 
     // Buscar dados dos donos dos pets
     const customerIds = [...new Set(petsOfTheDay.map((pet) => pet.custumerId))];
     const petOwners = await Custumers.findAll({
       where: {
-        id: customerIds,
+        id: {
+          [Op.in]: customerIds,
+        },
         usersId: req.user.establishment,
       },
       attributes: ["id", "name", "phone"],
