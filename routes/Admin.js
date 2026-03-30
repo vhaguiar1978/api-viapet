@@ -332,6 +332,18 @@ router.get("/admin/clients", authenticate, async (req, res) => {
       where: {
         role: "proprietario",
       },
+      attributes: [
+        "id",
+        "name",
+        "email",
+        "phone",
+        "status",
+        "plan",
+        "expirationDate",
+        "lastAccess",
+        "recoveryPassToken",
+        "timeRecoveryPass",
+      ],
       include: [
         {
           model: Users,
@@ -340,18 +352,9 @@ router.get("/admin/clients", authenticate, async (req, res) => {
           required: false,
         },
         {
-          model: Products,
-          as: "products",
-          required: false,
-        },
-        {
-          model: Services,
-          as: "services",
-          required: false,
-        },
-        {
           model: Settings,
           as: "settings",
+          attributes: ["id", "usersId", "storeName", "themeColor", "textColor", "logoUrl"],
           required: false,
         },
       ],
@@ -369,6 +372,11 @@ router.get("/admin/clients", authenticate, async (req, res) => {
           Customers.count({ where: { usersId: client.id } }),
         ]);
 
+        const [productsCount, servicesCount] = await Promise.all([
+          Products.count({ where: { usersId: client.id } }),
+          Services.count({ where: { establishment: client.id } }),
+        ]);
+
         // Calcular faturamento total
         const totalRevenue =
           (await Sales.sum("total", {
@@ -383,8 +391,8 @@ router.get("/admin/clients", authenticate, async (req, res) => {
           passwordResetExpiresAt: readPasswordResetState(client).expiresAt,
           statistics: {
             totalEmployees: clientData.employees?.length || 0,
-            totalProducts: clientData.products?.length || 0,
-            totalServices: clientData.services?.length || 0,
+            totalProducts: productsCount,
+            totalServices: servicesCount,
             totalAppointments: appointments,
             totalSales: sales,
             totalCustomers: customers,
@@ -421,6 +429,20 @@ router.get("/admin/clients/:id/details", authenticate, async (req, res) => {
     const { id } = req.params;
     const client = await Users.findOne({
       where: { id, role: "proprietario" },
+      attributes: [
+        "id",
+        "name",
+        "email",
+        "phone",
+        "status",
+        "plan",
+        "expirationDate",
+        "lastAccess",
+        "recoveryPassToken",
+        "timeRecoveryPass",
+        "createdAt",
+        "updatedAt",
+      ],
       include: [
         {
           model: Users,
@@ -429,18 +451,9 @@ router.get("/admin/clients/:id/details", authenticate, async (req, res) => {
           required: false,
         },
         {
-          model: Products,
-          as: "products",
-          required: false,
-        },
-        {
-          model: Services,
-          as: "services",
-          required: false,
-        },
-        {
           model: Settings,
           as: "settings",
+          attributes: ["id", "usersId", "storeName", "themeColor", "textColor", "logoUrl"],
           required: false,
         },
       ],
@@ -462,6 +475,8 @@ router.get("/admin/clients/:id/details", authenticate, async (req, res) => {
       recentLogins,
       subscription,
       paymentHistory,
+      productsCount,
+      servicesCount,
     ] = await Promise.all([
       Appointments.count({ where: { usersId: id } }),
       Sales.count({ where: { usersId: id } }),
@@ -490,6 +505,8 @@ router.get("/admin/clients/:id/details", authenticate, async (req, res) => {
         limit: 8,
         order: [["created_at", "DESC"]],
       }),
+      Products.count({ where: { usersId: id } }),
+      Services.count({ where: { establishment: id } }),
     ]);
 
     // Calcular faturamento total e mensal
@@ -517,8 +534,8 @@ router.get("/admin/clients/:id/details", authenticate, async (req, res) => {
       passwordReset: readPasswordResetState(client),
       statistics: {
         totalEmployees: client.employees?.length || 0,
-        totalProducts: client.products?.length || 0,
-        totalServices: client.services?.length || 0,
+        totalProducts: productsCount,
+        totalServices: servicesCount,
         totalAppointments: appointments,
         totalSales: sales,
         totalCustomers: customers,
