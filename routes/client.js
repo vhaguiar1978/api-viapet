@@ -412,6 +412,8 @@ router.get("/birthdays", auth, async (req, res) => {
     );
     const currentMonth = today.getMonth() + 1;
     const currentDay = today.getDate();
+    const uuidPattern =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
     const customersOfTheDay = await Custumers.findAll({
       where: {
@@ -420,14 +422,8 @@ router.get("/birthdays", auth, async (req, res) => {
           [Op.not]: null,
         },
         [Op.and]: [
-          Sequelize.where(
-            Sequelize.fn("EXTRACT", Sequelize.literal('MONTH FROM "birthDate"')),
-            currentMonth,
-          ),
-          Sequelize.where(
-            Sequelize.fn("EXTRACT", Sequelize.literal('DAY FROM "birthDate"')),
-            currentDay,
-          ),
+          Sequelize.literal(`EXTRACT(MONTH FROM "birthDate") = ${Number(currentMonth)}`),
+          Sequelize.literal(`EXTRACT(DAY FROM "birthDate") = ${Number(currentDay)}`),
         ],
       },
       attributes: ["id", "name", "email", "phone", "birthDate"],
@@ -441,14 +437,8 @@ router.get("/birthdays", auth, async (req, res) => {
           [Op.not]: null,
         },
         [Op.and]: [
-          Sequelize.where(
-            Sequelize.fn("EXTRACT", Sequelize.literal('MONTH FROM birthdate')),
-            currentMonth,
-          ),
-          Sequelize.where(
-            Sequelize.fn("EXTRACT", Sequelize.literal('DAY FROM birthdate')),
-            currentDay,
-          ),
+          Sequelize.literal(`EXTRACT(MONTH FROM "birthdate") = ${Number(currentMonth)}`),
+          Sequelize.literal(`EXTRACT(DAY FROM "birthdate") = ${Number(currentDay)}`),
         ],
       },
       attributes: ["id", "name", "birthdate", "custumerId"],
@@ -456,16 +446,24 @@ router.get("/birthdays", auth, async (req, res) => {
     });
 
     // Buscar dados dos donos dos pets
-    const customerIds = [...new Set(petsOfTheDay.map((pet) => pet.custumerId))];
-    const petOwners = await Custumers.findAll({
-      where: {
-        id: {
-          [Op.in]: customerIds,
-        },
-        usersId: req.user.establishment,
-      },
-      attributes: ["id", "name", "phone"],
-    });
+    const customerIds = [
+      ...new Set(
+        petsOfTheDay
+          .map((pet) => String(pet.custumerId || "").trim())
+          .filter((id) => uuidPattern.test(id))
+      ),
+    ];
+    const petOwners = customerIds.length
+      ? await Custumers.findAll({
+          where: {
+            id: {
+              [Op.in]: customerIds,
+            },
+            usersId: req.user.establishment,
+          },
+          attributes: ["id", "name", "phone"],
+        })
+      : [];
 
     // Criar mapa de donos
     const ownerMap = {};
