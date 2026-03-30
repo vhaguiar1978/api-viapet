@@ -405,22 +405,7 @@ router.get("/birthdays", auth, async (req, res) => {
     const customers = await Custumers.findAll({
       where: {
         usersId: req.user.establishment,
-        birthDate: {
-          [Op.and]: [
-            Sequelize.literal(
-              `DATE_FORMAT(birthDate, '%m') = ${String(currentMonth).padStart(
-                2,
-                "0"
-              )}`
-            ),
-            Sequelize.literal(
-              `DATE_FORMAT(birthDate, '%d') = ${String(currentDay).padStart(
-                2,
-                "0"
-              )}`
-            ),
-          ],
-        },
+        birthDate: { [Op.ne]: null },
       },
       attributes: ["id", "name", "email", "phone", "birthDate"],
       order: [["name", "ASC"]],
@@ -430,37 +415,43 @@ router.get("/birthdays", auth, async (req, res) => {
     const pets = await Pets.findAll({
       where: {
         usersId: req.user.establishment,
-        birthdate: {
-          [Op.and]: [
-            Sequelize.literal(
-              `EXTRACT(MONTH FROM birthdate) = ${currentMonth}`
-            ),
-            Sequelize.literal(`EXTRACT(DAY FROM birthdate) = ${currentDay}`),
-          ],
-        },
+        birthdate: { [Op.ne]: null },
       },
       attributes: ["id", "name", "birthdate", "custumerId"],
       order: [["name", "ASC"]],
     });
 
+    const customersOfTheDay = customers.filter((customer) => {
+      const birthDate = customer.birthDate ? new Date(customer.birthDate) : null;
+      return birthDate && birthDate.getMonth() + 1 === currentMonth && birthDate.getDate() === currentDay;
+    });
+
+    const petsOfTheDay = pets.filter((pet) => {
+      const birthDate = pet.birthdate ? new Date(pet.birthdate) : null;
+      return birthDate && birthDate.getMonth() + 1 === currentMonth && birthDate.getDate() === currentDay;
+    });
+
     // Buscar dados dos donos dos pets
-    const customerIds = [...new Set(pets.map((pet) => pet.custumerId))];
+    const customerIds = [...new Set(petsOfTheDay.map((pet) => pet.custumerId))];
     const petOwners = await Custumers.findAll({
       where: {
         id: customerIds,
         usersId: req.user.establishment,
       },
-      attributes: ["id", "name"],
+      attributes: ["id", "name", "phone"],
     });
 
     // Criar mapa de donos
     const ownerMap = {};
     petOwners.forEach((owner) => {
-      ownerMap[owner.id] = owner.name;
+      ownerMap[owner.id] = {
+        name: owner.name,
+        phone: owner.phone,
+      };
     });
 
     // Formatar dados dos pets
-    const formattedPets = pets.map((pet) => ({
+    const formattedPets = petsOfTheDay.map((pet) => ({
       id: pet.id,
       name: pet.name,
       birthDate: pet.birthdate,
@@ -469,7 +460,7 @@ router.get("/birthdays", auth, async (req, res) => {
     }));
 
     // Formatar dados dos clientes
-    const formattedCustomers = customers.map((customer) => ({
+    const formattedCustomers = customersOfTheDay.map((customer) => ({
       id: customer.id,
       name: customer.name,
       email: customer.email,
