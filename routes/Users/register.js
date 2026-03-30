@@ -4,6 +4,7 @@ import bcrypt from "bcryptjs";
 import Users from "../../models/Users.js";
 import Subscription from "../../models/Subscription.js";
 import EmailService from "../../service/email.js";
+import { ensureDefaultMedicalCatalog } from "../../service/defaultMedicalCatalog.js";
 
 const router = express.Router();
 
@@ -45,6 +46,8 @@ router.post("/register", async (req, res) => {
 
     userCreate.establishment = userCreate.id;
     await userCreate.save();
+
+    await ensureDefaultMedicalCatalog(userCreate.id);
 
     const trialStartDate = new Date();
     const trialEndDate = new Date();

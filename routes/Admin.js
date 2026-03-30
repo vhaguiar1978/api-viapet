@@ -20,6 +20,7 @@ import jwt from "jsonwebtoken";
 import BillingSettings from "../models/BillingSettings.js";
 import { createSubscriptionPreference } from "../service/mercadopago.js";
 import emailService from "../service/email.js";
+import { ensureDefaultMedicalCatalog } from "../service/defaultMedicalCatalog.js";
 const router = express.Router();
 
 async function getOrCreateAdminSettings() {
@@ -974,39 +975,7 @@ router.post("/admin/clients", authenticate, async (req, res) => {
       recoveryPassToken: firstAccess.token,
       timeRecoveryPass: firstAccess.expiresAt,
     });
-    // Criar produtos de teste
-    await Products.create({
-      name: "Creme Hidratante",
-      description: "Creme hidratante facial para todos os tipos de pele",
-      price: 89.9,
-      cost: 45.0,
-      stock: 10,
-      category: "Cosméticos",
-      establishment: newUser.id,
-    });
-
-    // Criar serviços de teste
-    await Services.create({
-      name: "Limpeza de Pele",
-      description: "Limpeza facial profunda com extração",
-      price: 120.0,
-      cost: 30.0,
-      duration: 60,
-      category: "Estética",
-      observation: "Necessário fazer higienização facial antes do procedimento",
-      establishment: newUser.id,
-    });
-
-    await Services.create({
-      name: "Consulta Dermatológica",
-      description: "Avaliação completa da pele com dermatologista",
-      price: 250.0,
-      cost: 0.0,
-      duration: 30,
-      category: "Clínica",
-      observation: "Trazer exames anteriores se houver",
-      establishment: newUser.id,
-    });
+    await ensureDefaultMedicalCatalog(newUser.id);
 
     // Criar configurações do estabelecimento com o mesmo ID do usuário
     await Settings.create({
