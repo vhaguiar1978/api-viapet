@@ -405,9 +405,7 @@ router.get("/birthdays", auth, async (req, res) => {
     const customers = await Custumers.findAll({
       where: {
         usersId: req.user.establishment,
-        birthDate: { [Op.ne]: null },
       },
-      attributes: ["id", "name", "email", "phone", "birthDate"],
       order: [["name", "ASC"]],
     });
 
@@ -415,19 +413,19 @@ router.get("/birthdays", auth, async (req, res) => {
     const pets = await Pets.findAll({
       where: {
         usersId: req.user.establishment,
-        birthdate: { [Op.ne]: null },
       },
-      attributes: ["id", "name", "birthdate", "custumerId"],
       order: [["name", "ASC"]],
     });
 
     const customersOfTheDay = customers.filter((customer) => {
-      const birthDate = customer.birthDate ? new Date(customer.birthDate) : null;
+      const sourceBirthDate = customer.birthDate || customer.birthdate || customer.dataValues?.birthDate || customer.dataValues?.birthdate;
+      const birthDate = sourceBirthDate ? new Date(sourceBirthDate) : null;
       return birthDate && birthDate.getMonth() + 1 === currentMonth && birthDate.getDate() === currentDay;
     });
 
     const petsOfTheDay = pets.filter((pet) => {
-      const birthDate = pet.birthdate ? new Date(pet.birthdate) : null;
+      const sourceBirthDate = pet.birthdate || pet.birthDate || pet.dataValues?.birthdate || pet.dataValues?.birthDate;
+      const birthDate = sourceBirthDate ? new Date(sourceBirthDate) : null;
       return birthDate && birthDate.getMonth() + 1 === currentMonth && birthDate.getDate() === currentDay;
     });
 
