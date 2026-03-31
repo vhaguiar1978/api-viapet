@@ -9,13 +9,26 @@ import validator from "validator";
 import Products from "../models/Products.js";
 import Services from "../models/Services.js";
 import Appointments from "../models/Appointments.js";
+import AppointmentItem from "../models/AppointmentItem.js";
+import AppointmentPayment from "../models/AppointmentPayment.js";
+import AppointmentStatusHistory from "../models/AppointmentStatusHistory.js";
 import Sales from "../models/Sales.js";
+import SaleItem from "../models/SaleItem.js";
 import Customers from "../models/Custumers.js";
+import Pets from "../models/Pets.js";
 import LoginHistory from "../models/LoginHistory.js";
 import Finances from "../models/Finance.js";
 import CrmAiSubscription from "../models/CrmAiSubscription.js";
+import CrmWhatsappMessage from "../models/CrmWhatsappMessage.js";
 import Subscription from "../models/Subscription.js";
 import PaymentHistory from "../models/PaymentHistory.js";
+import Drivers from "../models/Drivers.js";
+import Purchases from "../models/Purchases.js";
+import PurchaseItems from "../models/PurchaseItems.js";
+import ServiceCategories from "../models/ServiceCategories.js";
+import VaccinePlan from "../models/VaccinePlan.js";
+import FinancialRecords from "../models/FinancialRecords.js";
+import CashClosure from "../models/CashClosure.js";
 import jwt from "jsonwebtoken";
 import BillingSettings from "../models/BillingSettings.js";
 import { createSubscriptionPreference } from "../service/mercadopago.js";
@@ -1156,6 +1169,111 @@ router.post("/admin/clients/:id/reset-first-access", adminMiddleware, async (req
     console.error("Erro ao resetar primeiro acesso:", error);
     return res.status(500).json({
       message: "Erro ao resetar primeiro acesso",
+      error: error.message,
+    });
+  }
+});
+
+router.delete("/admin/clients/:id", adminMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user = await Users.findByPk(id);
+
+    if (!user) {
+      return res.status(404).json({
+        message: "Cliente nao encontrado",
+      });
+    }
+
+    if (user.role !== "proprietario") {
+      return res.status(400).json({
+        message: "Somente contas proprietarias podem ser excluidas por esta central.",
+      });
+    }
+
+    const employeeUsers = await Users.findAll({
+      where: { establishment: id },
+      attributes: ["id"],
+    });
+    const employeeIds = employeeUsers
+      .map((item) => String(item.id || ""))
+      .filter((employeeId) => employeeId && employeeId !== String(id));
+    const relatedUserIds = [String(id), ...employeeIds];
+    const transaction = await Users.sequelize.transaction();
+
+    try {
+      await Promise.all([
+        AppointmentStatusHistory.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
+        AppointmentPayment.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
+        AppointmentItem.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
+        SaleItem.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
+        PurchaseItems.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
+        CashClosure.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
+        FinancialRecords.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
+        CrmWhatsappMessage.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
+        PaymentHistory.destroy({ where: { user_id: { [Op.in]: relatedUserIds } }, transaction }),
+        CrmAiSubscription.destroy({ where: { user_id: { [Op.in]: relatedUserIds } }, transaction }),
+        Subscription.destroy({ where: { user_id: { [Op.in]: relatedUserIds } }, transaction }),
+        LoginHistory.destroy({ where: { userId: { [Op.in]: relatedUserIds } }, transaction }),
+        Finances.destroy({
+          where: {
+            [Op.or]: [
+              { usersId: { [Op.in]: relatedUserIds } },
+              { createdBy: { [Op.in]: relatedUserIds } },
+            ],
+          },
+          transaction,
+        }),
+        Appointments.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
+        Sales.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
+        Purchases.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
+        Pets.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
+        Customers.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
+        Drivers.destroy({
+          where: {
+            [Op.or]: [
+              { usersId: { [Op.in]: relatedUserIds } },
+              { establishment: id },
+            ],
+          },
+          transaction,
+        }),
+        VaccinePlan.destroy({
+          where: {
+            [Op.or]: [
+              { usersId: { [Op.in]: relatedUserIds } },
+              { establishment: id },
+            ],
+          },
+          transaction,
+        }),
+        ServiceCategories.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
+        Products.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
+        Services.destroy({ where: { establishment: id }, transaction }),
+        Settings.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
+      ]);
+
+      if (employeeIds.length) {
+        await Users.destroy({
+          where: { id: { [Op.in]: employeeIds } },
+          transaction,
+        });
+      }
+
+      await user.destroy({ transaction });
+      await transaction.commit();
+    } catch (deleteError) {
+      await transaction.rollback();
+      throw deleteError;
+    }
+
+    return res.json({
+      message: "Cliente e todos os dados relacionados excluidos com sucesso",
+    });
+  } catch (error) {
+    console.error("Erro ao excluir cliente:", error);
+    return res.status(500).json({
+      message: "Erro ao excluir cliente",
       error: error.message,
     });
   }
