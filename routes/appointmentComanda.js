@@ -343,7 +343,7 @@ router.post("/appointments/:id/payments", auth, async (req, res) => {
       paidAt,
     } = req.body;
 
-    if (!dueDate || !paymentMethod || !amount) {
+    if (!dueDate || !paymentMethod || amount == null || amount === "") {
       return res.status(400).json({
         message: "dueDate, paymentMethod e amount são obrigatórios",
       });
@@ -353,7 +353,21 @@ router.post("/appointments/:id/payments", auth, async (req, res) => {
       return res.status(400).json({ message: "Status de pagamento inválido" });
     }
 
-    const breakdown = calculateMachineFeeBreakdown(amount, feePercentage);
+    const normalizedAmount = toNumber(amount);
+
+    if (normalizedAmount <= 0) {
+      const summary = await syncAppointmentFinance(appointment.id);
+      return res.status(200).json({
+        message: "Pagamento sem valor ignorado com sucesso",
+        data: {
+          payment: null,
+          skipped: true,
+          summary,
+        },
+      });
+    }
+
+    const breakdown = calculateMachineFeeBreakdown(normalizedAmount, feePercentage);
 
     const payment = await AppointmentPayment.create({
       appointmentId: appointment.id,
