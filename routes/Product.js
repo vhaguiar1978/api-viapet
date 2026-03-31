@@ -1,8 +1,8 @@
 import express from "express";
+import { Op } from "sequelize";
 import Products from "../models/Products.js";
 import authenticate from "../middlewares/auth.js";
 import owner from "../middlewares/owner.js";
-import { Op } from "sequelize";
 
 const router = express.Router();
 
@@ -17,39 +17,37 @@ router.post("/addProduct", authenticate, owner, async (req, res) => {
       category,
       observation,
       barcode,
-      unit,
     } = req.body;
     const usersId = req.user.establishment;
+    const normalizedPrice = price == null || price === "" ? 0 : Number(price);
+    const normalizedStoke = stoke == null || stoke === "" ? 0 : Number(stoke);
 
-    // Validações
     if (!name || typeof name !== "string" || name.trim().length === 0) {
-      return res.status(400).json({ message: "Nome do produto é obrigatório" });
+      return res.status(400).json({ message: "Nome do produto e obrigatorio" });
     }
 
-    if (!price || isNaN(price) || price <= 0) {
-      return res.status(400).json({ message: "Preço inválido" });
+    if (Number.isNaN(normalizedPrice) || normalizedPrice < 0) {
+      return res.status(400).json({ message: "Preco invalido" });
     }
 
-    if (!stoke || !Number.isInteger(stoke) || stoke < 0) {
-      return res.status(400).json({ message: "Estoque inválido" });
+    if (!Number.isInteger(normalizedStoke) || normalizedStoke < 0) {
+      return res.status(400).json({ message: "Estoque invalido" });
     }
 
     if (typeof unitary !== "boolean") {
-      return res
-        .status(400)
-        .json({ message: "Campo unitário deve ser booleano" });
+      return res.status(400).json({ message: "Campo unitario deve ser booleano" });
     }
 
     if (!category) {
-      return res.status(400).json({ message: "Categoria é obrigatória" });
+      return res.status(400).json({ message: "Categoria e obrigatoria" });
     }
 
     const product = await Products.create({
       usersId,
       name: name.trim(),
       description: description?.trim(),
-      price,
-      stoke,
+      price: normalizedPrice,
+      stoke: normalizedStoke,
       unitary,
       category,
       observation: observation?.trim(),
@@ -62,9 +60,10 @@ router.post("/addProduct", authenticate, owner, async (req, res) => {
     });
   } catch (error) {
     console.error("Erro ao adicionar produto:", error);
-    return res
-      .status(500)
-      .json({ message: "Erro ao adicionar produto", error: error.message });
+    return res.status(500).json({
+      message: "Erro ao adicionar produto",
+      error: error.message,
+    });
   }
 });
 
@@ -85,48 +84,43 @@ router.put("/editProduct", authenticate, owner, async (req, res) => {
     } = req.body;
     const establishment = req.user.establishment;
 
-    // Buscar o produto
     const product = await Products.findOne({
       where: {
-        id: id,
+        id,
         usersId: establishment,
       },
     });
 
     if (!product) {
-      return res.status(404).json({ message: "Produto não encontrado" });
+      return res.status(404).json({ message: "Produto nao encontrado" });
     }
 
-    // Validações
     if (name && (typeof name !== "string" || name.trim().length === 0)) {
-      return res.status(400).json({ message: "Nome do produto inválido" });
+      return res.status(400).json({ message: "Nome do produto invalido" });
     }
 
-    if (price && (isNaN(price) || price <= 0)) {
-      return res.status(400).json({ message: "Preço inválido" });
+    if (price !== undefined && price !== null && price !== "" && (Number.isNaN(Number(price)) || Number(price) < 0)) {
+      return res.status(400).json({ message: "Preco invalido" });
     }
 
-    if (stoke && (!Number.isInteger(stoke) || stoke < 0)) {
-      return res.status(400).json({ message: "Estoque inválido" });
+    if (stoke !== undefined && stoke !== null && stoke !== "" && (!Number.isInteger(Number(stoke)) || Number(stoke) < 0)) {
+      return res.status(400).json({ message: "Estoque invalido" });
     }
 
     if (unitary !== undefined && typeof unitary !== "boolean") {
-      return res
-        .status(400)
-        .json({ message: "Campo unitário deve ser booleano" });
+      return res.status(400).json({ message: "Campo unitario deve ser booleano" });
     }
 
-    // Atualizar o produto
     await product.update({
       name: name?.trim() || product.name,
       description: description?.trim() || product.description,
-      price: price || product.price,
-      stoke: stoke || product.stoke,
+      price: price !== undefined && price !== null && price !== "" ? Number(price) : product.price,
+      stoke: stoke !== undefined && stoke !== null && stoke !== "" ? Number(stoke) : product.stoke,
       unitary: unitary !== undefined ? unitary : product.unitary,
       category: category || product.category,
       observation: observation?.trim() || product.observation,
       imageUrl: imageUrl || product.imageUrl,
-      cost: cost || product.cost,
+      cost: cost ?? product.cost,
       unit: unit || product.unit,
     });
 
@@ -136,9 +130,10 @@ router.put("/editProduct", authenticate, owner, async (req, res) => {
     });
   } catch (error) {
     console.error("Erro ao editar produto:", error);
-    return res
-      .status(500)
-      .json({ message: "Erro ao editar produto", error: error.message });
+    return res.status(500).json({
+      message: "Erro ao editar produto",
+      error: error.message,
+    });
   }
 });
 
@@ -149,26 +144,26 @@ router.get("/product/barcode/:barcode", authenticate, async (req, res) => {
 
     if (!barcode) {
       return res.status(400).json({
-        message: "Código de barras é obrigatório",
+        message: "Codigo de barras e obrigatorio",
       });
     }
 
     const product = await Products.findOne({
       where: {
-        barcode: barcode,
+        barcode,
         usersId: establishment,
       },
     });
 
     if (!product) {
       return res.status(404).json({
-        message: "Produto não encontrado",
+        message: "Produto nao encontrado",
       });
     }
 
     return res.status(200).json(product);
   } catch (error) {
-    console.error("Erro ao buscar produto por código de barras:", error);
+    console.error("Erro ao buscar produto por codigo de barras:", error);
     return res.status(500).json({
       message: "Erro ao buscar produto",
       error: error.message,
@@ -177,18 +172,16 @@ router.get("/product/barcode/:barcode", authenticate, async (req, res) => {
 });
 
 router.get("/products/search", authenticate, async (req, res) => {
-  // NOVA ROTA para busca de Produtos
   try {
-    const { term } = req.query; // Recebe o termo de busca da query string
+    const { term } = req.query;
     const establishment = req.user.establishment;
 
-    let whereClause = { usersId: establishment }; // Cláusula WHERE base para o estabelecimento
+    let whereClause = { usersId: establishment };
 
     if (term) {
-      // Se um termo de busca for fornecido
       whereClause = {
         ...whereClause,
-        name: { [Op.like]: `%${term}%` }, // Adiciona filtro por nome (case-insensitive)
+        name: { [Op.like]: `%${term}%` },
       };
     }
 
@@ -218,16 +211,13 @@ router.get("/products", authenticate, async (req, res) => {
       order: [["name", "ASC"]],
     });
 
-    if (!products || products.length === 0) {
-      return res.status(404).json({ message: "Nenhum produto encontrado" });
-    }
-
     return res.status(200).json(products);
   } catch (error) {
     console.error("Erro ao buscar produtos:", error);
-    return res
-      .status(500)
-      .json({ message: "Erro ao buscar produtos", error: error.message });
+    return res.status(500).json({
+      message: "Erro ao buscar produtos",
+      error: error.message,
+    });
   }
 });
 
@@ -238,31 +228,21 @@ router.post("/products/import", authenticate, async (req, res) => {
     if (!products || !Array.isArray(products)) {
       return res.status(400).json({
         success: false,
-        message: "Dados inválidos para importação",
+        message: "Dados invalidos para importacao",
       });
     }
 
-    // Função para processar o valor monetário
     const parseMoneyValue = (value) => {
       if (!value) return 0;
       if (typeof value === "number") return value;
-      return (
-        Number(
-          value
-            .toString()
-            .replace(/[^\d,.-]/g, "")
-            .replace(",", "."),
-        ) || 0
-      );
+      return Number(value.toString().replace(/[^\d,.-]/g, "").replace(",", ".")) || 0;
     };
 
-    // Função para processar o código de barras
     const parseBarcode = (barcode) => {
       if (!barcode) return "";
       return barcode.replace(/[\[\]]/g, "").trim();
     };
 
-    // Processa os produtos
     const processedProducts = products
       .map((product) => {
         try {
@@ -274,8 +254,8 @@ router.post("/products/import", authenticate, async (req, res) => {
             barcode: parseBarcode(product.Codigo_Barras),
             cost: parseMoneyValue(product.Custo),
             price: parseMoneyValue(product.Valor),
-            stoke: parseInt(product.Estoque) || 0,
-            unitary: true, // Define como padrão
+            stoke: parseInt(product.Estoque, 10) || 0,
+            unitary: true,
             description: "",
             observation: "",
           };
@@ -289,11 +269,10 @@ router.post("/products/import", authenticate, async (req, res) => {
     if (processedProducts.length === 0) {
       return res.status(400).json({
         success: false,
-        message: "Nenhum produto válido para importação",
+        message: "Nenhum produto valido para importacao",
       });
     }
 
-    // Importa os produtos
     const results = await Promise.allSettled(
       processedProducts.map((product) =>
         Products.create(product).catch((error) => {
@@ -303,10 +282,7 @@ router.post("/products/import", authenticate, async (req, res) => {
       ),
     );
 
-    // Conta sucessos e falhas
-    const imported = results.filter(
-      (r) => r.status === "fulfilled" && r.value,
-    ).length;
+    const imported = results.filter((result) => result.status === "fulfilled" && result.value).length;
     const failed = processedProducts.length - imported;
 
     return res.status(200).json({
@@ -338,17 +314,13 @@ router.delete("/deleteproduct", authenticate, owner, async (req, res) => {
 
     if (!product) {
       return res.status(404).json({
-        message: "Produto não encontrado",
+        message: "Produto nao encontrado",
       });
     }
 
-    // Verify if user has permission to delete this product
-    if (
-      product.usersId !== req.user.establishment &&
-      req.user.role !== "admin"
-    ) {
+    if (product.usersId !== req.user.establishment && req.user.role !== "admin") {
       return res.status(403).json({
-        message: "Você não tem permissão para deletar este produto",
+        message: "Voce nao tem permissao para deletar este produto",
       });
     }
 
@@ -365,4 +337,5 @@ router.delete("/deleteproduct", authenticate, owner, async (req, res) => {
     });
   }
 });
+
 export default router;
