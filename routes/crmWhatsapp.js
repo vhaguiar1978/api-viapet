@@ -13,6 +13,20 @@ function normalizePhone(value) {
   return digits.startsWith("55") ? digits : `55${digits}`;
 }
 
+function resolveWhatsappConfig(settings) {
+  const config = settings?.whatsappConnection || {};
+  return {
+    config,
+    phoneNumberId:
+      config.phoneNumberId || process.env.WHATSAPP_PHONE_NUMBER_ID || "",
+    businessAccountId:
+      config.businessAccountId || process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || "",
+    verifyToken:
+      config.verifyToken || process.env.WHATSAPP_VERIFY_TOKEN || "genius",
+    token: config.accessToken || process.env.WHATSAPP_TOKEN || "",
+  };
+}
+
 router.get("/crm-whatsapp/status", authenticate, async (req, res) => {
   try {
     const settings = await Settings.findOne({
@@ -20,7 +34,8 @@ router.get("/crm-whatsapp/status", authenticate, async (req, res) => {
       attributes: ["whatsappConnection"],
     });
 
-    const config = settings?.whatsappConnection || {};
+    const { config, phoneNumberId, businessAccountId, verifyToken, token } =
+      resolveWhatsappConfig(settings);
     const lastWebhookAt = config.lastWebhookAt || null;
     const recentMessages = await CrmWhatsappMessage.count({
       where: {
@@ -32,8 +47,8 @@ router.get("/crm-whatsapp/status", authenticate, async (req, res) => {
     });
 
     const isConfigured = Boolean(
-      config.phoneNumberId || process.env.WHATSAPP_PHONE_NUMBER_ID,
-    ) && Boolean(config.accessTokenConfigured || process.env.WHATSAPP_TOKEN);
+      phoneNumberId,
+    ) && Boolean(config.accessTokenConfigured || token);
 
     const isConnected = Boolean(
       lastWebhookAt &&
@@ -45,11 +60,13 @@ router.get("/crm-whatsapp/status", authenticate, async (req, res) => {
       data: {
         provider: config.provider || "WhatsApp Cloud API",
         configured: isConfigured,
+        phoneNumberId,
+        businessAccountId,
         accessNumber:
           config?.accountSettings?.crmAccessWhatsapp ||
           config?.accountSettings?.supportWhatsapp ||
           "",
-        webhookValidated: Boolean(config.verifyToken || process.env.WHATSAPP_VERIFY_TOKEN || "genius"),
+        webhookValidated: Boolean(verifyToken),
         connected: isConnected,
         lastWebhookAt,
         recentMessages,
@@ -115,14 +132,12 @@ router.post("/crm-whatsapp/send", authenticate, async (req, res) => {
       where: { usersId: req.user.establishment },
     });
 
-    const config = settings?.whatsappConnection || {};
-    const phoneNumberId =
-      config.phoneNumberId || process.env.WHATSAPP_PHONE_NUMBER_ID || "465822306605861";
-    const token = process.env.WHATSAPP_TOKEN || "";
+    const { config, phoneNumberId, token, verifyToken } =
+      resolveWhatsappConfig(settings);
 
-    if (!token) {
+    if (!phoneNumberId || !token) {
       return res.status(400).json({
-        message: "Token do WhatsApp nao configurado no servidor",
+        message: "WhatsApp Cloud API nao configurado",
       });
     }
 
@@ -174,10 +189,8 @@ router.post("/crm-whatsapp/send", authenticate, async (req, res) => {
         provider:
           settings.whatsappConnection?.provider || "WhatsApp Cloud API",
         phoneNumberId,
-        verifyToken:
-          settings.whatsappConnection?.verifyToken ||
-          process.env.WHATSAPP_VERIFY_TOKEN ||
-          "genius",
+        verifyToken,
+        accessToken: settings.whatsappConnection?.accessToken || token,
         accessTokenConfigured: true,
         lastOutboundAt: new Date().toISOString(),
       };
@@ -192,6 +205,59 @@ router.post("/crm-whatsapp/send", authenticate, async (req, res) => {
     console.error("Erro ao enviar mensagem do WhatsApp CRM:", error.response?.data || error);
     return res.status(500).json({
       message: error.response?.data?.error?.message || "Nao foi possivel enviar a mensagem pelo WhatsApp CRM",
+      error: error.message,
+    });
+  }
+});
+
+router.post("/crm-whatsapp/test-connection", authenticate, async (req, res) => {
+  try {
+    const settings = await Settings.findOne({
+      where: { usersId: req.user.establishment },
+      attributes: ["whatsappConnection"],
+    });
+
+    const { phoneNumberId, businessAccountId, token } =
+      resolveWhatsappConfig(settings);
+
+    if (!phoneNumberId || !token) {
+      return res.status(400).json({
+        message: "Preencha o Phone Number ID e o Access Token para testar a conexao",
+      });
+    }
+
+    const response = await axios.get(
+      `https://graph.facebook.com/v21.0/${phoneNumberId}`,
+      {
+        params: {
+          fields: "id,display_phone_number,verified_name,quality_rating",
+        },
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      },
+    );
+
+    return res.status(200).json({
+      message: "Conexao com a Meta validada com sucesso",
+      data: {
+        phoneNumberId,
+        businessAccountId,
+        displayPhoneNumber: response?.data?.display_phone_number || "",
+        verifiedName: response?.data?.verified_name || "",
+        qualityRating: response?.data?.quality_rating || "",
+        raw: response?.data || {},
+      },
+    });
+  } catch (error) {
+    console.error(
+      "Erro ao testar conexao do WhatsApp CRM:",
+      error.response?.data || error,
+    );
+    return res.status(500).json({
+      message:
+        error.response?.data?.error?.message ||
+        "Nao foi possivel validar a conexao com a Meta",
       error: error.message,
     });
   }

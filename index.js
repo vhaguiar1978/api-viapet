@@ -34,6 +34,7 @@ import serviceRoutes from "./routes/Service.js";
 import subscriptionsRouter from "./routes/subscriptions.js";
 import crmAiRouter from "./routes/crmAi.js";
 import crmWhatsappRouter from "./routes/crmWhatsapp.js";
+import crmConversationsRouter from "./routes/crmConversations.js";
 import FilterRouter from "./routes/filter.routes.js";
 import appointmentComandaRouter from "./routes/appointmentComanda.js";
 import vaccinePlansRouter from "./routes/vaccinePlans.js";
@@ -53,6 +54,9 @@ app.use(
     credentials: true, // Keep or remove as needed for testing
   })
 );
+app.get("/health", (_req, res) => {
+  res.status(200).json({ ok: true, service: "api-viapet" });
+});
 app.use("/uploads", express.static("uploads"));
 app.use(loginRouter);
 app.use(loginFuncRouter);
@@ -82,6 +86,7 @@ app.use(bannersRouter);
 app.use("/api/subscriptions", subscriptionsRouter);
 app.use("/api/crm-ai", crmAiRouter);
 app.use(crmWhatsappRouter);
+app.use(crmConversationsRouter);
 app.use(FilterRouter);
 app.use("/services", serviceRoutes);
 app.use(appointmentComandaRouter);

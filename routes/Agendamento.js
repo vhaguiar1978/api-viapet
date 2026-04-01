@@ -610,7 +610,10 @@ router.put("/appointments/:id", auth, async (req, res) => {
   try {
     const { id } = req.params;
     const {
+      customerId,
+      petId,
       serviceId,
+      type,
       responsibleId,
       date,
       time,
@@ -624,10 +627,9 @@ router.put("/appointments/:id", auth, async (req, res) => {
       tertiaryServiceId,
     } = req.body;
 
-    console.log("PUT /appointments/:id - Request Params:", req.params); // LOG PARAMS
-    console.log("PUT /appointments/:id - Request Body:", req.body); // LOG BODY
+    console.log("PUT /appointments/:id - Request Params:", req.params);
+    console.log("PUT /appointments/:id - Request Body:", req.body);
 
-    // Buscar o agendamento
     const appointment = await Appointment.findOne({
       where: {
         id,
@@ -636,16 +638,16 @@ router.put("/appointments/:id", auth, async (req, res) => {
     });
 
     if (!appointment) {
-      return res.status(404).json({ message: "Agendamento não encontrado" });
+      return res.status(404).json({ message: "Agendamento nao encontrado" });
     }
 
-    // Buscar serviços para calcular o valor total
+    const resolvedServiceId = serviceId || appointment.serviceId;
     const mainService = await Services.findOne({
       where: {
-        id: serviceId || appointment.serviceId,
+        id: resolvedServiceId,
         establishment: req.user.establishment,
       },
-    }); // Mantém o || aqui para evitar erro se serviceId não for fornecido em criação
+    });
     let totalAmount = Number(mainService?.price || 0);
 
     if (secondaryServiceId) {
@@ -673,31 +675,37 @@ router.put("/appointments/:id", auth, async (req, res) => {
     }
 
     const updateData = {
-      // Crie um objeto para os dados de atualização
-      responsibleId,
-      date,
-      time,
-      observation,
-      status,
+      customerId: customerId || appointment.customerId,
+      petId: petId || appointment.petId,
+      responsibleId:
+        responsibleId !== undefined ? responsibleId : appointment.responsibleId,
+      date: date || appointment.date,
+      time: time || appointment.time,
+      observation:
+        observation !== undefined ? observation : appointment.observation,
+      status: status || appointment.status,
+      type: type || appointment.type,
       instagram: instagram !== undefined ? instagram : appointment.instagram,
       facebook: facebook !== undefined ? facebook : appointment.facebook,
       whatsapp: whatsapp !== undefined ? whatsapp : appointment.whatsapp,
       tiktok: tiktok !== undefined ? tiktok : appointment.tiktok,
-      serviceId: serviceId, // USAR DIRETAMENTE do req.body (SEM ||)
-      secondaryServiceId: secondaryServiceId, // USAR DIRETAMENTE do req.body (SEM ||)
-      tertiaryServiceId: tertiaryServiceId, // USAR DIRETAMENTE do req.body (SEM ||)
+      serviceId: resolvedServiceId,
+      secondaryServiceId:
+        secondaryServiceId !== undefined
+          ? secondaryServiceId
+          : appointment.secondaryServiceId,
+      tertiaryServiceId:
+        tertiaryServiceId !== undefined
+          ? tertiaryServiceId
+          : appointment.tertiaryServiceId,
     };
 
-    console.log("PUT /appointments/:id - Update Data:", updateData); // LOG Dados que serão usados no Update
+    console.log("PUT /appointments/:id - Update Data:", updateData);
 
-    // Atualizar o agendamento
     await Appointment.update(updateData, {
       where: { id: appointment.id },
     });
 
-    console.log("PUT /appointments/:id - Appointment.update DONE"); // LOG após update
-
-    // Atualizar a transação financeira
     if (appointment.financeId) {
       await Finance.update(
         {
@@ -710,7 +718,6 @@ router.put("/appointments/:id", auth, async (req, res) => {
       );
     }
 
-    // Buscar o agendamento atualizado com todas as informações
     const updatedAppointment = await Appointment.findByPk(id);
     const pet = await Pets.findByPk(updatedAppointment.petId);
     const customer = await Custumers.findByPk(updatedAppointment.customerId);
@@ -738,17 +745,14 @@ router.put("/appointments/:id", auth, async (req, res) => {
       Pet: pet,
       Custumer: customer,
       Service: service,
-      responsible: responsible,
-      finance: finance,
+      responsible,
+      finance,
       secondaryService,
       tertiaryService,
       totalAmount,
     };
 
-    console.log(
-      "PUT /appointments/:id - Response Data:",
-      appointmentWithDetails,
-    ); // LOG Response Data
+    console.log("PUT /appointments/:id - Response Data:", appointmentWithDetails);
 
     return res.status(200).json({
       message: "Agendamento atualizado com sucesso",
@@ -756,7 +760,7 @@ router.put("/appointments/:id", auth, async (req, res) => {
     });
   } catch (error) {
     console.error("Erro ao atualizar agendamento:", error);
-    console.error("PUT /appointments/:id - Error Details:", error); // LOG Erro Completo
+    console.error("PUT /appointments/:id - Error Details:", error);
     return res.status(500).json({
       message: "Erro ao atualizar agendamento",
       error: error.message,

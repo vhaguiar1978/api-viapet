@@ -12,6 +12,9 @@ import AppointmentItem from "./AppointmentItem.js";
 import AppointmentPayment from "./AppointmentPayment.js";
 import AppointmentStatusHistory from "./AppointmentStatusHistory.js";
 import Products from "./Products.js";
+import CrmConversation from "./CrmConversation.js";
+import CrmConversationMessage from "./CrmConversationMessage.js";
+import CrmAiActionLog from "./CrmAiActionLog.js";
 
 // Define as associações
 export function setupAssociations() {
@@ -92,5 +95,65 @@ export function setupAssociations() {
   Users.hasMany(PaymentHistory, {
     foreignKey: "user_id",
     as: "paymentHistory"
+  });
+
+  // CRM Conversations
+  CrmConversation.belongsTo(Custumers, {
+    foreignKey: "customerId",
+    as: "customer",
+  });
+  CrmConversation.belongsTo(Pets, {
+    foreignKey: "petId",
+    as: "pet",
+  });
+  CrmConversation.belongsTo(Users, {
+    foreignKey: "assignedUserId",
+    as: "assignedUser",
+  });
+  CrmConversation.hasMany(CrmConversationMessage, {
+    foreignKey: "conversationId",
+    as: "messages",
+  });
+  CrmConversation.hasMany(CrmAiActionLog, {
+    foreignKey: "conversationId",
+    as: "aiLogs",
+  });
+
+  CrmConversationMessage.belongsTo(CrmConversation, {
+    foreignKey: "conversationId",
+    as: "conversation",
+  });
+  CrmConversationMessage.belongsTo(Custumers, {
+    foreignKey: "customerId",
+    as: "customer",
+  });
+  CrmConversationMessage.belongsTo(Pets, {
+    foreignKey: "petId",
+    as: "pet",
+  });
+  CrmConversationMessage.belongsTo(Users, {
+    foreignKey: "authorUserId",
+    as: "authorUser",
+  });
+
+  CrmAiActionLog.belongsTo(CrmConversation, {
+    foreignKey: "conversationId",
+    as: "conversation",
+  });
+  CrmAiActionLog.belongsTo(Custumers, {
+    foreignKey: "customerId",
+    as: "customer",
+  });
+  CrmAiActionLog.belongsTo(Pets, {
+    foreignKey: "petId",
+    as: "pet",
+  });
+  CrmAiActionLog.belongsTo(Appointment, {
+    foreignKey: "appointmentId",
+    as: "appointment",
+  });
+  CrmAiActionLog.belongsTo(Users, {
+    foreignKey: "authorUserId",
+    as: "authorUser",
   });
 }

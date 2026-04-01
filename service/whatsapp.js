@@ -8,6 +8,8 @@ import Services from "../models/Services.js";
 import Drivers from "../models/Drivers.js";
 import Users from "../models/Users.js";
 import CrmWhatsappMessage from "../models/CrmWhatsappMessage.js";
+import CrmConversation from "../models/CrmConversation.js";
+import CrmConversationMessage from "../models/CrmConversationMessage.js";
 const router = express.Router();
 const WHATSAPP_API_URL =
   "https://graph.facebook.com/v21.0/465822306605861/messages";
@@ -760,6 +762,199 @@ export async function enviarMensagemAniversarioCliente() {
 // Configura o cronjob para rodar todos os dias às 8:00
 import cron from "node-cron";
 
+function normalizeWhatsappDigits(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  if (!digits) return "";
+  return digits.startsWith("55") ? digits : `55${digits}`;
+}
+
+function buildPhoneVariations(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  if (!digits) return [];
+
+  const withCountry = normalizeWhatsappDigits(digits);
+  const withoutCountry = withCountry.startsWith("55")
+    ? withCountry.slice(2)
+    : withCountry;
+  const withNinthDigit = withoutCountry.replace(/^(\d{2})(\d{8})$/, "$19$2");
+  const withoutNinthDigit = withoutCountry.replace(/^(\d{2})9(\d{8})$/, "$1$2");
+
+  return Array.from(
+    new Set(
+      [
+        digits,
+        withCountry,
+        withoutCountry,
+        withNinthDigit,
+        withoutNinthDigit,
+        normalizeWhatsappDigits(withNinthDigit),
+        normalizeWhatsappDigits(withoutNinthDigit),
+      ].filter(Boolean),
+    ),
+  );
+}
+
+function extractInboundMessageBody(message = {}) {
+  if (message?.text?.body) return message.text.body;
+  if (message?.image?.caption) return message.image.caption;
+  if (message?.video?.caption) return message.video.caption;
+  if (message?.document?.caption) return message.document.caption;
+  if (message?.button?.text) return message.button.text;
+  if (message?.interactive?.button_reply?.title) {
+    return message.interactive.button_reply.title;
+  }
+  if (message?.interactive?.list_reply?.title) {
+    return message.interactive.list_reply.title;
+  }
+  return `[${message?.type || "mensagem"}]`;
+}
+
+async function resolveWebhookEstablishmentId(phoneNumberId) {
+  if (!phoneNumberId) return null;
+
+  const settingsList = await Settings.findAll({
+    attributes: ["usersId", "whatsappConnection"],
+  });
+
+  const match = settingsList.find(
+    (item) =>
+      String(item?.whatsappConnection?.phoneNumberId || "").trim() ===
+      String(phoneNumberId).trim(),
+  );
+
+  return match?.usersId || null;
+}
+
+async function syncInboundConversation({
+  customer = null,
+  usersId = null,
+  from = "",
+  message = {},
+  body = "",
+  contactName = "",
+  payload = {},
+}) {
+  const resolvedUsersId = customer?.usersId || usersId || null;
+  if (!resolvedUsersId) {
+    return null;
+  }
+
+  const normalizedPhone = normalizeWhatsappDigits(from);
+  const pet = customer?.id
+    ? await Pets.findOne({
+        where: {
+          usersId: resolvedUsersId,
+          custumerId: customer.id,
+        },
+        order: [
+          ["updatedAt", "DESC"],
+          ["createdAt", "DESC"],
+        ],
+      })
+    : null;
+
+  const existingConversation = await CrmConversation.findOne({
+    where: {
+      usersId: resolvedUsersId,
+      isArchived: false,
+      [Op.or]: [
+        ...(customer?.id ? [{ customerId: customer.id }] : []),
+        ...(normalizedPhone ? [{ phone: normalizedPhone }] : []),
+      ],
+    },
+    order: [
+      ["lastMessageAt", "DESC"],
+      ["updatedAt", "DESC"],
+    ],
+  });
+
+  if (message?.id && existingConversation) {
+    const duplicateMessage = await CrmConversationMessage.findOne({
+      where: {
+        usersId: resolvedUsersId,
+        conversationId: existingConversation.id,
+        providerMessageId: message.id,
+      },
+    });
+
+    if (duplicateMessage) {
+      return existingConversation;
+    }
+  }
+
+  const now = new Date();
+  const title =
+    customer?.name ||
+    contactName ||
+    normalizedPhone ||
+    "Nova conversa";
+  const preview = body || `[${message?.type || "mensagem"}]`;
+
+  const conversation = existingConversation
+    ? await existingConversation.update({
+        customerId: customer?.id || existingConversation.customerId,
+        petId: pet?.id || existingConversation.petId,
+        customerName: customer?.name || existingConversation.customerName,
+        petName: pet?.name || existingConversation.petName,
+        phone: normalizedPhone || existingConversation.phone,
+        title: existingConversation.title || title,
+        source: "whatsapp-webhook",
+        channel: "whatsapp",
+        lastMessagePreview: preview,
+        lastMessageAt: now,
+        lastInboundAt: now,
+        unreadCount: Number(existingConversation.unreadCount || 0) + 1,
+        status:
+          String(existingConversation.status || "").toLowerCase() === "closed"
+            ? "pending"
+            : existingConversation.status || "pending",
+        metadata: {
+          ...(existingConversation.metadata || {}),
+          lastInboundSource: "webhook",
+          lastInboundMessageId: message?.id || null,
+          lastInboundMessageType: message?.type || "text",
+        },
+      })
+    : await CrmConversation.create({
+        usersId: resolvedUsersId,
+        customerId: customer?.id || null,
+        petId: pet?.id || null,
+        channel: "whatsapp",
+        status: "pending",
+        source: "whatsapp-webhook",
+        title,
+        customerName: customer?.name || null,
+        petName: pet?.name || null,
+        phone: normalizedPhone,
+        lastMessagePreview: preview,
+        lastMessageAt: now,
+        lastInboundAt: now,
+        unreadCount: 1,
+        metadata: {
+          lastInboundSource: "webhook",
+          lastInboundMessageId: message?.id || null,
+          lastInboundMessageType: message?.type || "text",
+        },
+      });
+
+  await CrmConversationMessage.create({
+    conversationId: conversation.id,
+    usersId: resolvedUsersId,
+    customerId: customer?.id || null,
+    petId: pet?.id || null,
+    direction: "inbound",
+    channel: "whatsapp",
+    messageType: message?.type || "text",
+    body: body || null,
+    providerMessageId: message?.id || null,
+    status: "received",
+    receivedAt: now,
+    payload,
+  });
+
+  return conversation;
+}
+
 // Agenda as tarefas para rodar às 8:00 todos os dias
 cron.schedule(
   "0 8 * * *",
@@ -787,8 +982,17 @@ const webhookHandler = async (req, res) => {
   try {
     // Verifica a chave de segurança
     const token = req.query["hub.verify_token"];
+    const envVerifyToken = process.env.WHATSAPP_VERIFY_TOKEN || "genius";
+    const settingsList = await Settings.findAll({
+      attributes: ["whatsappConnection"],
+    }).catch(() => []);
+    const settingsMatch = (settingsList || []).some(
+      (item) =>
+        String(item?.whatsappConnection?.verifyToken || "").trim() ===
+        String(token || "").trim(),
+    );
 
-    if (token === "genius") {
+    if (token === envVerifyToken || settingsMatch) {
       // Responde ao desafio de verificação do WhatsApp
       const challenge = req.query["hub.challenge"];
       return res.status(200).send(challenge);
@@ -830,7 +1034,9 @@ router.post("/webhook", async (req, res) => {
     const message = value.messages[0];
     const phone_number_id = value.metadata.phone_number_id;
     const from = message.from;
-    const msg_body = message.text?.body;
+    const contactName = value.contacts?.[0]?.profile?.name || "";
+    const msg_body = extractInboundMessageBody(message);
+    const resolvedUsersId = await resolveWebhookEstablishmentId(phone_number_id);
 
     // Verifica se é uma mensagem inicial do cliente
     const isInitialMessage = message.type === "text" && !message.context;
@@ -882,6 +1088,15 @@ router.post("/webhook", async (req, res) => {
           whatsappMessageId: message.id || null,
           status: "received",
           receivedAt: new Date(),
+          payload: req.body,
+        });
+
+        await syncInboundConversation({
+          customer,
+          from,
+          message,
+          body: msg_body || "",
+          contactName,
           payload: req.body,
         });
 
@@ -1009,7 +1224,25 @@ router.post("/webhook", async (req, res) => {
         }
       } else {
         console.log("Nenhum cliente encontrado para o número:", from);
+
+        await syncInboundConversation({
+          usersId: resolvedUsersId,
+          from,
+          message,
+          body: msg_body || "",
+          contactName,
+          payload: req.body,
+        });
       }
+    } else {
+      await syncInboundConversation({
+        usersId: resolvedUsersId,
+        from,
+        message,
+        body: msg_body || "",
+        contactName,
+        payload: req.body,
+      });
     }
 
     res.sendStatus(200);

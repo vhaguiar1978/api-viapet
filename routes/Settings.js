@@ -581,7 +581,13 @@ router.get("/whatsapp-crm-config", authenticate, async (req, res) => {
       businessAccountId:
         stored.businessAccountId || process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || "",
       verifyToken: stored.verifyToken || process.env.WHATSAPP_VERIFY_TOKEN || "genius",
+      accessTokenPreview: stored.accessToken
+        ? `${String(stored.accessToken).slice(0, 8)}...${String(stored.accessToken).slice(-4)}`
+        : process.env.WHATSAPP_TOKEN
+          ? "Configurado no servidor"
+          : "",
       accessTokenConfigured: Boolean(
+        stored.accessToken ||
         stored.accessTokenConfigured ||
           process.env.WHATSAPP_TOKEN
       ),
@@ -615,6 +621,7 @@ router.post("/whatsapp-crm-config", authenticate, async (req, res) => {
       phoneNumberId,
       businessAccountId,
       verifyToken,
+      accessToken,
       accessTokenConfigured,
       defaultCountryCode,
     } = req.body || {};
@@ -635,7 +642,15 @@ router.post("/whatsapp-crm-config", authenticate, async (req, res) => {
       phoneNumberId: phoneNumberId || "",
       businessAccountId: businessAccountId || "",
       verifyToken: verifyToken || "genius",
-      accessTokenConfigured: Boolean(accessTokenConfigured),
+      accessToken:
+        typeof accessToken === "string" && accessToken.trim()
+          ? accessToken.trim()
+          : settings.whatsappConnection?.accessToken || "",
+      accessTokenConfigured: Boolean(
+        (typeof accessToken === "string" && accessToken.trim()) ||
+          settings.whatsappConnection?.accessToken ||
+          accessTokenConfigured
+      ),
       defaultCountryCode: defaultCountryCode || "55",
       updatedAt: new Date().toISOString(),
     };
