@@ -28,6 +28,7 @@ router.post("/appointments", auth, async (req, res) => {
       customerId,
       serviceId,
       responsibleId,
+      sellerName,
       type,
       date,
       time,
@@ -129,6 +130,7 @@ router.post("/appointments", auth, async (req, res) => {
       customerId,
       serviceId,
       responsibleId,
+      sellerName,
       type,
       date,
       time,
@@ -615,6 +617,7 @@ router.put("/appointments/:id", auth, async (req, res) => {
       serviceId,
       type,
       responsibleId,
+      sellerName,
       date,
       time,
       observation,
@@ -679,6 +682,8 @@ router.put("/appointments/:id", auth, async (req, res) => {
       petId: petId || appointment.petId,
       responsibleId:
         responsibleId !== undefined ? responsibleId : appointment.responsibleId,
+      sellerName:
+        sellerName !== undefined ? sellerName : appointment.sellerName,
       date: date || appointment.date,
       time: time || appointment.time,
       observation:
@@ -904,6 +909,7 @@ router.post("/appointments/package", auth, async (req, res) => {
       dates,
       observation,
       responsibleId,
+      sellerName,
       type,
     } = req.body;
 
@@ -1022,6 +1028,7 @@ router.post("/appointments/package", auth, async (req, res) => {
         secondaryServiceId,
         tertiaryServiceId,
         responsibleId,
+        sellerName,
         type,
         date,
         time,

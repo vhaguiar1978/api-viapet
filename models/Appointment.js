@@ -28,7 +28,12 @@ const Appointment = sequelize.define(
     },
     responsibleId: {
       type: DataTypes.UUID,
-      comment: "ID do funcionário responsável pelo atendimento",
+      comment: "ID do funcionario responsavel pelo atendimento",
+    },
+    sellerName: {
+      type: DataTypes.STRING,
+      allowNull: true,
+      comment: "Nome livre do responsavel exibido na agenda",
     },
     type: {
       type: DataTypes.STRING,
@@ -85,7 +90,7 @@ const Appointment = sequelize.define(
     financeId: {
       type: DataTypes.INTEGER,
       allowNull: true,
-      comment: "ID da transação financeira associada",
+      comment: "ID da transacao financeira associada",
     },
     package: {
       type: DataTypes.BOOLEAN,
@@ -95,12 +100,12 @@ const Appointment = sequelize.define(
     packageNumber: {
       type: DataTypes.INTEGER,
       allowNull: true,
-      comment: "Número do pacote",
+      comment: "Numero do pacote",
     },
     packageMax: {
       type: DataTypes.INTEGER,
       allowNull: true,
-      comment: "Número máximo de pacotes",
+      comment: "Numero maximo de pacotes",
     },
     driverId: {
       type: DataTypes.UUID,
@@ -112,18 +117,16 @@ const Appointment = sequelize.define(
       defaultValue: false,
     },
     queueInternacao: {
-      // Nova coluna para fila de internação
       type: DataTypes.BOOLEAN,
       allowNull: true,
       defaultValue: false,
-      comment: "Indica se o agendamento está na fila de internação",
+      comment: "Indica se o agendamento esta na fila de internacao",
     },
     queueExame: {
-      // Nova coluna para fila de exame
       type: DataTypes.BOOLEAN,
       allowNull: true,
       defaultValue: false,
-      comment: "Indica se o agendamento está na fila de exame",
+      comment: "Indica se o agendamento esta na fila de exame",
     },
     queueTime: {
       type: DataTypes.DATE,
@@ -140,7 +143,6 @@ const Appointment = sequelize.define(
   },
 );
 
-// Adiciona a associação com o modelo Finance
 Appointment.belongsTo(Finance, {
   foreignKey: "financeId",
   as: "finance",
