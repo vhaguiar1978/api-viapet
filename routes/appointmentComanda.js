@@ -100,6 +100,8 @@ router.post("/appointments/:id/items", auth, async (req, res) => {
     }
 
     let finalDescription = description;
+    const hasExplicitUnitPrice =
+      unitPrice !== undefined && unitPrice !== null && String(unitPrice).trim() !== "";
     let finalUnitPrice = toNumber(unitPrice);
     let resolvedServiceId = serviceId;
     let resolvedProductId = productId;
@@ -124,7 +126,7 @@ router.post("/appointments/:id/items", auth, async (req, res) => {
       }
 
       finalDescription = finalDescription || service.name;
-      finalUnitPrice = finalUnitPrice || toNumber(service.price);
+      finalUnitPrice = hasExplicitUnitPrice ? finalUnitPrice : toNumber(service.price);
     }
 
     if (type === "product") {
@@ -144,10 +146,10 @@ router.post("/appointments/:id/items", auth, async (req, res) => {
       }
 
       finalDescription = finalDescription || product.name;
-      finalUnitPrice = finalUnitPrice || toNumber(product.price);
+      finalUnitPrice = hasExplicitUnitPrice ? finalUnitPrice : toNumber(product.price);
     }
 
-    if (type === "manual" && (!finalDescription || !finalUnitPrice)) {
+    if (type === "manual" && (!finalDescription || !hasExplicitUnitPrice)) {
       return res.status(400).json({
         message: "Itens manuais exigem descrição e valor unitário",
       });
