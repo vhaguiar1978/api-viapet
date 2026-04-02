@@ -1132,6 +1132,58 @@ function computeAccess(subscription) {
   };
 }
 
+async function getCrmAiAccess(usersId) {
+  const subscription = await CrmAiSubscription.findOne({
+    where: { user_id: usersId },
+    order: [["created_at", "DESC"]],
+  });
+
+  if (!subscription) {
+    return {
+      subscription: null,
+      access: { canAccess: false, status: "no_subscription" },
+    };
+  }
+
+  const access = computeAccess(subscription);
+  if (access.status === "expired" && subscription.status !== "expired") {
+    await subscription.update({ status: "expired" });
+  }
+
+  return {
+    subscription,
+    access,
+  };
+}
+
+async function requireCrmAiAccess(usersId, res) {
+  const { subscription, access } = await getCrmAiAccess(usersId);
+  if (access.canAccess) {
+    return { allowed: true, subscription, access };
+  }
+
+  res.status(403).json({
+    success: false,
+    error: "A IA CRM nao esta liberada para esta conta.",
+    data: {
+      canAccess: false,
+      status: access.status,
+      subscription: subscription
+        ? {
+            id: subscription.id,
+            status: access.status,
+            amount: Number(subscription.amount || 0),
+            currency: subscription.currency,
+            payment_status: subscription.payment_status,
+            next_billing_date: subscription.next_billing_date,
+          }
+        : null,
+    },
+  });
+
+  return { allowed: false, subscription, access };
+}
+
 router.get("/plans", (req, res) => {
   return res.json({
     success: true,
@@ -1141,10 +1193,8 @@ router.get("/plans", (req, res) => {
 
 router.get("/subscription", auth, async (req, res) => {
   try {
-    const subscription = await CrmAiSubscription.findOne({
-      where: { user_id: req.user.id },
-      order: [["created_at", "DESC"]],
-    });
+    const usersId = getEstablishmentId(req);
+    const { subscription, access } = await getCrmAiAccess(usersId);
 
     if (!subscription) {
       return res.json({
@@ -1153,11 +1203,6 @@ router.get("/subscription", auth, async (req, res) => {
         canAccess: false,
         subscription: null,
       });
-    }
-
-    const access = computeAccess(subscription);
-    if (access.status === "expired" && subscription.status !== "expired") {
-      await subscription.update({ status: "expired" });
     }
 
     return res.json({
@@ -1272,6 +1317,8 @@ router.post("/control/evaluate", auth, async (req, res) => {
 router.post("/assistant/schedule-bath", auth, async (req, res) => {
   try {
     const usersId = getEstablishmentId(req);
+    const crmAiAccess = await requireCrmAiAccess(usersId, res);
+    if (!crmAiAccess.allowed) return;
     const {
       conversationId,
       customerId,
@@ -1652,6 +1699,8 @@ router.post("/assistant/schedule-bath", auth, async (req, res) => {
 router.post("/assistant/upsert-contact", auth, async (req, res) => {
   try {
     const usersId = getEstablishmentId(req);
+    const crmAiAccess = await requireCrmAiAccess(usersId, res);
+    if (!crmAiAccess.allowed) return;
     const { conversationId, customerDraft, petDraft, execute } = req.body || {};
     const { control } = await getOrCreateControlSettings(usersId);
     const conversation = await resolveConversationContext(usersId, conversationId);
@@ -1870,6 +1919,8 @@ router.post("/assistant/upsert-contact", auth, async (req, res) => {
 router.post("/assistant/reschedule-appointment", auth, async (req, res) => {
   try {
     const usersId = getEstablishmentId(req);
+    const crmAiAccess = await requireCrmAiAccess(usersId, res);
+    if (!crmAiAccess.allowed) return;
     const {
       conversationId,
       appointmentId,
@@ -2122,6 +2173,8 @@ router.post("/assistant/reschedule-appointment", auth, async (req, res) => {
 router.post("/assistant/cancel-appointment", auth, async (req, res) => {
   try {
     const usersId = getEstablishmentId(req);
+    const crmAiAccess = await requireCrmAiAccess(usersId, res);
+    if (!crmAiAccess.allowed) return;
     const {
       conversationId,
       appointmentId,
@@ -2290,6 +2343,8 @@ router.post("/assistant/cancel-appointment", auth, async (req, res) => {
 router.post("/assistant/answer", auth, async (req, res) => {
   try {
     const usersId = getEstablishmentId(req);
+    const crmAiAccess = await requireCrmAiAccess(usersId, res);
+    if (!crmAiAccess.allowed) return;
     const {
       conversationId,
       customerId,
@@ -2367,6 +2422,8 @@ router.post("/assistant/answer", auth, async (req, res) => {
 router.get("/assistant/logs", auth, async (req, res) => {
   try {
     const usersId = getEstablishmentId(req);
+    const crmAiAccess = await requireCrmAiAccess(usersId, res);
+    if (!crmAiAccess.allowed) return;
     const where = { usersId };
 
     if (req.query.conversationId) {
