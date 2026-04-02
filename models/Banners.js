@@ -13,6 +13,10 @@ const Banners = sequelize.define(
       type: DataTypes.STRING,
       allowNull: false,
     },
+    imageData: {
+      type: DataTypes.TEXT("long"),
+      allowNull: true,
+    },
     link: {
       type: DataTypes.STRING,
       allowNull: true,

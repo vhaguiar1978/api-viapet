@@ -1,5 +1,6 @@
 import express from "express";
 import { DataTypes } from "sequelize";
+import { readFile } from "fs/promises";
 import Banners from "../models/Banners.js";
 import upload from "../middlewares/fileImage.js";
 import authenticate from "../middlewares/auth.js";
@@ -19,6 +20,7 @@ async function ensureBannerSchema() {
     ["isActive", { type: "BOOLEAN", defaultValue: true }],
     ["reminderDays", { type: "INTEGER", defaultValue: 7 }],
     ["notes", { type: "TEXT", allowNull: true }],
+    ["imageData", { type: "TEXT", allowNull: true }],
   ];
 
   for (const [name, config] of columnsToAdd) {
@@ -35,6 +37,13 @@ async function ensureBannerSchema() {
 function buildBannerUrl(req, file) {
   if (!file) return null;
   return `${process.env.API_URL || `${req.protocol}://${req.get("host")}`}/uploads/${file.filename}`;
+}
+
+async function buildBannerImageData(file) {
+  if (!file?.path) return null;
+
+  const content = await readFile(file.path);
+  return `data:${file.mimetype || "image/png"};base64,${content.toString("base64")}`;
 }
 
 function getBannerStage(banner) {
@@ -127,9 +136,11 @@ router.post("/banners", authenticate, upload.single("image"), async (req, res) =
 
     const { link, order, title, placement, startDate, endDate, isActive, reminderDays, notes } = req.body;
     const url = buildBannerUrl(req, req.file);
+    const imageData = await buildBannerImageData(req.file);
 
     const banner = await Banners.create({
       url,
+      imageData,
       link,
       order: Number(order || 0),
       title: title || "Banner agenda",
@@ -173,6 +184,7 @@ router.put("/banners/:id", authenticate, upload.single("image"), async (req, res
 
     if (req.file) {
       updateData.url = buildBannerUrl(req, req.file);
+      updateData.imageData = await buildBannerImageData(req.file);
     }
 
     await banner.update(updateData);
