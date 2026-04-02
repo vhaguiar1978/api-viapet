@@ -1,5 +1,6 @@
 import express from "express";
 import bodyParser from "body-parser";
+import { DataTypes } from "sequelize";
 import "./config/env.js"; // Carregar configurações de ambiente
 import sequelize from "./database/config.js";
 import loginRouter from "./routes/Users/Login.js";
@@ -94,9 +95,29 @@ app.use(vaccinePlansRouter);
 // Configure as associações antes de sincronizar
 setupAssociations();
 
+async function ensureAppointmentSchema() {
+  const queryInterface = sequelize.getQueryInterface();
+
+  try {
+    const appointmentTable = await queryInterface.describeTable("appointments");
+
+    if (!appointmentTable.sellerName) {
+      await queryInterface.addColumn("appointments", "sellerName", {
+        type: DataTypes.STRING,
+        allowNull: true,
+        comment: "Nome livre do responsavel exibido na agenda",
+      });
+      console.log("Coluna sellerName adicionada em Appointments");
+    }
+  } catch (error) {
+    console.error("Nao foi possivel validar o schema de Appointments:", error);
+  }
+}
+
 sequelize
   .sync()
-  .then(() => {
+  .then(async () => {
+    await ensureAppointmentSchema();
     console.log("Conectado ao banco de dados");
   })
   .catch((erro) => {
