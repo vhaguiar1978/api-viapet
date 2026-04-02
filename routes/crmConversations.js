@@ -2,6 +2,7 @@ import express from "express";
 import axios from "axios";
 import { Op } from "sequelize";
 import authenticate from "../middlewares/auth.js";
+import upload from "../middlewares/fileUpload.js";
 import Settings from "../models/Settings.js";
 import Custumers from "../models/Custumers.js";
 import Pets from "../models/Pets.js";
@@ -13,6 +14,7 @@ import CrmConversationMessage from "../models/CrmConversationMessage.js";
 const router = express.Router();
 
 const ALLOWED_STATUSES = new Set(["pending", "attending", "closed"]);
+const ALLOWED_MESSAGE_TYPES = new Set(["text", "image", "document", "audio"]);
 
 function normalizePhone(value) {
   const digits = String(value || "").replace(/\D/g, "");
@@ -22,6 +24,99 @@ function normalizePhone(value) {
 
 function getEstablishmentId(req) {
   return req.user?.establishment || req.user?.id || null;
+}
+
+function buildPublicUploadUrl(req, fileName) {
+  const baseUrl =
+    process.env.API_URL ||
+    process.env.URL ||
+    `${req.protocol}://${req.get("host")}`;
+  return `${baseUrl}/uploads/${fileName}`;
+}
+
+function sanitizeMessageType(messageType, mediaUrl) {
+  const normalized = String(messageType || "").trim().toLowerCase();
+  if (ALLOWED_MESSAGE_TYPES.has(normalized)) {
+    return normalized;
+  }
+  return mediaUrl ? "document" : "text";
+}
+
+function buildWhatsappMessagePayload({
+  destinationPhone,
+  messageType,
+  body,
+  mediaUrl,
+  mimeType,
+  payload,
+}) {
+  if (messageType === "image" && mediaUrl) {
+    return {
+      messaging_product: "whatsapp",
+      to: destinationPhone,
+      type: "image",
+      image: {
+        link: mediaUrl,
+        ...(body ? { caption: body } : {}),
+      },
+    };
+  }
+
+  if (messageType === "audio" && mediaUrl) {
+    const normalizedMime = String(mimeType || "").toLowerCase();
+    const supportedAudioMime = [
+      "audio/ogg",
+      "audio/ogg; codecs=opus",
+      "audio/mpeg",
+      "audio/mp4",
+      "audio/aac",
+      "audio/amr",
+    ];
+
+    if (!supportedAudioMime.includes(normalizedMime)) {
+      return {
+        messaging_product: "whatsapp",
+        to: destinationPhone,
+        type: "document",
+        document: {
+          link: mediaUrl,
+          filename: payload?.fileName || "audio",
+          ...(body ? { caption: body } : {}),
+        },
+      };
+    }
+
+    return {
+      messaging_product: "whatsapp",
+      to: destinationPhone,
+      type: "audio",
+      audio: {
+        link: mediaUrl,
+      },
+    };
+  }
+
+  if (messageType === "document" && mediaUrl) {
+    return {
+      messaging_product: "whatsapp",
+      to: destinationPhone,
+      type: "document",
+      document: {
+        link: mediaUrl,
+        filename: payload?.fileName || "arquivo",
+        ...(body ? { caption: body } : {}),
+      },
+    };
+  }
+
+  return {
+    messaging_product: "whatsapp",
+    to: destinationPhone,
+    type: "text",
+    text: {
+      body: body || "",
+    },
+  };
 }
 
 function sanitizeStatus(value, fallback = "pending") {
@@ -516,6 +611,45 @@ router.get("/crm-conversations/:conversationId/messages", authenticate, async (r
   }
 });
 
+router.post(
+  "/crm-conversations/upload",
+  authenticate,
+  upload.single("file"),
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({
+          message: "Nenhum arquivo foi enviado para o CRM.",
+        });
+      }
+
+      const mimeType = String(req.file.mimetype || "").toLowerCase();
+      const suggestedMessageType = mimeType.startsWith("image/")
+        ? "image"
+        : mimeType.startsWith("audio/")
+          ? "audio"
+          : "document";
+
+      return res.status(200).json({
+        message: "Arquivo enviado com sucesso.",
+        data: {
+          fileName: req.file.originalname || req.file.filename,
+          storedName: req.file.filename,
+          mimeType,
+          size: req.file.size || 0,
+          mediaUrl: buildPublicUploadUrl(req, req.file.filename),
+          messageType: suggestedMessageType,
+        },
+      });
+    } catch (error) {
+      console.error("Erro ao enviar arquivo do CRM:", error);
+      return res.status(error.status || 500).json({
+        message: error.message || "Nao foi possivel enviar o arquivo do CRM.",
+      });
+    }
+  },
+);
+
 router.post("/crm-conversations/:conversationId/messages", authenticate, async (req, res) => {
   try {
     const usersId = getEstablishmentId(req);
@@ -547,6 +681,7 @@ router.post("/crm-conversations/:conversationId/messages", authenticate, async (
         ? "inbound"
         : "outbound";
     const normalizedBody = String(body || "").trim();
+    const normalizedMessageType = sanitizeMessageType(messageType, mediaUrl);
 
     if (!normalizedBody && !mediaUrl) {
       return res.status(400).json({
@@ -579,7 +714,7 @@ router.post("/crm-conversations/:conversationId/messages", authenticate, async (
       const phoneNumberId =
         config.phoneNumberId || process.env.WHATSAPP_PHONE_NUMBER_ID || "";
       const token = config.accessToken || process.env.WHATSAPP_TOKEN || "";
-      const destinationPhone = normalizePhone(conversation.phone);
+        const destinationPhone = normalizePhone(conversation.phone);
 
       if (!phoneNumberId || !token) {
         return res.status(400).json({
@@ -593,17 +728,19 @@ router.post("/crm-conversations/:conversationId/messages", authenticate, async (
         });
       }
 
-      try {
-        const response = await axios.post(
-          `https://graph.facebook.com/v21.0/${phoneNumberId}/messages`,
-          {
-            messaging_product: "whatsapp",
-            to: destinationPhone,
-            type: "text",
-            text: {
-              body: normalizedBody,
-            },
-          },
+        try {
+        const whatsappPayload = buildWhatsappMessagePayload({
+          destinationPhone,
+          messageType: normalizedMessageType,
+          body: normalizedBody,
+          mediaUrl,
+          mimeType,
+          payload,
+        });
+
+          const response = await axios.post(
+            `https://graph.facebook.com/v21.0/${phoneNumberId}/messages`,
+          whatsappPayload,
           {
             headers: {
               Authorization: `Bearer ${token}`,
@@ -621,12 +758,17 @@ router.post("/crm-conversations/:conversationId/messages", authenticate, async (
           phone: destinationPhone,
           direction: "outbound",
           channel: "whatsapp",
-          messageType,
-          body: normalizedBody,
+          messageType: normalizedMessageType,
+          body: normalizedBody || (mediaUrl ? "[midia]" : null),
           whatsappMessageId: providerMessageId,
           status: "sent",
           receivedAt: now,
-          payload: response?.data || {},
+          payload: {
+            ...(response?.data || {}),
+            mediaUrl,
+            mimeType,
+            fileName: payload?.fileName || null,
+          },
         });
       } catch (sendError) {
         console.error("Erro ao enviar mensagem na nova conversa CRM:", sendError.response?.data || sendError);
@@ -651,7 +793,7 @@ router.post("/crm-conversations/:conversationId/messages", authenticate, async (
       authorUserId: req.user?.id || null,
       direction: normalizedDirection,
       channel: conversation.channel,
-      messageType,
+      messageType: normalizedMessageType,
       body: normalizedBody || null,
       mediaUrl,
       mimeType,
