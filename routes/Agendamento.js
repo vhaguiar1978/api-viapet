@@ -20,6 +20,52 @@ import sequelize from "../database/config.js";
 import Drivers from "../models/Drivers.js";
 
 const router = express.Router();
+
+function decodeDriverChecklistToken(token) {
+  try {
+    if (!token) return null;
+    const decoded = Buffer.from(String(token), "base64").toString("utf8");
+    const payload = JSON.parse(decoded);
+    return {
+      date: String(payload?.date || "").slice(0, 10),
+      rows: Array.isArray(payload?.rows) ? payload.rows : [],
+    };
+  } catch {
+    return null;
+  }
+}
+
+function normalizeAgendaTypeText(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+function matchesRequestedAgendaType(appointment, requestedType) {
+  const normalizedType = normalizeAgendaTypeText(requestedType);
+  if (!normalizedType || !["estetica", "clinica"].includes(normalizedType)) {
+    return true;
+  }
+
+  const serviceText = normalizeAgendaTypeText(
+    `${appointment?.Service?.name || ""} ${appointment?.Service?.category || ""}`,
+  );
+  const nameText = normalizeAgendaTypeText(appointment?.Service?.name || "");
+  const explicitType = normalizeAgendaTypeText(appointment?.type || "");
+  const nameLooksAesthetic = /banho|tosa|estetica|hidrat/.test(nameText);
+  const nameLooksClinic = /clinica|consulta|exame|vacina|procedimento|cirurgia|retorno|atendimento/.test(nameText);
+  const serviceLooksAesthetic = nameLooksAesthetic || (!nameLooksClinic && /banho|tosa|estetica|hidrat/.test(serviceText));
+  const serviceLooksClinic = nameLooksClinic || (!nameLooksAesthetic && /clinica|consulta|exame|vacina|procedimento|cirurgia/.test(serviceText));
+
+  if (normalizedType === "estetica") {
+    return serviceLooksAesthetic || (explicitType === "estetica" && !serviceLooksClinic);
+  }
+
+  return serviceLooksClinic || (explicitType === "clinica" && !serviceLooksAesthetic);
+}
+
 // Criar novo agendamento
 router.post("/appointments", auth, async (req, res) => {
   try {
@@ -39,6 +85,7 @@ router.post("/appointments", auth, async (req, res) => {
       facebook,
       whatsapp,
       tiktok,
+      skipFinance,
     } = req.body;
 
     // Verifica se o pet existe e pertence ao estabelecimento
@@ -106,7 +153,7 @@ router.post("/appointments", auth, async (req, res) => {
     }
 
     // Cria a transação financeira
-    const finance = await Finance.create({
+    const finance = skipFinance ? null : await Finance.create({
       type: "entrada",
       description: `Agendamento - ${service.name} - ${pet.name}`,
       amount: totalAmount,
@@ -141,7 +188,7 @@ router.post("/appointments", auth, async (req, res) => {
       facebook,
       whatsapp,
       tiktok,
-      financeId: finance.id,
+      financeId: finance?.id || null,
     });
 
     // Busca as configurações de mensagem do WhatsApp
@@ -294,7 +341,8 @@ router.get("/appointments", auth, async (req, res) => {
     if (status) {
       where.status = status;
     }
-    if (type) {
+    const requestedAgendaType = type;
+    if (type && !["estetica", "clinica"].includes(normalizeAgendaTypeText(type))) {
       where.type = type;
     }
 
@@ -313,7 +361,7 @@ router.get("/appointments", auth, async (req, res) => {
         const customer = await Custumers.findByPk(appointment.customerId);
         const service = await Services.findByPk(appointment.serviceId);
         const responsible = await Users.findByPk(appointment.responsibleId);
-        const finance = await Finance.findByPk(appointment.financeId);
+        let finance = await Finance.findByPk(appointment.financeId);
         const driver = await Drivers.findByPk(appointment.driverId);
 
         // Buscar vendas relacionadas ao agendamento
@@ -371,7 +419,7 @@ router.get("/appointments", auth, async (req, res) => {
         }
 
         // Se não houver transação financeira, criar uma
-        if (!finance) {
+        if (false && !finance) {
           const newFinance = await Finance.create({
             type: "entrada",
             description: `Agendamento - ${service?.name} - ${pet?.name}`,
@@ -398,7 +446,7 @@ router.get("/appointments", auth, async (req, res) => {
           finance = newFinance;
         }
         // Se houver transação mas o valor estiver diferente, atualizar
-        else if (finance.amount !== totalAmount) {
+        else if (false && finance.amount !== totalAmount) {
           await Finance.update(
             { amount: totalAmount },
             { where: { id: finance.id } },
@@ -422,9 +470,13 @@ router.get("/appointments", auth, async (req, res) => {
       }),
     );
 
+    const filteredAppointments = appointmentsWithDetails.filter((appointment) =>
+      matchesRequestedAgendaType(appointment, requestedAgendaType),
+    );
+
     return res.json({
       message: "Agendamentos encontrados com sucesso",
-      data: appointmentsWithDetails,
+      data: filteredAppointments,
     });
   } catch (error) {
     console.error("Erro ao buscar agendamentos:", error);
@@ -540,6 +592,50 @@ router.patch("/appointments/:id/status", auth, async (req, res) => {
   }
 });
 
+// Marcar servico do motorista como realizado pelo link compartilhado
+router.patch("/appointments/driver-checklist/:id/ok", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const checklist = decodeDriverChecklistToken(req.body?.token);
+
+    if (!checklist || !checklist.rows.some((row) => String(row?.id) === String(id))) {
+      return res.status(403).json({
+        message: "Link do motorista invalido ou expirado.",
+      });
+    }
+
+    const appointment = await Appointment.findByPk(id);
+    if (!appointment) {
+      return res.status(404).json({
+        message: "Agendamento nao encontrado",
+      });
+    }
+
+    const appointmentDate = String(appointment.date || "").slice(0, 10);
+    if (checklist.date && appointmentDate && checklist.date !== appointmentDate) {
+      return res.status(409).json({
+        message: "Esse servico nao pertence a data desta lista.",
+      });
+    }
+
+    await appointment.update({ driver_status: "Realizado" });
+
+    return res.status(200).json({
+      message: "Servico marcado como realizado",
+      data: {
+        appointmentId: appointment.id,
+        driverStatus: appointment.driver_status,
+      },
+    });
+  } catch (error) {
+    console.error("Erro ao marcar servico do motorista:", error);
+    return res.status(500).json({
+      message: "Erro ao marcar servico do motorista",
+      error: error.message,
+    });
+  }
+});
+
 // Atualizar status do motorista
 router.patch("/appointments/:id/driver-status", auth, async (req, res) => {
   try {
@@ -566,16 +662,16 @@ router.patch("/appointments/:id/driver-status", auth, async (req, res) => {
     }
 
     // Validar se o status é válido
-    if (!["Buscar pet", "Entregar pet", "Sem status"].includes(status)) {
+    if (!["Buscar pet", "Entregar pet", "Sem status", "Realizado"].includes(status)) {
       return res.status(400).json({
-        message: 'Status inválido. Use "Buscar pet" ou "Entregar pet"',
+        message: 'Status invalido. Use "Buscar pet", "Entregar pet", "Realizado" ou "Sem status"',
       });
     }
 
     await appointment.update({ driver_status: status });
 
-    // Só envia mensagem se o status não for 'Sem status'
-    if (status !== "Sem status") {
+    // So envia mensagem para acoes de rota; OK/Realizado apenas atualiza a lista.
+    if (["Buscar pet", "Entregar pet"].includes(status)) {
       try {
         await mensagemMotorista(id, status);
         return res.status(200).json({
@@ -593,7 +689,7 @@ router.patch("/appointments/:id/driver-status", auth, async (req, res) => {
       }
     }
 
-    // Retorna sucesso sem tentar enviar mensagem para 'Sem status'
+    // Retorna sucesso sem tentar enviar mensagem para OK/Realizado ou Sem status.
     return res.status(200).json({
       message: "Status do motorista atualizado com sucesso",
       data: appointment,
@@ -628,6 +724,7 @@ router.put("/appointments/:id", auth, async (req, res) => {
       tiktok,
       secondaryServiceId,
       tertiaryServiceId,
+      skipFinance,
     } = req.body;
 
     console.log("PUT /appointments/:id - Request Params:", req.params);
@@ -711,7 +808,13 @@ router.put("/appointments/:id", auth, async (req, res) => {
       where: { id: appointment.id },
     });
 
-    if (appointment.financeId) {
+    if (skipFinance && appointment.financeId) {
+      const linkedFinance = await Finance.findByPk(appointment.financeId);
+      if (linkedFinance) {
+        await linkedFinance.destroy();
+        await appointment.update({ financeId: null });
+      }
+    } else if (appointment.financeId) {
       await Finance.update(
         {
           amount: totalAmount,

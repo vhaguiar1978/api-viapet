@@ -302,7 +302,27 @@ export const syncAppointmentFinance = async (appointmentId) => {
 
     const latestPaymentFinanceId =
       payments.find((payment) => payment.financeId)?.financeId || null;
-    await appointment.update({ financeId: latestPaymentFinanceId });
+    if (latestPaymentFinanceId) {
+      await appointment.update({ financeId: latestPaymentFinanceId });
+    } else {
+      const freeAppointmentFinance = await Finance.findOne({
+        where: {
+          reference: `appointment_free:${appointment.id}`,
+          usersId: appointment.usersId,
+        },
+      });
+      if (freeAppointmentFinance) {
+        await freeAppointmentFinance.destroy();
+      }
+
+      if (appointment.financeId) {
+        const linkedFinance = await Finance.findByPk(appointment.financeId);
+        if (linkedFinance) {
+          await linkedFinance.destroy();
+        }
+      }
+      await appointment.update({ financeId: null });
+    }
   }
 
   return summary;
@@ -344,6 +364,10 @@ export const getAppointmentComandaDetails = async (appointmentId, usersId) => {
   ]);
 
   const summary = await calculateAppointmentSummary(appointment, items, payments);
+  if (summary.total <= 0 && payments.length === 0 && appointment.financeId) {
+    await syncAppointmentFinance(appointment.id);
+    await appointment.reload();
+  }
   const legacyItems = items.length === 0 ? await getLegacyServiceItems(appointment) : [];
 
   return {
