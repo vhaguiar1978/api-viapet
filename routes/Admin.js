@@ -325,6 +325,7 @@ router.post("/settings/admin", adminMiddleware, async (req, res) => {
     if (youtube !== undefined) settings.youtube = youtube;
 
     await settings.save();
+    emailService.resetTransporter();
 
     return res.status(200).json({
       message: "Configurações administrativas atualizadas com sucesso",
@@ -334,6 +335,29 @@ router.post("/settings/admin", adminMiddleware, async (req, res) => {
     return res.status(500).json({
       message: "Erro no servidor",
       error: error.message,
+    });
+  }
+});
+
+router.post("/settings/admin/test-email", adminMiddleware, async (req, res) => {
+  try {
+    const recipientEmail = String(req.body?.recipientEmail || "").trim();
+
+    if (recipientEmail && !validator.isEmail(recipientEmail)) {
+      return res.status(400).json({
+        message: "Informe um e-mail valido para enviar o teste.",
+      });
+    }
+
+    await emailService.sendSmtpTestEmail(recipientEmail || undefined);
+
+    return res.status(200).json({
+      message: "E-mail de teste enviado com sucesso.",
+    });
+  } catch (error) {
+    console.error("Erro ao enviar e-mail de teste SMTP:", error);
+    return res.status(500).json({
+      message: error.message || "Nao foi possivel enviar o e-mail de teste SMTP.",
     });
   }
 });

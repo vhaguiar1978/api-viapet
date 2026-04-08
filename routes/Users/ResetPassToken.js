@@ -8,7 +8,7 @@ const JWT_SECRET = process.env.JWT_SECRET;
 import emailService from "../../service/email.js";
 
 router.post("/resetPassToken", async (req, res) => {
-  const { email } = req.body;
+  const email = String(req.body?.email || "").trim().toLowerCase();
   if (!email) {
     return res.status(400).json({ message: "Email não informado" });
   }
@@ -42,13 +42,25 @@ router.post("/resetPassToken", async (req, res) => {
       message: "O link para redefinir a senha foi encaminhado via email",
     });
   } catch (emailError) {
+    const resetUrl = emailService.buildPasswordResetLink(token);
+    const isDevelopment = process.env.NODE_ENV !== "production";
     console.error(
       "❌ Erro ao enviar email de reset de senha:",
       emailError.message
     );
+
+    if (isDevelopment) {
+      return res.status(200).json({
+        message: `Token criado, mas o SMTP nao esta configurado. Link de teste: ${resetUrl}`,
+        data: {
+          resetUrl,
+        },
+      });
+    }
+
     return res.status(500).json({
       message:
-        "Token criado, mas não foi possível enviar o email. Tente novamente em alguns minutos.",
+        "Token criado, mas nao foi possivel enviar o email. Verifique as configuracoes de SMTP e tente novamente.",
     });
   }
 });
