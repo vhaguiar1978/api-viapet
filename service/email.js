@@ -7,57 +7,24 @@ import Users from "../models/Users.js";
 class EmailService {
   constructor() {
     this.transporter = null;
-    this.smtpConfig = null;
     this.initializeCronJobs();
   }
 
-  async getSmtpConfig() {
-    const settings = await Admin.findOne();
-    const smtpHost = settings?.smtpHost || process.env.SMTP_HOST || process.env.MAIL_HOST;
-    const rawPort = settings?.smtpPort || process.env.SMTP_PORT || process.env.MAIL_PORT || 587;
-    const smtpPort = Number(rawPort);
-    const smtpEmail = settings?.smtpEmail || process.env.SMTP_EMAIL || process.env.MAIL_USER;
-    const smtpPassword =
-      settings?.smtpPassword || process.env.SMTP_PASSWORD || process.env.MAIL_PASSWORD;
-
-    if (!smtpHost || !smtpPort || !smtpEmail || !smtpPassword) {
-      throw new Error(
-        "SMTP nao configurado. Preencha host, porta, e-mail e senha nas configuracoes administrativas."
-      );
-    }
-
-    return {
-      host: smtpHost,
-      port: smtpPort,
-      email: smtpEmail,
-      password: smtpPassword,
-    };
-  }
-
-  getFrontendUrl() {
-    return (process.env.FRONTEND_URL || "http://127.0.0.1:3001").replace(/\/+$/, "");
-  }
-
-  buildPasswordResetLink(token) {
-    return `${this.getFrontendUrl()}/redefinir-senha?token=${encodeURIComponent(token)}`;
-  }
-
-  resetTransporter() {
-    this.transporter = null;
-    this.smtpConfig = null;
-  }
-
-  async initializeTransporter(smtpConfig) {
+  async initializeTransporter() {
     try {
-      const config = smtpConfig || (await this.getSmtpConfig());
+      const settings = await Admin.findOne();
+
+      if (!settings) {
+        throw new Error("Configurações de SMTP não encontradas");
+      }
 
       this.transporter = nodemailer.createTransport({
-        host: config.host,
-        port: config.port,
-        secure: config.port === 465,
+        host: settings.smtpHost,
+        port: settings.smtpPort,
+        secure: settings.smtpPort === 465,
         auth: {
-          user: config.email,
-          pass: config.password,
+          user: settings.smtpEmail,
+          pass: settings.smtpPassword,
         },
         // Configurações de timeout e retry para evitar travamento
         connectionTimeout: 10000, // 10 segundos
@@ -79,28 +46,27 @@ class EmailService {
       });
 
       await Promise.race([verifyPromise, timeoutPromise]);
-      this.smtpConfig = config;
       console.log("✅ Transportador SMTP verificado com sucesso");
       return this.transporter;
     } catch (error) {
       console.error("Erro ao inicializar transportador de email:", error);
       this.transporter = null; // Reset transporter em caso de erro
-      this.smtpConfig = null;
       throw error;
     }
   }
 
   async sendPasswordResetEmail(recipientEmail, token) {
     try {
-      const smtpConfig = await this.getSmtpConfig();
       if (!this.transporter) {
-        await this.initializeTransporter(smtpConfig);
+        await this.initializeTransporter();
       }
 
-      const resetLink = this.buildPasswordResetLink(token);
+      const settings = await Admin.findOne();
+
+      const resetLink = `${process.env.FRONTEND_URL}/redefinir-senha?token=${token}`;
 
       const mailOptions = {
-        from: this.smtpConfig?.email || smtpConfig.email,
+        from: settings.smtpEmail,
         to: recipientEmail,
         subject: "Redefinição de Senha",
         html: `
@@ -131,33 +97,6 @@ class EmailService {
     }
   }
 
-  async sendSmtpTestEmail(recipientEmail) {
-    try {
-      const smtpConfig = await this.getSmtpConfig();
-      if (!this.transporter) {
-        await this.initializeTransporter(smtpConfig);
-      }
-
-      const info = await this.transporter.sendMail({
-        from: this.smtpConfig?.email || smtpConfig.email,
-        to: recipientEmail || smtpConfig.email,
-        subject: "Teste de envio ViaPet",
-        html: `
-          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-            <h2>Teste de envio ViaPet</h2>
-            <p>O SMTP do sistema foi configurado e conseguiu enviar este e-mail.</p>
-            <p>Este remetente sera usado para recuperacao de senha e avisos automaticos.</p>
-          </div>
-        `,
-      });
-
-      return info;
-    } catch (error) {
-      console.error("Erro ao enviar email de teste SMTP:", error);
-      throw error;
-    }
-  }
-
   async sendWelcomeEmail(userId, recipientEmail) {
     // Executa o envio de forma assíncrona para não travar o servidor
     this.sendEmailSafely(async () => {
@@ -169,7 +108,7 @@ class EmailService {
         const settings = await Admin.findOne();
 
         const mailOptions = {
-          from: this.smtpConfig?.email || settings?.smtpEmail,
+          from: settings.smtpEmail,
           to: recipientEmail,
           subject: "Bem-vindo!",
           html: `
@@ -226,7 +165,7 @@ class EmailService {
       const settings = await Admin.findOne();
 
       const mailOptions = {
-        from: this.smtpConfig?.email || settings?.smtpEmail,
+        from: settings.smtpEmail,
         to: recipientEmail,
         subject: "Novo Acesso Detectado",
         html: `
@@ -264,7 +203,7 @@ class EmailService {
         const settings = await Admin.findOne();
 
         const mailOptions = {
-          from: this.smtpConfig?.email || settings?.smtpEmail,
+          from: settings.smtpEmail,
           to: recipientEmail,
           subject: "Bem-vindo à Equipe!",
           html: `
@@ -313,7 +252,7 @@ class EmailService {
         const settings = await Admin.findOne();
 
         const mailOptions = {
-          from: this.smtpConfig?.email || settings?.smtpEmail,
+          from: settings.smtpEmail,
           to: recipientEmail,
           subject: "Novo Acesso Detectado",
           html: `
@@ -358,7 +297,7 @@ class EmailService {
       const settings = await Admin.findOne();
 
       const mailOptions = {
-        from: this.smtpConfig?.email || settings?.smtpEmail,
+        from: settings.smtpEmail,
         to: user.email,
         subject: "🎉 Oferta Especial - Não perca essa oportunidade!",
         html: `
