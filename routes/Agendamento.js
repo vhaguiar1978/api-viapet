@@ -66,6 +66,77 @@ function matchesRequestedAgendaType(appointment, requestedType) {
   return serviceLooksClinic || (explicitType === "clinica" && !serviceLooksAesthetic);
 }
 
+const SHARED_DRIVER_CHECKLIST_STATUSES = [
+  "Buscar pet",
+  "Entregar pet",
+  "Sem status",
+  "Realizado",
+];
+
+async function updateSharedDriverChecklistStatus(req, res, nextStatus) {
+  const { id } = req.params;
+  const checklist = decodeDriverChecklistToken(req.body?.token);
+
+  if (!checklist || !checklist.rows.some((row) => String(row?.id) === String(id))) {
+    return res.status(403).json({
+      message: "Link do motorista invalido ou expirado.",
+    });
+  }
+
+  if (!SHARED_DRIVER_CHECKLIST_STATUSES.includes(nextStatus)) {
+    return res.status(400).json({
+      message: 'Status invalido. Use "Buscar pet", "Entregar pet", "Realizado" ou "Sem status".',
+    });
+  }
+
+  const appointment = await Appointment.findByPk(id);
+  if (!appointment) {
+    return res.status(404).json({
+      message: "Agendamento nao encontrado",
+    });
+  }
+
+  const appointmentDate = String(appointment.date || "").slice(0, 10);
+  if (checklist.date && appointmentDate && checklist.date !== appointmentDate) {
+    return res.status(409).json({
+      message: "Esse servico nao pertence a data desta lista.",
+    });
+  }
+
+  await appointment.update({ driver_status: nextStatus });
+
+  if (["Buscar pet", "Entregar pet"].includes(nextStatus)) {
+    try {
+      await mensagemMotorista(id, nextStatus);
+      return res.status(200).json({
+        message: "Status do motorista atualizado com sucesso",
+        data: {
+          appointmentId: appointment.id,
+          driverStatus: appointment.driver_status,
+        },
+      });
+    } catch (messageError) {
+      console.error("Erro ao enviar mensagem do motorista:", messageError);
+      return res.status(200).json({
+        message: "Status atualizado, mas houve um erro ao enviar a mensagem",
+        data: {
+          appointmentId: appointment.id,
+          driverStatus: appointment.driver_status,
+        },
+        messageError: messageError.message,
+      });
+    }
+  }
+
+  return res.status(200).json({
+    message: "Status do motorista atualizado com sucesso",
+    data: {
+      appointmentId: appointment.id,
+      driverStatus: appointment.driver_status,
+    },
+  });
+}
+
 // Criar novo agendamento
 router.post("/appointments", auth, async (req, res) => {
   try {
@@ -595,42 +666,24 @@ router.patch("/appointments/:id/status", auth, async (req, res) => {
 // Marcar servico do motorista como realizado pelo link compartilhado
 router.patch("/appointments/driver-checklist/:id/ok", async (req, res) => {
   try {
-    const { id } = req.params;
-    const checklist = decodeDriverChecklistToken(req.body?.token);
-
-    if (!checklist || !checklist.rows.some((row) => String(row?.id) === String(id))) {
-      return res.status(403).json({
-        message: "Link do motorista invalido ou expirado.",
-      });
-    }
-
-    const appointment = await Appointment.findByPk(id);
-    if (!appointment) {
-      return res.status(404).json({
-        message: "Agendamento nao encontrado",
-      });
-    }
-
-    const appointmentDate = String(appointment.date || "").slice(0, 10);
-    if (checklist.date && appointmentDate && checklist.date !== appointmentDate) {
-      return res.status(409).json({
-        message: "Esse servico nao pertence a data desta lista.",
-      });
-    }
-
-    await appointment.update({ driver_status: "Realizado" });
-
-    return res.status(200).json({
-      message: "Servico marcado como realizado",
-      data: {
-        appointmentId: appointment.id,
-        driverStatus: appointment.driver_status,
-      },
-    });
+    return await updateSharedDriverChecklistStatus(req, res, "Realizado");
   } catch (error) {
     console.error("Erro ao marcar servico do motorista:", error);
     return res.status(500).json({
       message: "Erro ao marcar servico do motorista",
+      error: error.message,
+    });
+  }
+});
+
+router.patch("/appointments/driver-checklist/:id/status", async (req, res) => {
+  try {
+    const nextStatus = String(req.body?.status || "").trim();
+    return await updateSharedDriverChecklistStatus(req, res, nextStatus);
+  } catch (error) {
+    console.error("Erro ao atualizar status compartilhado do motorista:", error);
+    return res.status(500).json({
+      message: "Erro ao atualizar status compartilhado do motorista",
       error: error.message,
     });
   }
