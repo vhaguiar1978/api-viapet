@@ -12,9 +12,65 @@ import CashClosure from "../models/CashClosure.js";
 import sequelize from "sequelize";
 const router = express.Router();
 
+function buildNormalizedDateString(year, month, day) {
+  const isoValue = `${year}-${month}-${day}`;
+  const parsedDate = new Date(`${isoValue}T12:00:00`);
+
+  if (Number.isNaN(parsedDate.getTime())) {
+    return null;
+  }
+
+  const [parsedYear, parsedMonth, parsedDay] = isoValue.split("-").map(Number);
+  if (
+    parsedDate.getFullYear() !== parsedYear ||
+    parsedDate.getMonth() + 1 !== parsedMonth ||
+    parsedDate.getDate() !== parsedDay
+  ) {
+    return null;
+  }
+
+  return isoValue;
+}
+
+function normalizeFinanceDateInput(value) {
+  const rawValue = String(value || "").trim();
+  if (!rawValue) return null;
+
+  const isoMatch = rawValue.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (isoMatch) {
+    return buildNormalizedDateString(isoMatch[1], isoMatch[2], isoMatch[3]);
+  }
+
+  const brMatch = rawValue.match(/^(\d{2})[\/.-](\d{2})[\/.-](\d{4})$/);
+  if (brMatch) {
+    return buildNormalizedDateString(brMatch[3], brMatch[2], brMatch[1]);
+  }
+
+  const digitsOnly = rawValue.replace(/\D/g, "");
+  if (digitsOnly.length === 8) {
+    if (/^(19|20)\d{6}$/.test(digitsOnly)) {
+      return buildNormalizedDateString(
+        digitsOnly.slice(0, 4),
+        digitsOnly.slice(4, 6),
+        digitsOnly.slice(6, 8)
+      );
+    }
+
+    return buildNormalizedDateString(
+      digitsOnly.slice(4, 8),
+      digitsOnly.slice(2, 4),
+      digitsOnly.slice(0, 2)
+    );
+  }
+
+  return null;
+}
+
 function parseDateParam(value, endOfDay = false) {
   if (!value) return null;
-  const [year, month, day] = String(value).split("-").map(Number);
+  const normalizedValue = normalizeFinanceDateInput(value);
+  if (!normalizedValue) return null;
+  const [year, month, day] = normalizedValue.split("-").map(Number);
   if (!year || !month || !day) return null;
   return endOfDay
     ? new Date(year, month - 1, day, 23, 59, 59, 999)
@@ -455,6 +511,22 @@ router.post("/finance", authenticate, async (req, res) => {
       feeAmount,
       netAmount,
     } = req.body;
+    const normalizedDate = date ? normalizeFinanceDateInput(date) : null;
+    const normalizedDueDate = dueDate ? normalizeFinanceDateInput(dueDate) : null;
+
+    if (date && !normalizedDate) {
+      return res.status(400).json({
+        message: "Data do lancamento invalida",
+        error: "Informe a data no formato dia-mes-ano ou ano-mes-dia.",
+      });
+    }
+
+    if (dueDate && !normalizedDueDate) {
+      return res.status(400).json({
+        message: "Data de vencimento invalida",
+        error: "Informe o vencimento no formato dia-mes-ano ou ano-mes-dia.",
+      });
+    }
 
     const finance = await Finance.create({
       type,
@@ -464,8 +536,8 @@ router.post("/finance", authenticate, async (req, res) => {
       feePercentage,
       feeAmount,
       netAmount,
-      date,
-      dueDate,
+      date: normalizedDate,
+      dueDate: normalizedDueDate,
       category,
       subCategory,
       expenseType,
@@ -862,7 +934,37 @@ router.put("/finance/:id", authenticate, async (req, res) => {
       });
     }
 
-    const updatedFinance = await finance.update(req.body);
+    const updatePayload = { ...req.body };
+
+    if (Object.prototype.hasOwnProperty.call(updatePayload, "date")) {
+      if (updatePayload.date) {
+        updatePayload.date = normalizeFinanceDateInput(updatePayload.date);
+        if (!updatePayload.date) {
+          return res.status(400).json({
+            message: "Data do lancamento invalida",
+            error: "Informe a data no formato dia-mes-ano ou ano-mes-dia.",
+          });
+        }
+      } else {
+        updatePayload.date = null;
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(updatePayload, "dueDate")) {
+      if (updatePayload.dueDate) {
+        updatePayload.dueDate = normalizeFinanceDateInput(updatePayload.dueDate);
+        if (!updatePayload.dueDate) {
+          return res.status(400).json({
+            message: "Data de vencimento invalida",
+            error: "Informe o vencimento no formato dia-mes-ano ou ano-mes-dia.",
+          });
+        }
+      } else {
+        updatePayload.dueDate = null;
+      }
+    }
+
+    const updatedFinance = await finance.update(updatePayload);
 
     res.json({
       message: "Registro financeiro atualizado com sucesso",
