@@ -12,6 +12,12 @@ const AppointmentStatusHistory = sequelize.define(
     appointmentId: {
       type: DataTypes.UUID,
       allowNull: false,
+      references: {
+        model: "appointments",
+        key: "id",
+      },
+      onUpdate: "CASCADE",
+      onDelete: "CASCADE",
     },
     usersId: {
       type: DataTypes.UUID,

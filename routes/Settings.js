@@ -44,6 +44,7 @@ function buildAccountPayload(user, settings) {
     creditFee: accountSettings.creditFee || "3,49",
     installmentFee: accountSettings.installmentFee || "4,99",
     pixFee: accountSettings.pixFee || "0",
+    pixMachineFee: accountSettings.pixMachineFee || "0",
     cashFee: accountSettings.cashFee || "0",
     electronicSignatureUrl: accountSettings.electronicSignatureUrl || "",
     electronicSignatureName: accountSettings.electronicSignatureName || "",
@@ -384,6 +385,10 @@ router.post("/settings/account", authenticate, async (req, res) => {
           typeof req.body?.pixFee === "string"
             ? req.body.pixFee
             : getAccountSettings(settings).pixFee || "0",
+        pixMachineFee:
+          typeof req.body?.pixMachineFee === "string"
+            ? req.body.pixMachineFee
+            : getAccountSettings(settings).pixMachineFee || "0",
         cashFee:
           typeof req.body?.cashFee === "string"
             ? req.body.cashFee

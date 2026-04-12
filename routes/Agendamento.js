@@ -6,6 +6,9 @@ import Custumers from "../models/Custumers.js";
 import Services from "../models/Services.js";
 import Settings from "../models/Settings.js";
 import Users from "../models/Users.js";
+import AppointmentItem from "../models/AppointmentItem.js";
+import AppointmentPayment from "../models/AppointmentPayment.js";
+import AppointmentStatusHistory from "../models/AppointmentStatusHistory.js";
 import { Op } from "sequelize";
 import {
   mensagemPacotinho,
@@ -18,8 +21,57 @@ import SaleItems from "../models/SaleItem.js";
 import Products from "../models/Products.js";
 import sequelize from "../database/config.js";
 import Drivers from "../models/Drivers.js";
+import { syncAppointmentFinance } from "../service/appointmentFinance.js";
 
 const router = express.Router();
+
+const REQUIRED_APPOINTMENT_FIELDS = [
+  "petId",
+  "customerId",
+  "serviceId",
+  "type",
+  "date",
+  "time",
+];
+
+function getMissingRequiredFields(payload, requiredFields) {
+  return requiredFields.filter((field) => {
+    const value = payload?.[field];
+    return value === undefined || value === null || value === "";
+  });
+}
+
+function isComandaManagedFinanceReference(reference) {
+  return /^appointment_(payment:|balance:|free:)/.test(String(reference || ""));
+}
+
+function buildAppointmentFinancePayload({
+  description,
+  totalAmount,
+  date,
+  type,
+  observation,
+  userId,
+  establishmentId,
+}) {
+  return {
+    type: "entrada",
+    description,
+    amount: totalAmount,
+    date: new Date(date),
+    dueDate: new Date(date),
+    category: "Serviços",
+    subCategory: type,
+    expenseType: "variavel",
+    frequency: "unico",
+    paymentMethod: "Pendente",
+    status: "pendente",
+    reference: "appointment",
+    notes: observation,
+    createdBy: userId,
+    usersId: establishmentId,
+  };
+}
 
 function decodeDriverChecklistToken(token) {
   try {
@@ -139,7 +191,20 @@ async function updateSharedDriverChecklistStatus(req, res, nextStatus) {
 
 // Criar novo agendamento
 router.post("/appointments", auth, async (req, res) => {
+  const transaction = await sequelize.transaction();
+
   try {
+    const missingFields = getMissingRequiredFields(
+      req.body,
+      REQUIRED_APPOINTMENT_FIELDS,
+    );
+    if (missingFields.length > 0) {
+      await transaction.rollback();
+      return res.status(400).json({
+        message: "Dados obrigatorios ausentes",
+        missingFields,
+      });
+    }
     const {
       petId,
       customerId,
@@ -165,9 +230,11 @@ router.post("/appointments", auth, async (req, res) => {
         id: petId,
         usersId: req.user.establishment,
       },
+      transaction,
     });
 
     if (!pet) {
+      await transaction.rollback();
       return res.status(404).json({ message: "Pet não encontrado" });
     }
 
@@ -177,9 +244,11 @@ router.post("/appointments", auth, async (req, res) => {
         id: customerId,
         usersId: req.user.establishment,
       },
+      transaction,
     });
 
     if (!customer) {
+      await transaction.rollback();
       return res.status(404).json({ message: "Cliente não encontrado" });
     }
 
@@ -189,9 +258,11 @@ router.post("/appointments", auth, async (req, res) => {
         id: serviceId,
         establishment: req.user.establishment,
       },
+      transaction,
     });
 
     if (!service) {
+      await transaction.rollback();
       return res.status(404).json({ message: "Serviço não encontrado" });
     }
 
@@ -240,7 +311,7 @@ router.post("/appointments", auth, async (req, res) => {
       notes: observation,
       createdBy: req.user.id,
       usersId: req.user.establishment,
-    });
+    }, { transaction });
 
     const appointment = await Appointment.create({
       usersId: req.user.establishment,
@@ -260,16 +331,26 @@ router.post("/appointments", auth, async (req, res) => {
       whatsapp,
       tiktok,
       financeId: finance?.id || null,
-    });
+    }, { transaction });
 
     // Busca as configurações de mensagem do WhatsApp
     const settings = await Settings.findOne({
       where: { usersId: req.user.establishment },
+      transaction,
     });
 
     // Verifica se o cliente tem telefone e se as configurações permitem envio de mensagem
+    await transaction.commit();
+
     if (customer.phone && settings?.notifyClient) {
-      await mensagemAgendamento(appointment.id);
+      try {
+        await mensagemAgendamento(appointment.id);
+      } catch (notifyError) {
+        console.error(
+          "Erro ao enviar mensagem de confirmação do agendamento:",
+          notifyError,
+        );
+      }
     }
 
     return res.status(201).json({
@@ -277,6 +358,9 @@ router.post("/appointments", auth, async (req, res) => {
       data: appointment,
     });
   } catch (error) {
+    if (!transaction.finished) {
+      await transaction.rollback();
+    }
     console.error("Erro ao criar agendamento:", error);
     return res.status(500).json({
       message: "Erro ao criar agendamento",
@@ -305,20 +389,17 @@ router.get("/appointments/monthly", auth, async (req, res) => {
       });
     }
 
+    const startOfMonth = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0, 0));
+    const startOfNextMonth = new Date(
+      Date.UTC(month === 12 ? year + 1 : year, month === 12 ? 0 : month, 1, 0, 0, 0, 0),
+    );
+
     const where = {
       usersId: req.user.establishment,
-      [Op.and]: [
-        sequelize.where(
-          sequelize.fn("MONTH", sequelize.col("Appointment.date")),
-          "=",
-          month,
-        ),
-        sequelize.where(
-          sequelize.fn("YEAR", sequelize.col("Appointment.date")),
-          "=",
-          year,
-        ),
-      ],
+      date: {
+        [Op.gte]: startOfMonth,
+        [Op.lt]: startOfNextMonth,
+      },
     };
 
     if (responsibleId) {
@@ -794,6 +875,28 @@ router.put("/appointments/:id", auth, async (req, res) => {
       return res.status(404).json({ message: "Agendamento nao encontrado" });
     }
 
+    const linkedFinance = appointment.financeId
+      ? await Finance.findByPk(appointment.financeId)
+      : null;
+    const [appointmentItemsCount, appointmentPaymentsCount] = await Promise.all([
+      AppointmentItem.count({
+        where: {
+          appointmentId: appointment.id,
+          usersId: req.user.establishment,
+        },
+      }),
+      AppointmentPayment.count({
+        where: {
+          appointmentId: appointment.id,
+          usersId: req.user.establishment,
+        },
+      }),
+    ]);
+    const hasComandaData =
+      appointmentItemsCount > 0 ||
+      appointmentPaymentsCount > 0 ||
+      isComandaManagedFinanceReference(linkedFinance?.reference);
+
     const resolvedServiceId = serviceId || appointment.serviceId;
     const mainService = await Services.findOne({
       where: {
@@ -826,6 +929,9 @@ router.put("/appointments/:id", auth, async (req, res) => {
         totalAmount += Number(tertiaryService.price || 0);
       }
     }
+
+    const financePet = await Pets.findByPk(petId || appointment.petId);
+    const financeDescription = `Agendamento - ${mainService?.name || "Serviço"} - ${financePet?.name || "Pet"}`;
 
     const updateData = {
       customerId: customerId || appointment.customerId,
@@ -861,22 +967,40 @@ router.put("/appointments/:id", auth, async (req, res) => {
       where: { id: appointment.id },
     });
 
-    if (skipFinance && appointment.financeId) {
-      const linkedFinance = await Finance.findByPk(appointment.financeId);
+    if (hasComandaData) {
+      await syncAppointmentFinance(appointment.id);
+    } else if (skipFinance) {
       if (linkedFinance) {
         await linkedFinance.destroy();
-        await appointment.update({ financeId: null });
       }
-    } else if (appointment.financeId) {
-      await Finance.update(
-        {
-          amount: totalAmount,
-          dueDate: new Date(date || appointment.date),
-        },
-        {
-          where: { id: appointment.financeId },
-        },
+      await appointment.update({ financeId: null });
+    } else if (appointment.financeId && linkedFinance) {
+      await linkedFinance.update({
+        ...buildAppointmentFinancePayload({
+          description: financeDescription,
+          totalAmount,
+          date: date || appointment.date,
+          type: type || appointment.type,
+          observation:
+            observation !== undefined ? observation : appointment.observation,
+          userId: req.user.id,
+          establishmentId: req.user.establishment,
+        }),
+      });
+    } else if (!skipFinance) {
+      const finance = await Finance.create(
+        buildAppointmentFinancePayload({
+          description: financeDescription,
+          totalAmount,
+          date: date || appointment.date,
+          type: type || appointment.type,
+          observation:
+            observation !== undefined ? observation : appointment.observation,
+          userId: req.user.id,
+          establishmentId: req.user.establishment,
+        }),
       );
+      await appointment.update({ financeId: finance.id });
     }
 
     const updatedAppointment = await Appointment.findByPk(id);
@@ -975,7 +1099,7 @@ router.get("/appointments/customer/:customerId", auth, async (req, res) => {
 
 // Excluir agendamento
 router.delete("/appointments/:id", auth, async (req, res) => {
-  const t = await sequelize.transaction();
+  let t;
 
   try {
     const { id } = req.params;
@@ -994,13 +1118,26 @@ router.delete("/appointments/:id", auth, async (req, res) => {
       });
     }
 
+    t = await sequelize.transaction();
+
     // Busca todas as vendas relacionadas ao agendamento
     const sales = await Sales.findAll({
       where: {
         appointmentId: id,
         usersId: req.user.establishment,
       },
+      transaction: t,
     });
+    const appointmentPayments = await AppointmentPayment.findAll({
+      where: {
+        appointmentId: id,
+        usersId: req.user.establishment,
+      },
+      transaction: t,
+    });
+    const paymentFinanceIds = appointmentPayments
+      .map((payment) => payment.financeId)
+      .filter(Boolean);
 
     // Para cada venda, exclui os itens e a transação financeira relacionada
     for (const sale of sales) {
@@ -1028,10 +1165,49 @@ router.delete("/appointments/:id", auth, async (req, res) => {
     }
 
     // Exclui a transação financeira do agendamento
+    await AppointmentStatusHistory.destroy({
+      where: {
+        appointmentId: id,
+        usersId: req.user.establishment,
+      },
+      transaction: t,
+    });
+
+    await AppointmentItem.destroy({
+      where: {
+        appointmentId: id,
+        usersId: req.user.establishment,
+      },
+      transaction: t,
+    });
+
+    await AppointmentPayment.destroy({
+      where: {
+        appointmentId: id,
+        usersId: req.user.establishment,
+      },
+      transaction: t,
+    });
+
+    const financeFilters = [
+      { reference: `appointment_balance:${id}` },
+      { reference: `appointment_free:${id}` },
+    ];
+    if (appointment.financeId) {
+      financeFilters.push({ id: appointment.financeId });
+    }
+    if (paymentFinanceIds.length > 0) {
+      financeFilters.push({
+        id: {
+          [Op.in]: paymentFinanceIds,
+        },
+      });
+    }
+
     await Finance.destroy({
       where: {
-        id: appointment.financeId,
         usersId: req.user.establishment,
+        [Op.or]: financeFilters,
       },
       transaction: t,
     });
@@ -1045,7 +1221,9 @@ router.delete("/appointments/:id", auth, async (req, res) => {
       message: "Agendamento excluído com sucesso",
     });
   } catch (error) {
-    await t.rollback();
+    if (t) {
+      await t.rollback();
+    }
     console.error("Erro ao excluir agendamento:", error);
     return res.status(500).json({
       message: "Erro ao excluir agendamento",
@@ -1055,6 +1233,8 @@ router.delete("/appointments/:id", auth, async (req, res) => {
 });
 // Criar pacote de agendamentos
 router.post("/appointments/package", auth, async (req, res) => {
+  const transaction = await sequelize.transaction();
+
   try {
     const {
       customerId,
@@ -1068,6 +1248,30 @@ router.post("/appointments/package", auth, async (req, res) => {
       sellerName,
       type,
     } = req.body;
+
+    const resolvePackageOccurrenceStaff = (occurrence, occurrenceIndex) => {
+      const explicitResponsibleId = String(occurrence?.responsibleId || "").trim();
+      const explicitSellerName = String(occurrence?.sellerName || "").trim();
+
+      if (explicitResponsibleId || explicitSellerName) {
+        return {
+          responsibleId: explicitResponsibleId || null,
+          sellerName: explicitSellerName || null,
+        };
+      }
+
+      if (occurrenceIndex === 0) {
+        return {
+          responsibleId: responsibleId || null,
+          sellerName: sellerName || null,
+        };
+      }
+
+      return {
+        responsibleId: null,
+        sellerName: null,
+      };
+    };
 
     // Validação dos dados
     const requiredFields = {
@@ -1091,6 +1295,7 @@ router.post("/appointments/package", auth, async (req, res) => {
     }
 
     if (invalidFields.length > 0) {
+      await transaction.rollback();
       return res.status(400).json({
         message: "Dados inválidos",
         invalidFields: invalidFields,
@@ -1103,9 +1308,11 @@ router.post("/appointments/package", auth, async (req, res) => {
         id: customerId,
         usersId: req.user.establishment,
       },
+      transaction,
     });
 
     if (!customer) {
+      await transaction.rollback();
       return res.status(404).json({ message: "Cliente não encontrado" });
     }
 
@@ -1114,9 +1321,11 @@ router.post("/appointments/package", auth, async (req, res) => {
         id: petId,
         usersId: req.user.establishment,
       },
+      transaction,
     });
 
     if (!pet) {
+      await transaction.rollback();
       return res.status(404).json({ message: "Pet não encontrado" });
     }
 
@@ -1126,9 +1335,11 @@ router.post("/appointments/package", auth, async (req, res) => {
         id: serviceId,
         establishment: req.user.establishment,
       },
+      transaction,
     });
 
     if (!service) {
+      await transaction.rollback();
       return res.status(404).json({ message: "Serviço não encontrado" });
     }
 
@@ -1136,7 +1347,7 @@ router.post("/appointments/package", auth, async (req, res) => {
     const createdAppointments = [];
 
     // Ordenar as datas em ordem cronológica
-    const sortedDates = dates.sort((a, b) => {
+    const sortedDates = [...dates].sort((a, b) => {
       const dateA = new Date(`${a.date} ${a.time}`);
       const dateB = new Date(`${b.date} ${b.time}`);
       return dateA - dateB;
@@ -1146,30 +1357,37 @@ router.post("/appointments/package", auth, async (req, res) => {
 
     // Criar um agendamento para cada data/horário
     for (let i = 0; i < sortedDates.length; i++) {
-      const { date, time } = sortedDates[i];
+      const occurrence = sortedDates[i];
+      const { date, time } = occurrence;
+      const occurrenceStaff = resolvePackageOccurrenceStaff(occurrence, i);
+      const occurrenceResponsibleId = occurrenceStaff.responsibleId;
+      const occurrenceSellerName = occurrenceStaff.sellerName;
 
       // Validar formato de data e hora
       if (!date || !time) {
+        await transaction.rollback();
         return res.status(400).json({
           message: "Cada agendamento deve conter data e horário",
         });
       }
 
       // Verificar disponibilidade do horário apenas se houver responsibleId
-      if (responsibleId) {
+      if (occurrenceResponsibleId) {
         const existingAppointment = await Appointment.findOne({
           where: {
             date,
             time,
-            responsibleId,
+            responsibleId: occurrenceResponsibleId,
             type,
             status: {
               [Op.notIn]: ["cancelado", "concluido"],
             },
           },
+          transaction,
         });
 
         if (existingAppointment) {
+          await transaction.rollback();
           return res.status(400).json({
             message: `Horário ${time} do dia ${date} já está ocupado para este profissional`,
           });
@@ -1183,8 +1401,8 @@ router.post("/appointments/package", auth, async (req, res) => {
         serviceId,
         secondaryServiceId,
         tertiaryServiceId,
-        responsibleId,
-        sellerName,
+        responsibleId: occurrenceResponsibleId,
+        sellerName: occurrenceSellerName,
         type,
         date,
         time,
@@ -1194,7 +1412,7 @@ router.post("/appointments/package", auth, async (req, res) => {
         package: true,
         packageNumber: i + 1,
         packageMax: totalAppointments,
-      });
+      }, { transaction });
 
       // Calcula o valor total do agendamento
       let totalAmount = Number(service.price || 0);
@@ -1206,6 +1424,7 @@ router.post("/appointments/package", auth, async (req, res) => {
             id: secondaryServiceId,
             establishment: req.user.establishment,
           },
+          transaction,
         });
         if (secondaryService) {
           totalAmount += Number(secondaryService.price || 0);
@@ -1218,6 +1437,7 @@ router.post("/appointments/package", auth, async (req, res) => {
             id: tertiaryServiceId,
             establishment: req.user.establishment,
           },
+          transaction,
         });
         if (tertiaryService) {
           totalAmount += Number(tertiaryService.price || 0);
@@ -1241,17 +1461,26 @@ router.post("/appointments/package", auth, async (req, res) => {
         notes: observation,
         createdBy: req.user.id,
         usersId: req.user.establishment,
-      });
+      }, { transaction });
 
       // Atualiza o agendamento com o ID da finança
-      await newAppointment.update({ financeId: finance.id });
+      await newAppointment.update({ financeId: finance.id }, { transaction });
 
       createdAppointments.push(newAppointment);
     }
 
+    await transaction.commit();
+
     // Enviar mensagem WhatsApp para o cliente
     if (customer.phone) {
-      await mensagemPacotinho(createdAppointments.map((app) => app.id));
+      try {
+        await mensagemPacotinho(createdAppointments.map((app) => app.id));
+      } catch (notifyError) {
+        console.error(
+          "Erro ao enviar mensagem de confirmação do pacote:",
+          notifyError,
+        );
+      }
     }
 
     return res.status(201).json({
@@ -1259,6 +1488,9 @@ router.post("/appointments/package", auth, async (req, res) => {
       data: createdAppointments,
     });
   } catch (error) {
+    if (!transaction.finished) {
+      await transaction.rollback();
+    }
     console.error("Erro ao criar pacote de agendamentos:", error);
     return res.status(500).json({
       message: "Erro ao criar pacote de agendamentos",

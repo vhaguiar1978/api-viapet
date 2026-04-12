@@ -12,6 +12,12 @@ const AppointmentPayment = sequelize.define(
     appointmentId: {
       type: DataTypes.UUID,
       allowNull: false,
+      references: {
+        model: "appointments",
+        key: "id",
+      },
+      onUpdate: "CASCADE",
+      onDelete: "CASCADE",
     },
     usersId: {
       type: DataTypes.UUID,
@@ -65,6 +71,12 @@ const AppointmentPayment = sequelize.define(
     financeId: {
       type: DataTypes.INTEGER,
       allowNull: true,
+      references: {
+        model: "finances",
+        key: "id",
+      },
+      onUpdate: "CASCADE",
+      onDelete: "SET NULL",
     },
     createdBy: {
       type: DataTypes.UUID,

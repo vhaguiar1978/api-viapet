@@ -10,6 +10,40 @@ import Services from "../models/Services.js";
 const toNumber = (value) => Number.parseFloat(value || 0) || 0;
 
 const normalizeStatus = (status) => (status || "").toLowerCase();
+const isComandaManagedFinanceReference = (reference) =>
+  /^appointment_(payment:|balance:|free:)/.test(String(reference || ""));
+const toTimestamp = (value) => {
+  if (!value) return 0;
+  const normalizedValue =
+    typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)
+      ? `${value}T12:00:00`
+      : value;
+  const parsed = new Date(normalizedValue).getTime();
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+const getLatestAppointmentPaymentFinanceId = (payments = []) =>
+  payments
+    .filter((payment) => payment?.financeId)
+    .reduce((latestPayment, currentPayment) => {
+      if (!latestPayment) {
+        return currentPayment;
+      }
+
+      const latestTimestamp = Math.max(
+        toTimestamp(latestPayment.updatedAt),
+        toTimestamp(latestPayment.paidAt),
+        toTimestamp(latestPayment.createdAt),
+        toTimestamp(latestPayment.dueDate),
+      );
+      const currentTimestamp = Math.max(
+        toTimestamp(currentPayment.updatedAt),
+        toTimestamp(currentPayment.paidAt),
+        toTimestamp(currentPayment.createdAt),
+        toTimestamp(currentPayment.dueDate),
+      );
+
+      return currentTimestamp >= latestTimestamp ? currentPayment : latestPayment;
+    }, null)?.financeId || null;
 
 export const calculateMachineFeeBreakdown = (grossAmount, feePercentage = 0) => {
   const gross = toNumber(grossAmount);
@@ -162,6 +196,10 @@ export const syncAppointmentFinance = async (appointmentId) => {
     throw new Error("Agendamento não encontrado");
   }
 
+  const currentLinkedFinance = appointment.financeId
+    ? await Finance.findByPk(appointment.financeId)
+    : null;
+
   const [items, payments, customer] = await Promise.all([
     AppointmentItem.findAll({
       where: { appointmentId },
@@ -237,6 +275,15 @@ export const syncAppointmentFinance = async (appointmentId) => {
     }
   }
 
+  if (
+    currentLinkedFinance &&
+    !isComandaManagedFinanceReference(currentLinkedFinance.reference) &&
+    (items.length > 0 || payments.length > 0)
+  ) {
+    await currentLinkedFinance.destroy();
+    await appointment.update({ financeId: null });
+  }
+
   const balanceReference = `appointment_balance:${appointment.id}`;
   const existingBalanceFinance = await Finance.findOne({
     where: {
@@ -258,8 +305,7 @@ export const syncAppointmentFinance = async (appointmentId) => {
         await existingBalanceFinance.destroy();
       }
 
-      const latestPaymentFinanceId =
-        payments.find((payment) => payment.financeId)?.financeId || null;
+      const latestPaymentFinanceId = getLatestAppointmentPaymentFinanceId(payments);
       await appointment.update({ financeId: latestPaymentFinanceId });
       return summary;
     }
@@ -300,8 +346,7 @@ export const syncAppointmentFinance = async (appointmentId) => {
       await existingBalanceFinance.destroy();
     }
 
-    const latestPaymentFinanceId =
-      payments.find((payment) => payment.financeId)?.financeId || null;
+    const latestPaymentFinanceId = getLatestAppointmentPaymentFinanceId(payments);
     if (latestPaymentFinanceId) {
       await appointment.update({ financeId: latestPaymentFinanceId });
     } else {
@@ -369,6 +414,9 @@ export const getAppointmentComandaDetails = async (appointmentId, usersId) => {
     await appointment.reload();
   }
   const legacyItems = items.length === 0 ? await getLegacyServiceItems(appointment) : [];
+  const finance = appointment.financeId
+    ? await Finance.findByPk(appointment.financeId)
+    : null;
 
   return {
     appointment,
@@ -377,6 +425,7 @@ export const getAppointmentComandaDetails = async (appointmentId, usersId) => {
     payments,
     history,
     summary,
+    finance,
     catalogs: {
       products,
       services,
