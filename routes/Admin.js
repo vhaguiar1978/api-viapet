@@ -612,8 +612,7 @@ router.post("/admin/clients/:id/send-reset-link", adminMiddleware, async (req, r
 
     await emailService.sendPasswordResetEmail(user.email, token);
 
-    const frontendUrl = process.env.FRONTEND_URL || "http://127.0.0.1:3001";
-    const resetUrl = `${frontendUrl}/redefinir-senha?token=${token}`;
+    const resetUrl = emailService.buildPasswordResetLink(token);
 
     return res.json({
       message: "Link de redefinicao enviado com sucesso por e-mail.",

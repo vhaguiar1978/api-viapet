@@ -10,6 +10,75 @@ class EmailService {
     this.initializeCronJobs();
   }
 
+  normalizeFrontendUrl(url) {
+    const rawUrl = String(url || "").trim();
+    if (!rawUrl) {
+      return "https://app.viapet.app";
+    }
+
+    if (/^https?:\/\/viapet\.app\/?$/i.test(rawUrl)) {
+      return "https://app.viapet.app";
+    }
+
+    return rawUrl.replace(/\/+$/, "");
+  }
+
+  buildPasswordResetLink(token) {
+    const frontendUrl = this.normalizeFrontendUrl(process.env.FRONTEND_URL);
+    return `${frontendUrl}/redefinir-senha?token=${token}`;
+  }
+
+  async getMailSettings() {
+    const settings = await Admin.findOne();
+    const smtpPort =
+      Number(settings?.smtpPort || process.env.SMTP_PORT || process.env.MAIL_PORT || 0) || null;
+    const mailSettings = {
+      smtpHost: settings?.smtpHost || process.env.SMTP_HOST || process.env.MAIL_HOST || "",
+      smtpPort,
+      smtpEmail: settings?.smtpEmail || process.env.SMTP_EMAIL || process.env.MAIL_USER || "",
+      smtpPassword:
+        settings?.smtpPassword || process.env.SMTP_PASSWORD || process.env.MAIL_PASS || "",
+    };
+
+    if (
+      !mailSettings.smtpHost ||
+      !mailSettings.smtpPort ||
+      !mailSettings.smtpEmail ||
+      !mailSettings.smtpPassword
+    ) {
+      throw new Error(
+        "As configuracoes de email nao estao completas. Cadastre SMTP no painel administrativo."
+      );
+    }
+
+    return mailSettings;
+  }
+
+  async ensurePasswordResetTransporter() {
+    const settings = await this.getMailSettings();
+
+    if (!this.transporter) {
+      this.transporter = nodemailer.createTransport({
+        host: settings.smtpHost,
+        port: settings.smtpPort,
+        secure: settings.smtpPort === 465,
+        auth: {
+          user: settings.smtpEmail,
+          pass: settings.smtpPassword,
+        },
+        connectionTimeout: 10000,
+        greetingTimeout: 5000,
+        socketTimeout: 10000,
+        pool: true,
+        maxConnections: 1,
+        maxMessages: 10,
+        rateLimit: 1,
+      });
+    }
+
+    return settings;
+  }
+
   async initializeTransporter() {
     try {
       const settings = await Admin.findOne();
@@ -57,13 +126,8 @@ class EmailService {
 
   async sendPasswordResetEmail(recipientEmail, token) {
     try {
-      if (!this.transporter) {
-        await this.initializeTransporter();
-      }
-
-      const settings = await Admin.findOne();
-
-      const resetLink = `${process.env.FRONTEND_URL}/redefinir-senha?token=${token}`;
+      const settings = await this.ensurePasswordResetTransporter();
+      const resetLink = this.buildPasswordResetLink(token);
 
       const mailOptions = {
         from: settings.smtpEmail,
