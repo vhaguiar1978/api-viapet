@@ -24,7 +24,7 @@ router.post("/loginfunc", async (req, res) => {
     return res.status(400).json({ message: "Preencha o campo de e-mail" });
   }
 
-  const emailTrimmed = email.trim();
+  const emailTrimmed = String(email || "").trim().toLowerCase();
   if (!validator.isEmail(emailTrimmed)) {
     return res.status(400).json({ message: "Email invalido" });
   }

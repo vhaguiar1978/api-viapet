@@ -97,16 +97,17 @@ async function registerLoginHistory(userId, req, status = "success") {
 router.post("/login", async (req, res) => {
   try {
     const { email, password } = req.body;
+    const normalizedEmail = String(email || "").trim().toLowerCase();
 
-    if (!email || !password) {
+    if (!normalizedEmail || !password) {
       return res.status(400).json({ message: "Preencha todos os campos" });
     }
 
-    if (!validator.isEmail(email)) {
+    if (!validator.isEmail(normalizedEmail)) {
       return res.status(400).json({ message: "Email invalido" });
     }
 
-    const user = await Users.findOne({ where: { email } });
+    const user = await Users.findOne({ where: { email: normalizedEmail } });
 
     if (!user) {
       await registerLoginHistory(null, req, "failed");
@@ -219,12 +220,13 @@ router.post("/login/complete-first-access", async (req, res) => {
 router.post("/login/reset-first-access", async (req, res) => {
   try {
     const { email } = req.body;
+    const normalizedEmail = String(email || "").trim().toLowerCase();
 
-    if (!email || !validator.isEmail(email)) {
+    if (!normalizedEmail || !validator.isEmail(normalizedEmail)) {
       return res.status(400).json({ message: "Informe um email valido." });
     }
 
-    const user = await Users.findOne({ where: { email } });
+    const user = await Users.findOne({ where: { email: normalizedEmail } });
     if (!user) {
       return res.status(404).json({ message: "Usuario nao encontrado." });
     }

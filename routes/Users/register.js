@@ -11,12 +11,13 @@ const router = express.Router();
 
 router.post("/register", async (req, res) => {
   const { name, email, password, phone } = req.body;
+  const normalizedEmail = String(email || "").trim().toLowerCase();
 
-  if (!name || !email || !password || !phone) {
+  if (!name || !normalizedEmail || !password || !phone) {
     return res.status(400).json({ message: "Preencha todos os campos" });
   }
 
-  if (!validator.isEmail(email)) {
+  if (!validator.isEmail(normalizedEmail)) {
     return res.status(400).json({ message: "Email invalido" });
   }
 
@@ -25,7 +26,7 @@ router.post("/register", async (req, res) => {
   }
 
   try {
-    const user = await Users.findOne({ where: { email } });
+    const user = await Users.findOne({ where: { email: normalizedEmail } });
     if (user) {
       return res.status(400).json({ message: "Ja existe uma conta cadastrada com este e-mail" });
     }
@@ -37,7 +38,7 @@ router.post("/register", async (req, res) => {
 
     const userCreate = await Users.create({
       name,
-      email,
+      email: normalizedEmail,
       password: passHash,
       establishment: null,
       expirationDate,
@@ -81,7 +82,7 @@ router.post("/register", async (req, res) => {
       notes: "Assinatura trial criada automaticamente no registro",
     });
 
-    EmailService.sendWelcomeEmail(userCreate.id, email).catch((error) => {
+    EmailService.sendWelcomeEmail(userCreate.id, normalizedEmail).catch((error) => {
       console.error("Email de boas-vindas nao pode ser enviado:", error.message);
     });
 

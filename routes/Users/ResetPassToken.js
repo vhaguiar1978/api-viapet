@@ -10,16 +10,17 @@ const JWT_SECRET = process.env.JWT_SECRET;
 
 router.post("/resetPassToken", async (req, res) => {
   const { email } = req.body;
+  const normalizedEmail = String(email || "").trim().toLowerCase();
 
-  if (!email) {
+  if (!normalizedEmail) {
     return res.status(400).json({ message: "Email nao informado" });
   }
 
-  if (!validator.isEmail(email)) {
+  if (!validator.isEmail(normalizedEmail)) {
     return res.status(400).json({ message: "Email invalido" });
   }
 
-  const user = await Users.findOne({ where: { email } });
+  const user = await Users.findOne({ where: { email: normalizedEmail } });
   if (!user) {
     return res.status(400).json({ message: "Usuario inexistente" });
   }
@@ -38,7 +39,7 @@ router.post("/resetPassToken", async (req, res) => {
   await user.save();
 
   try {
-    await emailService.sendPasswordResetEmail(email, token);
+    await emailService.sendPasswordResetEmail(normalizedEmail, token);
     return res.status(200).json({
       message: "O link para redefinir a senha foi encaminhado via email.",
     });
