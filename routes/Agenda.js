@@ -18,6 +18,7 @@ router.get("/agenda/settings", authenticate, async (req, res) => {
         "closingTime",
         "breakStartTime",
         "breakEndTime",
+        "workingDays",
       ],
     });
 
@@ -51,7 +52,7 @@ router.post("/agenda/settings", authenticate, owner, async (req, res) => {
       breakStartTime,
       breakEndTime,
     } = req.body;
-    const userId = req.user.id;
+    const userId = req.user.establishment;
 
     if (
       intervalClinic === undefined &&
