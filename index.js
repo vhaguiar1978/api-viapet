@@ -132,4 +132,18 @@ app.listen(PORT, () => {
   console.log("📡 Rotas de subscription corrigidas - RESTART");
   console.log("🔗 Ambiente: ", process.env.NODE_ENV);
   console.log("🔗 API_URL: ", process.env.API_URL);
+
+  // Keep-alive: ping próprio a cada 14 minutos para evitar hibernação no Render
+  if (process.env.NODE_ENV === "production" && process.env.API_URL) {
+    const keepAliveUrl = `${process.env.API_URL}/health`;
+    setInterval(async () => {
+      try {
+        const { default: fetch } = await import("node-fetch");
+        await fetch(keepAliveUrl, { method: "GET" });
+        console.log("🏓 Keep-alive ping enviado");
+      } catch (e) {
+        console.warn("⚠️ Keep-alive falhou:", e.message);
+      }
+    }, 14 * 60 * 1000); // 14 minutos
+  }
 });
