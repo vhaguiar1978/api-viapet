@@ -4,6 +4,7 @@ import { Op } from "sequelize";
 import authenticate from "../middlewares/auth.js";
 import Settings from "../models/Settings.js";
 import CrmWhatsappMessage from "../models/CrmWhatsappMessage.js";
+import Custumers from "../models/Custumers.js";
 
 const router = express.Router();
 
@@ -260,6 +261,204 @@ router.post("/crm-whatsapp/test-connection", authenticate, async (req, res) => {
         "Nao foi possivel validar a conexao com a Meta",
       error: error.message,
     });
+  }
+});
+
+// ─── GET /whatsapp-crm-config ───────────────────────────────────────────────
+router.get("/whatsapp-crm-config", authenticate, async (req, res) => {
+  try {
+    const settings = await Settings.findOne({
+      where: { usersId: req.user.establishment },
+      attributes: ["whatsappConnection"],
+    });
+
+    const config = settings?.whatsappConnection || {};
+
+    return res.status(200).json({
+      message: "Configuracao do WhatsApp CRM carregada com sucesso",
+      data: {
+        provider: config.provider || "WhatsApp Cloud API",
+        phoneNumberId: config.phoneNumberId || "",
+        businessAccountId: config.businessAccountId || "",
+        verifyToken: config.verifyToken || "",
+        accessTokenConfigured: Boolean(config.accessToken || config.accessTokenConfigured),
+        accessTokenPreview: config.accessToken ? config.accessToken.slice(-4) : "",
+        defaultCountryCode: config.defaultCountryCode || "55",
+        webhookUrl: `${process.env.URL || ""}/webhook`,
+        status: config.phoneNumberId ? "configured" : "pending",
+      },
+    });
+  } catch (error) {
+    console.error("Erro ao buscar configuracao do WhatsApp CRM:", error);
+    return res.status(500).json({ message: "Erro no servidor", error: error.message });
+  }
+});
+
+// ─── POST /whatsapp-crm-config ───────────────────────────────────────────────
+router.post("/whatsapp-crm-config", authenticate, async (req, res) => {
+  try {
+    const {
+      provider,
+      phoneNumberId,
+      businessAccountId,
+      verifyToken,
+      accessToken,
+      accessTokenConfigured,
+      defaultCountryCode,
+    } = req.body || {};
+
+    let settings = await Settings.findOne({
+      where: { usersId: req.user.establishment },
+    });
+
+    if (!settings) {
+      return res.status(404).json({ message: "Configuracoes do estabelecimento nao encontradas" });
+    }
+
+    const current = settings.whatsappConnection || {};
+
+    // Only overwrite accessToken when a new one is provided
+    const nextToken = accessToken && String(accessToken).trim() ? String(accessToken).trim() : current.accessToken || "";
+
+    settings.whatsappConnection = {
+      ...current,
+      provider: provider || current.provider || "WhatsApp Cloud API",
+      phoneNumberId: phoneNumberId !== undefined ? String(phoneNumberId || "").trim() : (current.phoneNumberId || ""),
+      businessAccountId: businessAccountId !== undefined ? String(businessAccountId || "").trim() : (current.businessAccountId || ""),
+      verifyToken: verifyToken !== undefined ? String(verifyToken || "").trim() : (current.verifyToken || ""),
+      accessToken: nextToken,
+      accessTokenConfigured: Boolean(nextToken || accessTokenConfigured),
+      defaultCountryCode: defaultCountryCode || current.defaultCountryCode || "55",
+    };
+
+    await settings.save();
+
+    return res.status(200).json({
+      message: "Configuracao do WhatsApp CRM salva com sucesso",
+      data: {
+        provider: settings.whatsappConnection.provider,
+        phoneNumberId: settings.whatsappConnection.phoneNumberId,
+        businessAccountId: settings.whatsappConnection.businessAccountId,
+        verifyToken: settings.whatsappConnection.verifyToken,
+        accessTokenConfigured: settings.whatsappConnection.accessTokenConfigured,
+        accessTokenPreview: nextToken ? nextToken.slice(-4) : "",
+        defaultCountryCode: settings.whatsappConnection.defaultCountryCode,
+        webhookUrl: `${process.env.URL || ""}/webhook`,
+      },
+    });
+  } catch (error) {
+    console.error("Erro ao salvar configuracao do WhatsApp CRM:", error);
+    return res.status(500).json({ message: "Erro no servidor", error: error.message });
+  }
+});
+
+// ─── POST /crm-whatsapp/broadcast ────────────────────────────────────────────
+router.post("/crm-whatsapp/broadcast", authenticate, async (req, res) => {
+  try {
+    const { message, phones } = req.body || {};
+
+    if (!message || !String(message).trim()) {
+      return res.status(400).json({ message: "Mensagem e obrigatoria" });
+    }
+
+    const settings = await Settings.findOne({
+      where: { usersId: req.user.establishment },
+    });
+
+    const { phoneNumberId, token } = resolveWhatsappConfig(settings);
+
+    if (!phoneNumberId || !token) {
+      return res.status(400).json({
+        message: "WhatsApp Cloud API nao configurado. Configure o Phone Number ID e o Access Token primeiro.",
+      });
+    }
+
+    // Build recipient list
+    let recipientPhones = [];
+
+    if (Array.isArray(phones) && phones.length > 0) {
+      // Explicit list provided
+      recipientPhones = phones.map(normalizePhone).filter(Boolean);
+    } else {
+      // Use all customers with phone
+      const customers = await Custumers.findAll({
+        where: {
+          usersId: req.user.establishment,
+          status: true,
+          phone: { [Op.not]: null, [Op.ne]: "" },
+        },
+        attributes: ["phone", "name", "id"],
+      });
+      recipientPhones = customers
+        .map((c) => ({ phone: normalizePhone(c.phone), name: c.name, customerId: c.id }))
+        .filter((c) => c.phone);
+    }
+
+    if (!recipientPhones.length) {
+      return res.status(400).json({ message: "Nenhum destinatario com telefone encontrado" });
+    }
+
+    const bodyText = String(message).trim();
+    const apiUrl = `https://graph.facebook.com/v21.0/${phoneNumberId}/messages`;
+    const results = { sent: 0, failed: 0, errors: [] };
+
+    for (const recipient of recipientPhones) {
+      const phone = typeof recipient === "string" ? recipient : recipient.phone;
+      const name = typeof recipient === "object" ? recipient.name : null;
+      const customerId = typeof recipient === "object" ? recipient.customerId : null;
+
+      try {
+        const response = await axios.post(
+          apiUrl,
+          {
+            messaging_product: "whatsapp",
+            to: phone,
+            type: "text",
+            text: { body: bodyText },
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json",
+            },
+          },
+        );
+
+        await CrmWhatsappMessage.create({
+          usersId: req.user.establishment,
+          customerId: customerId || null,
+          customerName: name || null,
+          phone,
+          direction: "outbound",
+          channel: "whatsapp",
+          messageType: "text",
+          body: bodyText,
+          whatsappMessageId: response?.data?.messages?.[0]?.id || null,
+          status: "sent",
+          receivedAt: new Date(),
+          payload: response?.data || {},
+        });
+
+        results.sent += 1;
+      } catch (sendError) {
+        results.failed += 1;
+        results.errors.push({
+          phone,
+          error: sendError.response?.data?.error?.message || sendError.message,
+        });
+      }
+
+      // Small delay to avoid hitting rate limits (10 msgs/sec limit on Cloud API)
+      await new Promise((resolve) => setTimeout(resolve, 110));
+    }
+
+    return res.status(200).json({
+      message: `Disparo concluido: ${results.sent} enviados, ${results.failed} falhas`,
+      data: results,
+    });
+  } catch (error) {
+    console.error("Erro no broadcast WhatsApp:", error);
+    return res.status(500).json({ message: "Erro no servidor", error: error.message });
   }
 });
 

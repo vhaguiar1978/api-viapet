@@ -11,9 +11,22 @@ import CrmWhatsappMessage from "../models/CrmWhatsappMessage.js";
 import CrmConversation from "../models/CrmConversation.js";
 import CrmConversationMessage from "../models/CrmConversationMessage.js";
 const router = express.Router();
-const WHATSAPP_API_URL =
-  "https://graph.facebook.com/v21.0/465822306605861/messages";
 import { Op } from "sequelize";
+
+// ─── Helpers para URL/token dinâmicos por usuário ────────────────────────────
+function resolveWhatsappApiUrl(settings) {
+  const config = settings?.whatsappConnection || {};
+  const phoneNumberId =
+    config.phoneNumberId ||
+    process.env.WHATSAPP_PHONE_NUMBER_ID ||
+    "465822306605861"; // fallback legado
+  return `https://graph.facebook.com/v21.0/${phoneNumberId}/messages`;
+}
+
+function resolveWhatsappApiToken(settings) {
+  const config = settings?.whatsappConnection || {};
+  return config.accessToken || process.env.WHATSAPP_TOKEN || "";
+}
 
 export async function mensagemMotorista(idAgendamento, status = null) {
   try {
@@ -126,9 +139,14 @@ export async function mensagemMotorista(idAgendamento, status = null) {
       });
     }
 
+    // Buscar configuracao por usuário para URL/token dinâmicos
+    const settingsMotorista = await Settings.findOne({ where: { usersId: agendamento.usersId } });
+    const apiUrlMotorista = resolveWhatsappApiUrl(settingsMotorista);
+    const apiTokenMotorista = resolveWhatsappApiToken(settingsMotorista);
+
     // Enviar mensagem para o motorista
     await axios.post(
-      WHATSAPP_API_URL,
+      apiUrlMotorista,
       {
         messaging_product: "whatsapp",
         recipient_type: "individual",
@@ -149,7 +167,7 @@ export async function mensagemMotorista(idAgendamento, status = null) {
       },
       {
         headers: {
-          Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+          Authorization: `Bearer ${apiTokenMotorista}`,
           "Content-Type": "application/json",
         },
       },
@@ -168,7 +186,7 @@ export async function mensagemMotorista(idAgendamento, status = null) {
     };
 
     await axios.post(
-      WHATSAPP_API_URL,
+      apiUrlMotorista,
       {
         messaging_product: "whatsapp",
         recipient_type: "individual",
@@ -189,7 +207,7 @@ export async function mensagemMotorista(idAgendamento, status = null) {
       },
       {
         headers: {
-          Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+          Authorization: `Bearer ${apiTokenMotorista}`,
           "Content-Type": "application/json",
         },
       },
@@ -262,7 +280,7 @@ export async function mensagemAgendamento(idAgendamento) {
     }
 
     const response = await axios.post(
-      WHATSAPP_API_URL,
+      resolveWhatsappApiUrl(estabelecimento),
       {
         messaging_product: "whatsapp",
         recipient_type: "individual",
@@ -311,7 +329,7 @@ export async function mensagemAgendamento(idAgendamento) {
       },
       {
         headers: {
-          Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+          Authorization: `Bearer ${resolveWhatsappApiToken(estabelecimento)}`,
           "Content-Type": "application/json",
         },
       },
@@ -328,6 +346,7 @@ export async function mensagemPacotinho(idAgendamentos) {
     let customerName = "";
     let customerPhone = "";
     let estabelecimentoName = "";
+    let estabelecimentoSettings = null;
 
     // Objeto para agrupar agendamentos por horário
     const agendamentosPorHorario = {};
@@ -361,6 +380,7 @@ export async function mensagemPacotinho(idAgendamentos) {
           where: { usersId: agendamento.usersId },
         });
         estabelecimentoName = estabelecimento?.storeName || "";
+        estabelecimentoSettings = estabelecimento;
       }
 
       const horario = agendamento.time;
@@ -411,7 +431,7 @@ export async function mensagemPacotinho(idAgendamentos) {
     }
 
     const response = await axios.post(
-      WHATSAPP_API_URL,
+      resolveWhatsappApiUrl(estabelecimentoSettings),
       {
         messaging_product: "whatsapp",
         recipient_type: "individual",
@@ -443,7 +463,7 @@ export async function mensagemPacotinho(idAgendamentos) {
       },
       {
         headers: {
-          Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+          Authorization: `Bearer ${resolveWhatsappApiToken(estabelecimentoSettings)}`,
         },
       },
     );
@@ -544,7 +564,7 @@ export async function enviarMensagemAniversarioPet() {
         );
 
         await axios.post(
-          WHATSAPP_API_URL,
+          resolveWhatsappApiUrl(settings),
           {
             messaging_product: "whatsapp",
             recipient_type: "individual",
@@ -581,7 +601,7 @@ export async function enviarMensagemAniversarioPet() {
           },
           {
             headers: {
-              Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+              Authorization: `Bearer ${resolveWhatsappApiToken(settings)}`,
             },
           },
         );
@@ -691,7 +711,7 @@ export async function enviarMensagemAniversarioCliente() {
         );
 
         await axios.post(
-          WHATSAPP_API_URL,
+          resolveWhatsappApiUrl(settings),
           {
             messaging_product: "whatsapp",
             recipient_type: "individual",
@@ -728,7 +748,7 @@ export async function enviarMensagemAniversarioCliente() {
           },
           {
             headers: {
-              Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+              Authorization: `Bearer ${resolveWhatsappApiToken(settings)}`,
             },
           },
         );
@@ -1157,11 +1177,13 @@ router.post("/webhook", async (req, res) => {
 
           if (settings?.notifyClient) {
             console.log("Enviando mensagem automática...");
+            const webhookApiUrl = resolveWhatsappApiUrl(settings);
+            const webhookApiToken = resolveWhatsappApiToken(settings);
 
             try {
               // Envia mensagem informando que é um número de automação
               await axios.post(
-                WHATSAPP_API_URL,
+                webhookApiUrl,
                 {
                   messaging_product: "whatsapp",
                   to: from,
@@ -1172,7 +1194,7 @@ router.post("/webhook", async (req, res) => {
                 },
                 {
                   headers: {
-                    Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+                    Authorization: `Bearer ${webhookApiToken}`,
                     "Content-Type": "application/json",
                   },
                 },
@@ -1180,7 +1202,7 @@ router.post("/webhook", async (req, res) => {
 
               // Envia o contato do estabelecimento
               const response = await axios.post(
-                WHATSAPP_API_URL,
+                webhookApiUrl,
                 {
                   messaging_product: "whatsapp",
                   recipient_type: "individual",
@@ -1204,7 +1226,7 @@ router.post("/webhook", async (req, res) => {
                 },
                 {
                   headers: {
-                    Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+                    Authorization: `Bearer ${webhookApiToken}`,
                     "Content-Type": "application/json",
                   },
                 },
