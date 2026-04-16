@@ -107,6 +107,11 @@ const Appointment = sequelize.define(
       allowNull: true,
       comment: "Numero maximo de pacotes",
     },
+    packageGroupId: {
+      type: DataTypes.STRING,
+      allowNull: true,
+      comment: "ID do grupo de pacote — compartilhado por todas as sessoes do mesmo pacote",
+    },
     driverId: {
       type: DataTypes.UUID,
       allowNull: true,

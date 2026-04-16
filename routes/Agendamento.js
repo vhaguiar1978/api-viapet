@@ -222,6 +222,7 @@ router.post("/appointments", auth, async (req, res) => {
       whatsapp,
       tiktok,
       skipFinance,
+      packageGroupId,
     } = req.body;
 
     // Verifica se o pet existe e pertence ao estabelecimento
@@ -331,6 +332,7 @@ router.post("/appointments", auth, async (req, res) => {
       whatsapp,
       tiktok,
       financeId: finance?.id || null,
+      packageGroupId: packageGroupId || null,
     }, { transaction });
 
     // Busca as configurações de mensagem do WhatsApp
@@ -859,6 +861,7 @@ router.put("/appointments/:id", auth, async (req, res) => {
       secondaryServiceId,
       tertiaryServiceId,
       skipFinance,
+      packageGroupId,
     } = req.body;
 
     console.log("PUT /appointments/:id - Request Params:", req.params);
@@ -959,6 +962,8 @@ router.put("/appointments/:id", auth, async (req, res) => {
         tertiaryServiceId !== undefined
           ? tertiaryServiceId
           : appointment.tertiaryServiceId,
+      packageGroupId:
+        packageGroupId !== undefined ? packageGroupId : appointment.packageGroupId,
     };
 
     console.log("PUT /appointments/:id - Update Data:", updateData);

@@ -109,6 +109,15 @@ async function ensureAppointmentSchema() {
       });
       console.log("Coluna sellerName adicionada em Appointments");
     }
+
+    if (!appointmentTable.packageGroupId) {
+      await queryInterface.addColumn("appointments", "packageGroupId", {
+        type: DataTypes.STRING,
+        allowNull: true,
+        comment: "ID do grupo de pacote — compartilhado por todas as sessoes do mesmo pacote",
+      });
+      console.log("Coluna packageGroupId adicionada em Appointments");
+    }
   } catch (error) {
     console.error("Nao foi possivel validar o schema de Appointments:", error);
   }

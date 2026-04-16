@@ -1916,12 +1916,17 @@ router.get(
   }
 );
 
-// Endpoint para pagar pacote completo (POST /finance/pay-package)
+// Endpoint para pagar UMA sessao do pacote (POST /finance/pay-package)
+// Comportamento correto:
+//   - Apenas a sessao indicada (appointmentId) fica como "pago"
+//   - As demais sessoes do mesmo pacote recebem o valor mas continuam "pendente"
+//   - Nao duplica registros financeiros
+//   - Nao sobrescreve sessoes que ja estao pagas
 router.post("/finance/pay-package", authenticate, async (req, res) => {
   try {
     const { appointmentId, paymentMethod, paymentStatus = "pago" } = req.body;
 
-    // Buscar o agendamento para identificar o pacote
+    // Buscar o agendamento alvo
     const appointment = await Appointment.findByPk(appointmentId, {
       include: [
         {
@@ -1947,72 +1952,89 @@ router.post("/finance/pay-package", authenticate, async (req, res) => {
         .json({ error: "Este agendamento não é um pacote" });
     }
 
-    // Buscar todas as sessões do mesmo pacote
-    const packageAppointments = await Appointment.findAll({
-      where: {
-        petId: appointment.petId,
-        customerId: appointment.customerId,
-        package: appointment.package,
-        packageMax: appointment.packageMax,
-        usersId: req.user.establishment,
-      },
-      include: [
-        {
-          model: Finance,
-          as: "finance",
-          attributes: ["id", "status", "amount"],
-        },
-      ],
-    });
-
-    // Calcular valor por sessão
+    // Calcular valor por sessao
     let valorServicos = parseFloat(appointment.Service?.price || 0);
 
-    // Buscar serviços secundários e terciários se existirem
     if (appointment.secondaryServiceId) {
-      const secondaryService = await Services.findByPk(
-        appointment.secondaryServiceId
-      );
+      const secondaryService = await Services.findByPk(appointment.secondaryServiceId);
       valorServicos += parseFloat(secondaryService?.price || 0);
     }
 
     if (appointment.tertiaryServiceId) {
-      const tertiaryService = await Services.findByPk(
-        appointment.tertiaryServiceId
-      );
+      const tertiaryService = await Services.findByPk(appointment.tertiaryServiceId);
       valorServicos += parseFloat(tertiaryService?.price || 0);
     }
 
     const totalPackageValue = valorServicos * appointment.packageMax;
 
-    // Atualizar ou criar registros financeiros para todas as sessões
+    // Buscar todas as sessoes do mesmo pacote:
+    //   prioridade 1 → packageGroupId (UUID persistido no banco)
+    //   fallback     → petId + customerId + packageMax (legado)
+    const packageWhere = appointment.packageGroupId
+      ? { packageGroupId: appointment.packageGroupId, usersId: req.user.establishment }
+      : {
+          petId: appointment.petId,
+          customerId: appointment.customerId,
+          package: true,
+          packageMax: appointment.packageMax,
+          usersId: req.user.establishment,
+        };
+
+    const packageAppointments = await Appointment.findAll({
+      where: packageWhere,
+      include: [
+        {
+          model: Finance,
+          as: "finance",
+          attributes: ["id", "status", "amount", "paymentMethod"],
+        },
+      ],
+    });
+
+    // Atualizar registros financeiros:
+    //   - sessao alvo  → status = paymentStatus (pago)
+    //   - demais sessoes NAO pagas → status = "pendente" com valor atualizado
+    //   - sessoes ja pagas (exceto alvo) → NAO alteradas
     const updatePromises = packageAppointments.map(async (apt) => {
+      const isTarget = String(apt.id) === String(appointmentId);
+      const aptFinanceStatus = String(apt.finance?.status || "").toLowerCase();
+
+      if (!isTarget && aptFinanceStatus === "pago") {
+        return; // sessao ja paga, nao mexer
+      }
+
+      const sessionStatus = isTarget ? paymentStatus : "pendente";
+      const sessionPaymentMethod = isTarget ? paymentMethod : (apt.finance?.paymentMethod || "Pendente");
+
       if (apt.finance) {
-        // Atualizar registro existente
-        return await Finance.update(
+        await Finance.update(
           {
-            status: paymentStatus,
-            paymentMethod: paymentMethod,
+            status: sessionStatus,
+            paymentMethod: sessionPaymentMethod,
             amount: valorServicos,
             updatedAt: new Date(),
           },
-          {
-            where: { id: apt.finance.id },
-          }
+          { where: { id: apt.finance.id } }
         );
       } else {
-        // Criar novo registro financeiro
-        return await Finance.create({
-          appointmentId: apt.id,
-          status: paymentStatus,
-          paymentMethod: paymentMethod,
+        const newFinance = await Finance.create({
+          type: "entrada",
+          description: `Pacote - Sessão ${apt.packageNumber || "?"}/${apt.packageMax}`,
+          status: sessionStatus,
+          paymentMethod: sessionPaymentMethod,
           amount: valorServicos,
-          type: "receita",
-          description: `Pagamento pacote - Sessão ${apt.packageNumber}/${apt.packageMax}`,
+          grossAmount: valorServicos,
+          netAmount: valorServicos,
+          date: new Date(apt.date || new Date()),
+          dueDate: new Date(apt.date || new Date()),
+          category: "Agendamentos",
+          subCategory: apt.type || "Agenda",
+          expenseType: "variavel",
+          frequency: "unico",
+          reference: `appointment_balance:${apt.id}`,
           usersId: req.user.establishment,
-          createdAt: new Date(),
-          updatedAt: new Date(),
         });
+        await apt.update({ financeId: newFinance.id });
       }
     });
 
@@ -2020,17 +2042,18 @@ router.post("/finance/pay-package", authenticate, async (req, res) => {
 
     res.json({
       success: true,
-      message: `Pacote pago com sucesso! ${packageAppointments.length} sessões atualizadas.`,
+      message: `Sessão paga com sucesso. Demais sessões do pacote mantidas como pendente.`,
       data: {
-        packageId: appointment.package,
+        packageGroupId: appointment.packageGroupId || null,
         totalSessions: packageAppointments.length,
         totalAmount: totalPackageValue,
+        sessionAmount: valorServicos,
         paymentMethod,
-        paymentStatus,
+        paidAppointmentId: appointmentId,
       },
     });
   } catch (error) {
-    console.error("Erro ao pagar pacote completo:", error);
+    console.error("Erro ao pagar sessão do pacote:", error);
     res.status(500).json({
       error: "Erro interno do servidor",
       details: error.message,
