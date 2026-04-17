@@ -29,10 +29,20 @@ function normalizeViaCentralCategoryLabel(
   const category = String(rawCategory || "").trim();
   const serviceName = String(rawServiceName || "").trim();
   const appointmentKind = String(appointmentType || "").trim();
+  const explicitType = normalizeViaCentralMetricText(appointmentKind);
   const source = normalizeViaCentralMetricText(
     `${category} ${serviceName} ${appointmentKind}`,
   );
 
+  if (explicitType.includes("internac") || explicitType.includes("interna")) {
+    return "Internacao";
+  }
+  if (explicitType.includes("clinica") || explicitType.includes("consulta") || explicitType.includes("exame") || explicitType.includes("vacina") || explicitType.includes("procedimento")) {
+    return "Clinica";
+  }
+  if (explicitType.includes("estet") || explicitType.includes("banho") || explicitType.includes("tosa")) {
+    return "Estetica";
+  }
   if (source.includes("pacot")) return "Pacotinhos";
   if (source.includes("internac") || source.includes("interna")) return "Internacao";
   if (source.includes("cirurg")) return "Cirurgias";
@@ -407,6 +417,11 @@ function getAgendaAppointmentDisplayKey(appointment) {
     return null;
   }
 
+  const packageGroupId = String(appointment.packageGroupId || "").trim();
+  if (packageGroupId) {
+    return `package|${packageGroupId.toLowerCase()}`;
+  }
+
   const customerId = String(appointment.customerId || "").trim();
   const petId = String(appointment.petId || "").trim();
   const date = String(appointment.date || "").trim();
@@ -529,6 +544,10 @@ async function keepOnlyCurrentAgendaFinanceRows(finances = [], usersId) {
       "financeId",
       "customerId",
       "petId",
+      "package",
+      "packageGroupId",
+      "packageNumber",
+      "packageMax",
       "date",
       "time",
       "createdAt",
@@ -546,6 +565,10 @@ async function keepOnlyCurrentAgendaFinanceRows(finances = [], usersId) {
           "financeId",
           "customerId",
           "petId",
+          "package",
+          "packageGroupId",
+          "packageNumber",
+          "packageMax",
           "date",
           "time",
           "createdAt",
