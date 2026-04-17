@@ -15,6 +15,52 @@ const router = express.Router();
 
 const ALLOWED_STATUSES = new Set(["pending", "attending", "closed"]);
 const ALLOWED_MESSAGE_TYPES = new Set(["text", "image", "document", "audio"]);
+const DEFAULT_CRM_BOARD = {
+  columns: [
+    {
+      id: "prospectar",
+      label: "Prospectar",
+      color: "#ffe4e8",
+      description: "Novos contatos e primeiras conversas.",
+    },
+    {
+      id: "qualificar",
+      label: "Qualificar",
+      color: "#ffdbe7",
+      description: "Separar quem tem interesse real e contexto definido.",
+    },
+    {
+      id: "necessidades",
+      label: "Levantando necessidades",
+      color: "#ffd3df",
+      description: "Mapear servicos, dores e urgencia do cliente.",
+    },
+    {
+      id: "proposta",
+      label: "Proposta",
+      color: "#ffd7ea",
+      description: "Negociacoes e combinacoes comerciais em andamento.",
+    },
+    {
+      id: "followup",
+      label: "Follow-up",
+      color: "#ffe3ef",
+      description: "Retomar contatos e acompanhar decisoes pendentes.",
+    },
+    {
+      id: "negociacao",
+      label: "Negociacao",
+      color: "#ffd8df",
+      description: "Ajustes finais antes do fechamento.",
+    },
+    {
+      id: "fechamento",
+      label: "Contratar e cobrar",
+      color: "#ffeef2",
+      description: "Fechamento, pagamento e confirmacoes finais.",
+    },
+  ],
+};
 
 function normalizePhone(value) {
   const digits = String(value || "").replace(/\D/g, "");
@@ -24,6 +70,75 @@ function normalizePhone(value) {
 
 function getEstablishmentId(req) {
   return req.user?.establishment || req.user?.id || null;
+}
+
+function slugifyBoardColumnId(value, fallback = "coluna") {
+  const normalized = String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  return normalized || fallback;
+}
+
+function sanitizeBoardColumn(column, index = 0, usedIds = new Set()) {
+  const source = column && typeof column === "object" ? column : {};
+  const label = String(source.label || source.name || "").trim() || `Coluna ${index + 1}`;
+  let id = slugifyBoardColumnId(source.id || label, `coluna-${index + 1}`);
+
+  while (usedIds.has(id)) {
+    id = `${id}-${usedIds.size + 1}`;
+  }
+
+  usedIds.add(id);
+
+  return {
+    id,
+    label,
+    color: String(source.color || "#ffe4e8").trim() || "#ffe4e8",
+    description: String(source.description || "").trim(),
+  };
+}
+
+function sanitizeCrmBoardConfig(value) {
+  const source = value && typeof value === "object" ? value : {};
+  const usedIds = new Set();
+  const requestedColumns = Array.isArray(source.columns) ? source.columns : [];
+  const columns = (requestedColumns.length ? requestedColumns : DEFAULT_CRM_BOARD.columns)
+    .map((column, index) => sanitizeBoardColumn(column, index, usedIds))
+    .slice(0, 20);
+
+  return {
+    columns: columns.length ? columns : DEFAULT_CRM_BOARD.columns.map((column, index) => sanitizeBoardColumn(column, index, usedIds)),
+  };
+}
+
+async function getOrCreateCrmBoardSettings(usersId) {
+  let settings = await Settings.findOne({
+    where: { usersId },
+  });
+
+  if (!settings) {
+    settings = await Settings.create({
+      usersId,
+      whatsappConnection: {},
+    });
+  }
+
+  const whatsappConnection =
+    settings.whatsappConnection && typeof settings.whatsappConnection === "object"
+      ? settings.whatsappConnection
+      : {};
+
+  const crmBoard = sanitizeCrmBoardConfig(whatsappConnection.crmBoard);
+
+  return {
+    settings,
+    whatsappConnection,
+    crmBoard,
+  };
 }
 
 function buildPublicUploadUrl(req, fileName) {
@@ -243,6 +358,50 @@ router.get("/crm-conversations/summary", authenticate, async (req, res) => {
   }
 });
 
+router.get("/crm-conversations/board/config", authenticate, async (req, res) => {
+  try {
+    const usersId = getEstablishmentId(req);
+    const { crmBoard } = await getOrCreateCrmBoardSettings(usersId);
+
+    return res.status(200).json({
+      message: "Quadro do CRM carregado com sucesso",
+      data: crmBoard,
+    });
+  } catch (error) {
+    console.error("Erro ao carregar quadro do CRM:", error);
+    return res.status(500).json({
+      message: "Erro ao carregar quadro do CRM",
+      error: error.message,
+    });
+  }
+});
+
+router.post("/crm-conversations/board/config", authenticate, async (req, res) => {
+  try {
+    const usersId = getEstablishmentId(req);
+    const { settings, whatsappConnection } = await getOrCreateCrmBoardSettings(usersId);
+    const crmBoard = sanitizeCrmBoardConfig(req.body || {});
+
+    settings.whatsappConnection = {
+      ...whatsappConnection,
+      crmBoard,
+    };
+
+    await settings.save();
+
+    return res.status(200).json({
+      message: "Quadro do CRM atualizado com sucesso",
+      data: crmBoard,
+    });
+  } catch (error) {
+    console.error("Erro ao salvar quadro do CRM:", error);
+    return res.status(500).json({
+      message: "Erro ao salvar quadro do CRM",
+      error: error.message,
+    });
+  }
+});
+
 router.get("/crm-conversations", authenticate, async (req, res) => {
   try {
     const usersId = getEstablishmentId(req);
@@ -387,7 +546,10 @@ router.post("/crm-conversations", authenticate, async (req, res) => {
         linked.phone ||
         "Nova conversa",
       notes: notes || null,
-      metadata: metadata || {},
+      metadata:
+        metadata !== undefined
+          ? metadata || {}
+          : existingConversation?.metadata || {},
     };
 
     const conversation = existingConversation
