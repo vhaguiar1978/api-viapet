@@ -120,6 +120,210 @@ const getLegacyServiceItems = async (appointment) => {
     .filter(Boolean);
 };
 
+const buildLegacyServiceItemsFromServiceMap = (appointment, serviceMap = new Map()) => {
+  const serviceIds = [
+    appointment?.serviceId,
+    appointment?.secondaryServiceId,
+    appointment?.tertiaryServiceId,
+  ].filter(Boolean);
+
+  if (serviceIds.length === 0) {
+    return [];
+  }
+
+  return serviceIds
+    .map((serviceId, index) => {
+      const service = serviceMap.get(String(serviceId));
+      if (!service) return null;
+
+      return {
+        id: `legacy-${service.id}-${index}`,
+        appointmentId: appointment.id,
+        usersId: appointment.usersId,
+        type: "service",
+        serviceId: service.id,
+        productId: null,
+        description: service.name,
+        quantity: 1,
+        unitPrice: toNumber(service.price),
+        discount: 0,
+        total: toNumber(service.price),
+        observation: null,
+        legacy: true,
+        Service: service,
+        Product: null,
+      };
+    })
+    .filter(Boolean);
+};
+
+export const hydrateAppointmentsWithFinancialDetails = async (
+  appointments = [],
+  usersId,
+) => {
+  const normalizedAppointments = (Array.isArray(appointments) ? appointments : [])
+    .map((appointment) =>
+      typeof appointment?.toJSON === "function" ? appointment.toJSON() : appointment,
+    )
+    .filter(Boolean);
+
+  if (!normalizedAppointments.length || !usersId) {
+    return normalizedAppointments;
+  }
+
+  const appointmentIds = normalizedAppointments
+    .map((appointment) => appointment?.id)
+    .filter(Boolean);
+
+  if (!appointmentIds.length) {
+    return normalizedAppointments;
+  }
+
+  const [items, payments, history] = await Promise.all([
+    AppointmentItem.findAll({
+      where: {
+        appointmentId: appointmentIds,
+        usersId,
+      },
+      order: [["createdAt", "ASC"]],
+    }),
+    AppointmentPayment.findAll({
+      where: {
+        appointmentId: appointmentIds,
+        usersId,
+      },
+      order: [["dueDate", "ASC"], ["createdAt", "ASC"]],
+    }),
+    AppointmentStatusHistory.findAll({
+      where: {
+        appointmentId: appointmentIds,
+        usersId,
+      },
+      order: [["createdAt", "DESC"]],
+    }),
+  ]);
+
+  const serviceIds = [
+    ...new Set(
+      [
+        ...normalizedAppointments.flatMap((appointment) => [
+          appointment?.serviceId,
+          appointment?.secondaryServiceId,
+          appointment?.tertiaryServiceId,
+          appointment?.Service?.id,
+        ]),
+        ...items.map((item) => item?.serviceId),
+      ]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean),
+    ),
+  ];
+  const productIds = [
+    ...new Set(
+      items
+        .map((item) => String(item?.productId || "").trim())
+        .filter(Boolean),
+    ),
+  ];
+
+  const [services, products] = await Promise.all([
+    serviceIds.length
+      ? Services.findAll({
+          where: {
+            id: serviceIds,
+          },
+        })
+      : [],
+    productIds.length
+      ? Products.findAll({
+          where: {
+            id: productIds,
+            usersId,
+          },
+        })
+      : [],
+  ]);
+
+  const serviceMap = new Map(
+    services.map((service) => [
+      String(service.id),
+      typeof service?.toJSON === "function" ? service.toJSON() : service,
+    ]),
+  );
+  const productMap = new Map(
+    products.map((product) => [
+      String(product.id),
+      typeof product?.toJSON === "function" ? product.toJSON() : product,
+    ]),
+  );
+
+  const itemsByAppointmentId = items.reduce((acc, item) => {
+    const key = String(item.appointmentId || "");
+    if (!key) return acc;
+    if (!acc[key]) acc[key] = [];
+    const normalizedItem =
+      typeof item?.toJSON === "function" ? item.toJSON() : item;
+    acc[key].push({
+      ...normalizedItem,
+      Service: normalizedItem.serviceId
+        ? serviceMap.get(String(normalizedItem.serviceId)) || null
+        : null,
+      Product: normalizedItem.productId
+        ? productMap.get(String(normalizedItem.productId)) || null
+        : null,
+    });
+    return acc;
+  }, {});
+  const paymentsByAppointmentId = payments.reduce((acc, payment) => {
+    const key = String(payment.appointmentId || "");
+    if (!key) return acc;
+    if (!acc[key]) acc[key] = [];
+    acc[key].push(typeof payment?.toJSON === "function" ? payment.toJSON() : payment);
+    return acc;
+  }, {});
+  const historyByAppointmentId = history.reduce((acc, entry) => {
+    const key = String(entry.appointmentId || "");
+    if (!key) return acc;
+    if (!acc[key]) acc[key] = [];
+    acc[key].push(typeof entry?.toJSON === "function" ? entry.toJSON() : entry);
+    return acc;
+  }, {});
+
+  return Promise.all(
+    normalizedAppointments.map(async (appointment) => {
+      const appointmentId = String(appointment.id || "");
+      const itemsList = itemsByAppointmentId[appointmentId] || [];
+      const paymentsList = paymentsByAppointmentId[appointmentId] || [];
+      const statusHistory = historyByAppointmentId[appointmentId] || [];
+      const legacyItemsList = itemsList.length
+        ? []
+        : buildLegacyServiceItemsFromServiceMap(appointment, serviceMap);
+      const summary = await calculateAppointmentSummary(
+        appointment,
+        itemsList.length ? itemsList : legacyItemsList,
+        paymentsList,
+      );
+
+      return {
+        ...appointment,
+        Service: appointment?.serviceId
+          ? serviceMap.get(String(appointment.serviceId)) ||
+            appointment?.Service ||
+            null
+          : appointment?.Service || null,
+        itemsList,
+        legacyItemsList,
+        paymentsList,
+        statusHistory,
+        summary: {
+          ...summary,
+          usesLegacyItems: !itemsList.length && legacyItemsList.length > 0,
+        },
+      };
+    }),
+  );
+};
+
 export const calculateAppointmentSummary = async (appointment, items, payments) => {
   const effectiveItems =
     items.length > 0 ? items : await getLegacyServiceItems(appointment);

@@ -21,7 +21,10 @@ import SaleItems from "../models/SaleItem.js";
 import Products from "../models/Products.js";
 import sequelize from "../database/config.js";
 import Drivers from "../models/Drivers.js";
-import { syncAppointmentFinance } from "../service/appointmentFinance.js";
+import {
+  hydrateAppointmentsWithFinancialDetails,
+  syncAppointmentFinance,
+} from "../service/appointmentFinance.js";
 
 const router = express.Router();
 
@@ -437,30 +440,44 @@ router.get("/appointments/monthly", auth, async (req, res) => {
         ["time", "ASC"],
       ],
     });
+    const hydratedAppointments = await hydrateAppointmentsWithFinancialDetails(
+      appointments,
+      req.user.establishment,
+    );
 
     // Calcular dados agregados
     let quantidadePacientesAtendidos = new Set();
     let quantidadeAgendamentosClinica = 0;
     let quantidadeAgendamentosEstetica = 0;
-    let quantidadeServicos = appointments.length;
+    let quantidadeAgendamentosInternacao = 0;
+    let quantidadeServicos = 0;
     let totalFaturado = 0;
 
-    appointments.forEach((appointment) => {
+    hydratedAppointments.forEach((appointment) => {
       quantidadePacientesAtendidos.add(appointment.customerId);
-      if (appointment.type === "clinica") {
+      const summary = appointment.summary || {};
+      const normalizedType = String(appointment.type || "").trim().toLowerCase();
+
+      if (normalizedType === "clinica") {
         quantidadeAgendamentosClinica++;
-      } else if (appointment.type === "estetica") {
+      } else if (normalizedType === "estetica") {
         quantidadeAgendamentosEstetica++;
+      } else if (normalizedType === "internacao") {
+        quantidadeAgendamentosInternacao++;
       }
-      if (appointment.finance && appointment.finance.status === "pago") {
-        totalFaturado += Number(appointment.finance.amount);
-      }
+      quantidadeServicos += Math.max(
+        Number(summary?.servicesCount || 0) || 0,
+        Number(summary?.itemCount || 0) || 0,
+        1,
+      );
+      totalFaturado += Number(summary?.paid || appointment?.finance?.amount || 0) || 0;
     });
 
     const dadosAgregados = {
       quantidadePacientesAtendidos: quantidadePacientesAtendidos.size,
       quantidadeAgendamentosClinica,
       quantidadeAgendamentosEstetica,
+      quantidadeAgendamentosInternacao,
       quantidadeServicos,
       totalFaturado: totalFaturado.toFixed(2),
     };
@@ -468,7 +485,7 @@ router.get("/appointments/monthly", auth, async (req, res) => {
     return res.status(200).json({
       message: "Agendamentos e dados mensais encontrados com sucesso.",
       data: {
-        appointments,
+        appointments: hydratedAppointments,
         dadosAgregados,
       },
     });

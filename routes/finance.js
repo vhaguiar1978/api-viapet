@@ -10,7 +10,136 @@ import { Op } from "sequelize";
 import Finance from "../models/Finance.js";
 import CashClosure from "../models/CashClosure.js";
 import sequelize from "sequelize";
+import { hydrateAppointmentsWithFinancialDetails } from "../service/appointmentFinance.js";
 const router = express.Router();
+
+function normalizeViaCentralMetricText(value = "") {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toLowerCase();
+}
+
+function normalizeViaCentralCategoryLabel(
+  rawCategory = "",
+  rawServiceName = "",
+  appointmentType = "",
+) {
+  const category = String(rawCategory || "").trim();
+  const serviceName = String(rawServiceName || "").trim();
+  const appointmentKind = String(appointmentType || "").trim();
+  const source = normalizeViaCentralMetricText(
+    `${category} ${serviceName} ${appointmentKind}`,
+  );
+
+  if (source.includes("pacot")) return "Pacotinhos";
+  if (source.includes("internac") || source.includes("interna")) return "Internacao";
+  if (source.includes("cirurg")) return "Cirurgias";
+  if (
+    source.includes("consult") ||
+    source.includes("clinica") ||
+    source.includes("exame") ||
+    source.includes("vacina") ||
+    source.includes("procedimento")
+  ) {
+    return "Clinica";
+  }
+  if (
+    source.includes("estet") ||
+    source.includes("banho") ||
+    source.includes("tosa") ||
+    source.includes("hidrat")
+  ) {
+    return "Estetica";
+  }
+  if (category) return category;
+  if (serviceName) return serviceName;
+  return "Outros";
+}
+
+function getViaCentralDetailedItems(appointment = {}) {
+  if (Array.isArray(appointment?.itemsList) && appointment.itemsList.length) {
+    return appointment.itemsList;
+  }
+  if (Array.isArray(appointment?.legacyItemsList) && appointment.legacyItemsList.length) {
+    return appointment.legacyItemsList;
+  }
+  if (Array.isArray(appointment?.itemRows) && appointment.itemRows.length) {
+    return appointment.itemRows;
+  }
+  return [];
+}
+
+function getViaCentralServiceEntries(appointment = {}) {
+  const detailedItems = getViaCentralDetailedItems(appointment);
+  const serviceItems = detailedItems.filter((item) => {
+    const normalizedType = normalizeViaCentralMetricText(item?.type || item?.kind || "");
+    if (normalizedType === "product") return false;
+    if (normalizedType === "service") return true;
+    if (item?.serviceId || item?.Service?.id || item?.Service?.name) return true;
+    return !(item?.productId || item?.Product?.id);
+  });
+
+  if (serviceItems.length) {
+    return serviceItems
+      .map((item) => {
+        const quantity = Number(item?.quantity || 1) || 1;
+        const unitPrice = Number(item?.unitPrice ?? item?.price ?? 0) || 0;
+        const total = Number(item?.total ?? quantity * unitPrice) || 0;
+        const label =
+          String(
+            item?.description ||
+              item?.name ||
+              item?.serviceName ||
+              item?.Service?.name ||
+              appointment?.Service?.name ||
+              "Servico",
+          ).trim() || "Servico";
+
+        return {
+          label,
+          category: normalizeViaCentralCategoryLabel(
+            item?.Service?.category || appointment?.Service?.category,
+            label,
+            appointment?.type,
+          ),
+          count: quantity,
+          amount: total,
+        };
+      })
+      .filter((item) => item.label);
+  }
+
+  const fallbackLabel =
+    String(
+      appointment?.Service?.name ||
+        appointment?.serviceName ||
+        appointment?.title ||
+        appointment?.event ||
+        "Servico",
+    ).trim() || "Servico";
+  const fallbackAmount =
+    Number(appointment?.summary?.total || 0) ||
+    Number(appointment?.finance?.grossAmount || appointment?.finance?.amount || 0) ||
+    Number(appointment?.Service?.price || 0) ||
+    0;
+
+  return fallbackLabel
+    ? [
+        {
+          label: fallbackLabel,
+          category: normalizeViaCentralCategoryLabel(
+            appointment?.Service?.category,
+            fallbackLabel,
+            appointment?.type,
+          ),
+          count: 1,
+          amount: fallbackAmount,
+        },
+      ]
+    : [];
+}
 
 function buildNormalizedDateString(year, month, day) {
   const isoValue = `${year}-${month}-${day}`;
@@ -1236,25 +1365,33 @@ router.get("/monthly-stats/:year/:month", authenticate, async (req, res) => {
         count: 0,
         value: 0,
       },
+      hospitalizationAppointments: {
+        count: 0,
+        value: 0,
+      },
       products: {
         count: 0,
         value: 0,
       },
+      serviceCategories: {},
     };
 
     // Processar agendamentos
     appointments.forEach((appointment) => {
       // Adicionar paciente ao Set de únicos
-      if (appointment.clientId) {
-        stats.patients.uniqueCount.add(appointment.clientId);
+      if (appointment.customerId) {
+        stats.patients.uniqueCount.add(appointment.customerId);
       }
 
       const value = appointment.Service
         ? parseFloat(appointment.Service.price) || 0
         : 0;
+      const groupedCategoryTotals = {};
+      const appointmentRevenue = 0;
+      const normalizedCategory = "";
 
       // Classificar por tipo de serviço
-      if (appointment.Service && appointment.Service.category) {
+      if (false && appointment.Service && appointment.Service.category) {
         const category = appointment.Service.category.toLowerCase();
         if (category.includes("Clínica") || category.includes("clínica")) {
           stats.clinicalAppointments.count++;
@@ -1266,6 +1403,56 @@ router.get("/monthly-stats/:year/:month", authenticate, async (req, res) => {
           stats.aestheticAppointments.count++;
           stats.aestheticAppointments.value += value;
         }
+      }
+      if (groupedCategoryTotals.Estetica > 0) {
+        stats.aestheticAppointments.count += 1;
+        stats.aestheticAppointments.value += Number(groupedCategoryTotals.Estetica || 0);
+      }
+      if (groupedCategoryTotals.Clinica > 0 || groupedCategoryTotals.Cirurgias > 0) {
+        stats.clinicalAppointments.count += 1;
+        stats.clinicalAppointments.value +=
+          Number(groupedCategoryTotals.Clinica || 0) +
+          Number(groupedCategoryTotals.Cirurgias || 0);
+      }
+      if (groupedCategoryTotals.Internacao > 0) {
+        stats.hospitalizationAppointments.count += 1;
+        stats.hospitalizationAppointments.value += Number(groupedCategoryTotals.Internacao || 0);
+      }
+      if (!Object.keys(groupedCategoryTotals).length && appointmentRevenue > 0) {
+        if (!stats.serviceCategories[normalizedCategory]) {
+          stats.serviceCategories[normalizedCategory] = {
+            label: normalizedCategory,
+            count: 0,
+            value: 0,
+          };
+        }
+        stats.serviceCategories[normalizedCategory].count += 1;
+        stats.serviceCategories[normalizedCategory].value += appointmentRevenue;
+      }
+      if (groupedCategoryTotals.Estetica > 0) {
+        stats.aestheticAppointments.count += 1;
+        stats.aestheticAppointments.value += Number(groupedCategoryTotals.Estetica || 0);
+      }
+      if (groupedCategoryTotals.Clinica > 0 || groupedCategoryTotals.Cirurgias > 0) {
+        stats.clinicalAppointments.count += 1;
+        stats.clinicalAppointments.value +=
+          Number(groupedCategoryTotals.Clinica || 0) +
+          Number(groupedCategoryTotals.Cirurgias || 0);
+      }
+      if (groupedCategoryTotals.Internacao > 0) {
+        stats.hospitalizationAppointments.count += 1;
+        stats.hospitalizationAppointments.value += Number(groupedCategoryTotals.Internacao || 0);
+      }
+      if (!Object.keys(groupedCategoryTotals).length && appointmentRevenue > 0) {
+        if (!stats.serviceCategories[normalizedCategory]) {
+          stats.serviceCategories[normalizedCategory] = {
+            label: normalizedCategory,
+            count: 0,
+            value: 0,
+          };
+        }
+        stats.serviceCategories[normalizedCategory].count += 1;
+        stats.serviceCategories[normalizedCategory].value += appointmentRevenue;
       }
     });
 
@@ -1541,6 +1728,11 @@ router.get("/monthly-stats-detailed/:year/:month", authenticate, async (req, res
       ],
     });
 
+    const hydratedAppointments = await hydrateAppointmentsWithFinancialDetails(
+      allAppointments,
+      usersId,
+    );
+
     const allSales = await Sales.findAll({
       where: {
         usersId,
@@ -1554,7 +1746,7 @@ router.get("/monthly-stats-detailed/:year/:month", authenticate, async (req, res
     const sellerIds = Array.from(
       new Set(
         [
-          ...allAppointments.map((appointment) => String(appointment.responsibleId || "").trim()),
+          ...hydratedAppointments.map((appointment) => String(appointment.responsibleId || "").trim()),
           ...allSales.map((sale) => String(sale.responsible || "").trim()),
         ].filter(Boolean),
       ),
@@ -1598,18 +1790,39 @@ router.get("/monthly-stats-detailed/:year/:month", authenticate, async (req, res
       return sellerStatsMap[normalizedId];
     };
 
-    allAppointments.forEach((appointment) => {
+    hydratedAppointments.forEach((appointment) => {
       const sellerStats = ensureSellerStats(
         appointment.responsibleId,
-        appointment.responsible?.name || "",
+        appointment.responsible?.name || appointment.sellerName || "",
       );
       if (!sellerStats) return;
 
-      const value = appointment.Service ? parseFloat(appointment.Service.price) || 0 : 0;
-      sellerStats.appointmentsCount += 1;
-      sellerStats.totalValue += value;
+      const serviceEntries = getViaCentralServiceEntries(appointment);
+      const appointmentRevenue =
+        serviceEntries.reduce((sum, item) => sum + (Number(item.amount || 0) || 0), 0) ||
+        Number(appointment?.summary?.total || 0) ||
+        Number(appointment?.Service?.price || 0) ||
+        0;
+      const groupedCategoryTotals = serviceEntries.reduce((acc, item) => {
+        const categoryLabel = normalizeViaCentralCategoryLabel(
+          item?.category,
+          item?.label,
+          appointment?.type,
+        );
+        acc[categoryLabel] = (acc[categoryLabel] || 0) + (Number(item.amount || 0) || 0);
+        return acc;
+      }, {});
 
-      if (appointment.Service && appointment.Service.category) {
+      sellerStats.appointmentsCount += 1;
+      sellerStats.totalValue += appointmentRevenue;
+      sellerStats.aestheticValue += Number(groupedCategoryTotals.Estetica || 0);
+      sellerStats.clinicalValue +=
+        Number(groupedCategoryTotals.Clinica || 0) +
+        Number(groupedCategoryTotals.Cirurgias || 0) +
+        Number(groupedCategoryTotals.Internacao || 0);
+      const value = appointmentRevenue;
+
+      if (false && appointment.Service && appointment.Service.category) {
         const category = String(appointment.Service.category || "").toLowerCase();
         if (category.includes("clínica") || category.includes("clinica")) {
           sellerStats.clinicalValue += value;
@@ -1631,8 +1844,8 @@ router.get("/monthly-stats-detailed/:year/:month", authenticate, async (req, res
 
     const appointments =
       seller && seller !== "all"
-        ? allAppointments.filter((appointment) => String(appointment.responsibleId || "") === seller)
-        : allAppointments;
+        ? hydratedAppointments.filter((appointment) => String(appointment.responsibleId || "") === seller)
+        : hydratedAppointments;
     const sales =
       seller && seller !== "all"
         ? allSales.filter((sale) => String(sale.responsible || "") === seller)
@@ -1652,6 +1865,10 @@ router.get("/monthly-stats-detailed/:year/:month", authenticate, async (req, res
         count: 0,
         value: 0,
       },
+      hospitalizationAppointments: {
+        count: 0,
+        value: 0,
+      },
       products: {
         count: 0,
         value: 0,
@@ -1661,27 +1878,81 @@ router.get("/monthly-stats-detailed/:year/:month", authenticate, async (req, res
     };
 
     appointments.forEach((appointment) => {
-      if (appointment.clientId) {
-        stats.patients.uniqueCount.add(appointment.clientId);
+      if (appointment.customerId) {
+        stats.patients.uniqueCount.add(appointment.customerId);
       }
 
-      const value = appointment.Service ? parseFloat(appointment.Service.price) || 0 : 0;
-      const normalizedCategory = normalizeServiceCategoryLabel(
-        appointment.Service?.category,
-        appointment.Service?.name,
-      );
+      const serviceEntries = getViaCentralServiceEntries(appointment);
+      const appointmentRevenue =
+        serviceEntries.reduce((sum, item) => sum + (Number(item.amount || 0) || 0), 0) ||
+        Number(appointment?.summary?.total || 0) ||
+        Number(appointment?.Service?.price || 0) ||
+        0;
+      const groupedCategoryTotals = serviceEntries.reduce((acc, item) => {
+        const normalizedCategory = normalizeViaCentralCategoryLabel(
+          item?.category,
+          item?.label,
+          appointment?.type,
+        );
+        const count = Number(item?.count || 0) || 0;
+        const value = Number(item?.amount || 0) || 0;
 
-      if (!stats.serviceCategories[normalizedCategory]) {
+        if (!stats.serviceCategories[normalizedCategory]) {
+          stats.serviceCategories[normalizedCategory] = {
+            label: normalizedCategory,
+            count: 0,
+            value: 0,
+          };
+        }
+
+        stats.serviceCategories[normalizedCategory].count += count;
+        stats.serviceCategories[normalizedCategory].value += value;
+        acc[normalizedCategory] = (acc[normalizedCategory] || 0) + value;
+        return acc;
+      }, {});
+      const normalizedCategory = normalizeViaCentralCategoryLabel(
+        appointment?.Service?.category,
+        appointment?.Service?.name,
+        appointment?.type,
+      );
+      const value = appointmentRevenue;
+
+      if (false && !stats.serviceCategories[normalizedCategory]) {
         stats.serviceCategories[normalizedCategory] = {
           label: normalizedCategory,
           count: 0,
           value: 0,
         };
       }
-      stats.serviceCategories[normalizedCategory].count += 1;
-      stats.serviceCategories[normalizedCategory].value += value;
+      if (false) stats.serviceCategories[normalizedCategory].count += 1;
+      if (false) stats.serviceCategories[normalizedCategory].value += value;
+      if (groupedCategoryTotals.Estetica > 0) {
+        stats.aestheticAppointments.count += 1;
+        stats.aestheticAppointments.value += Number(groupedCategoryTotals.Estetica || 0);
+      }
+      if (groupedCategoryTotals.Clinica > 0 || groupedCategoryTotals.Cirurgias > 0) {
+        stats.clinicalAppointments.count += 1;
+        stats.clinicalAppointments.value +=
+          Number(groupedCategoryTotals.Clinica || 0) +
+          Number(groupedCategoryTotals.Cirurgias || 0);
+      }
+      if (groupedCategoryTotals.Internacao > 0) {
+        stats.hospitalizationAppointments.count += 1;
+        stats.hospitalizationAppointments.value += Number(groupedCategoryTotals.Internacao || 0);
+      }
+      if (!Object.keys(groupedCategoryTotals).length && appointmentRevenue > 0) {
+        if (!stats.serviceCategories[normalizedCategory]) {
+          stats.serviceCategories[normalizedCategory] = {
+            label: normalizedCategory,
+            count: 0,
+            value: 0,
+          };
+        }
+        stats.serviceCategories[normalizedCategory].count += 1;
+        stats.serviceCategories[normalizedCategory].value += appointmentRevenue;
+      }
 
-      if (appointment.Service && appointment.Service.category) {
+      if (false && appointment.Service && appointment.Service.category) {
         const category = String(appointment.Service.category || "").toLowerCase();
         if (category.includes("clínica") || category.includes("clinica")) {
           stats.clinicalAppointments.count++;
@@ -1700,9 +1971,15 @@ router.get("/monthly-stats-detailed/:year/:month", authenticate, async (req, res
       stats.products.count += quantity;
     });
 
-    stats.patients.count = stats.clinicalAppointments.count + stats.aestheticAppointments.count;
+    stats.patients.count =
+      stats.clinicalAppointments.count +
+      stats.aestheticAppointments.count +
+      stats.hospitalizationAppointments.count;
     delete stats.patients.uniqueCount;
-    stats.patients.value = stats.clinicalAppointments.value + stats.aestheticAppointments.value;
+    stats.patients.value =
+      stats.clinicalAppointments.value +
+      stats.aestheticAppointments.value +
+      stats.hospitalizationAppointments.value;
     stats.serviceCategories = Object.values(stats.serviceCategories).sort((left, right) => right.value - left.value);
 
     res.json({
