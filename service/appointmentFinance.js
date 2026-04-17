@@ -621,6 +621,30 @@ export const getAppointmentComandaDetails = async (appointmentId, usersId) => {
   const finance = appointment.financeId
     ? await Finance.findByPk(appointment.financeId)
     : null;
+  const packageOccurrences =
+    appointment.packageGroupId || (appointment.package && Number(appointment.packageMax || 0) > 1)
+      ? await Appointment.findAll({
+          where: appointment.packageGroupId
+            ? {
+                usersId,
+                packageGroupId: appointment.packageGroupId,
+              }
+            : {
+                usersId,
+                customerId: appointment.customerId,
+                petId: appointment.petId,
+                serviceId: appointment.serviceId,
+                package: true,
+                packageMax: appointment.packageMax,
+              },
+          attributes: ["id", "date", "time", "packageNumber", "packageMax", "packageGroupId", "status"],
+          order: [
+            ["packageNumber", "ASC"],
+            ["date", "ASC"],
+            ["time", "ASC"],
+          ],
+        })
+      : [];
 
   return {
     appointment,
@@ -630,6 +654,7 @@ export const getAppointmentComandaDetails = async (appointmentId, usersId) => {
     history,
     summary,
     finance,
+    packageOccurrences,
     catalogs: {
       products,
       services,

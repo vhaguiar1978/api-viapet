@@ -226,6 +226,9 @@ router.post("/appointments", auth, async (req, res) => {
       tiktok,
       skipFinance,
       packageGroupId,
+      package: isPackage,
+      packageNumber,
+      packageMax,
     } = req.body;
 
     // Verifica se o pet existe e pertence ao estabelecimento
@@ -335,6 +338,15 @@ router.post("/appointments", auth, async (req, res) => {
       whatsapp,
       tiktok,
       financeId: finance?.id || null,
+      package: Boolean(isPackage) || Number(packageMax || 0) > 1,
+      packageNumber:
+        packageNumber !== undefined && packageNumber !== null && String(packageNumber).trim() !== ""
+          ? Number(packageNumber)
+          : null,
+      packageMax:
+        packageMax !== undefined && packageMax !== null && String(packageMax).trim() !== ""
+          ? Number(packageMax)
+          : null,
       packageGroupId: packageGroupId || null,
     }, { transaction });
 
@@ -879,6 +891,9 @@ router.put("/appointments/:id", auth, async (req, res) => {
       tertiaryServiceId,
       skipFinance,
       packageGroupId,
+      package: isPackage,
+      packageNumber,
+      packageMax,
     } = req.body;
 
     console.log("PUT /appointments/:id - Request Params:", req.params);
@@ -979,6 +994,18 @@ router.put("/appointments/:id", auth, async (req, res) => {
         tertiaryServiceId !== undefined
           ? tertiaryServiceId
           : appointment.tertiaryServiceId,
+      package:
+        isPackage !== undefined
+          ? Boolean(isPackage)
+          : Number(packageMax || appointment.packageMax || 0) > 1 || Boolean(appointment.package),
+      packageNumber:
+        packageNumber !== undefined
+          ? (packageNumber === null || String(packageNumber).trim() === "" ? null : Number(packageNumber))
+          : appointment.packageNumber,
+      packageMax:
+        packageMax !== undefined
+          ? (packageMax === null || String(packageMax).trim() === "" ? null : Number(packageMax))
+          : appointment.packageMax,
       packageGroupId:
         packageGroupId !== undefined ? packageGroupId : appointment.packageGroupId,
     };
@@ -1269,7 +1296,10 @@ router.post("/appointments/package", auth, async (req, res) => {
       responsibleId,
       sellerName,
       type,
+      packageGroupId: requestedPackageGroupId,
     } = req.body;
+    const packageGroupId =
+      String(requestedPackageGroupId || "").trim() || `pkg-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
     const resolvePackageOccurrenceStaff = (occurrence, occurrenceIndex) => {
       const explicitResponsibleId = String(occurrence?.responsibleId || "").trim();
@@ -1434,6 +1464,7 @@ router.post("/appointments/package", auth, async (req, res) => {
         package: true,
         packageNumber: i + 1,
         packageMax: totalAppointments,
+        packageGroupId,
       }, { transaction });
 
       // Calcula o valor total do agendamento
