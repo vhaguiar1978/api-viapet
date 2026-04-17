@@ -56,8 +56,19 @@ const DEFAULT_CONTROL = {
     minimumLeadMinutes: 30,
     slotMinutes: 10,
     maxDailyAppointments: 12,
-    allowedAgendaTypes: ["estetica"],
-    allowedServiceCategories: ["Banho", "Tosa", "Estetica"],
+    allowedAgendaTypes: ["estetica", "clinica", "internacao"],
+    allowedServiceCategories: [
+      "Banho",
+      "Tosa",
+      "Estetica",
+      "Clinica",
+      "Consultas",
+      "Exames",
+      "Vacinas",
+      "Procedimentos",
+      "Cirurgias",
+      "Internacao",
+    ],
     allowedDays: ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday"],
     allowedTimeStart: "08:00",
     allowedTimeEnd: "18:00",
@@ -108,6 +119,75 @@ function normalizeAgendaTypes(value, fallback = DEFAULT_CONTROL.scheduling.allow
     .filter((item) => VALID_AGENDA_TYPES.includes(item));
 
   return requested.length ? requested : [...fallback];
+}
+
+function normalizeAgendaType(value, fallback = "estetica") {
+  const normalized = String(value || "").trim().toLowerCase();
+  return VALID_AGENDA_TYPES.includes(normalized) ? normalized : fallback;
+}
+
+function getAgendaTypeMeta(agendaType, settings = null) {
+  const normalized = normalizeAgendaType(agendaType);
+
+  if (normalized === "clinica") {
+    return {
+      type: "clinica",
+      label: "clínica",
+      financeSubCategory: "clinica",
+      defaultServiceQuery: "Consulta",
+      slotMinutes: Math.max(
+        5,
+        Number(settings?.intervalClinic || 30) || 30,
+      ),
+      scoreKeywords: [
+        "clinica",
+        "clínica",
+        "consulta",
+        "exame",
+        "vacina",
+        "procedimento",
+        "cirurgia",
+        "retorno",
+        "atendimento",
+      ],
+    };
+  }
+
+  if (normalized === "internacao") {
+    return {
+      type: "internacao",
+      label: "internação",
+      financeSubCategory: "internacao",
+      defaultServiceQuery: "Internacao",
+      slotMinutes: Math.max(
+        5,
+        Number(settings?.intervalClinic || 60) || 60,
+      ),
+      scoreKeywords: [
+        "internacao",
+        "internação",
+        "internar",
+        "hospital",
+        "intern",
+        "diaria",
+        "diária",
+        "observacao",
+        "observação",
+      ],
+    };
+  }
+
+  return {
+    type: "estetica",
+    label: "estética",
+    financeSubCategory: "estetica",
+    defaultServiceQuery: "Banho",
+    slotMinutes: Math.max(
+      5,
+      Number(settings?.intervalAesthetics || 10) || 10,
+    ),
+    scoreKeywords: ["banho", "tosa", "estetica", "estética", "hidrat"],
+  };
 }
 
 function normalizeTime(value, fallback) {
@@ -556,24 +636,35 @@ async function createPetForAi(usersId, customerId, draft = {}) {
   });
 }
 
-function scoreBathService(service, serviceQuery) {
+function scoreBathService(service, serviceQuery, agendaType = "estetica") {
   const name = normalizeSearchable(service?.name);
   const category = normalizeSearchable(service?.category);
   const query = normalizeSearchable(serviceQuery);
+  const agendaMeta = getAgendaTypeMeta(agendaType);
   let score = 0;
 
-  if (name.includes("banho")) score += 10;
-  if (name.includes("tosa")) score += 4;
-  if (category.includes("estet")) score += 6;
-  if (category.includes("banho")) score += 8;
+  for (const keyword of agendaMeta.scoreKeywords) {
+    const normalizedKeyword = normalizeSearchable(keyword);
+    if (name.includes(normalizedKeyword)) score += 8;
+    if (category.includes(normalizedKeyword)) score += 6;
+    if (query && query.includes(normalizedKeyword)) score += 4;
+  }
   if (query && name.includes(query)) score += 7;
   if (query && category.includes(query)) score += 5;
-  if (query && query.includes("banho") && name.includes("banho")) score += 4;
+
+  if (
+    agendaMeta.type === "estetica" &&
+    query &&
+    query.includes("banho") &&
+    name.includes("banho")
+  ) {
+    score += 4;
+  }
 
   return score;
 }
 
-async function resolveBathService(usersId, serviceId, serviceQuery) {
+async function resolveBathService(usersId, serviceId, serviceQuery, agendaType = "estetica") {
   if (serviceId) {
     const service = await Services.findOne({
       where: {
@@ -593,7 +684,14 @@ async function resolveBathService(usersId, serviceId, serviceQuery) {
   if (!services.length) return null;
 
   const preferredService = services
-    .map((service) => ({ service, score: scoreBathService(service, serviceQuery) }))
+    .map((service) => ({
+      service,
+      score: scoreBathService(
+        service,
+        serviceQuery || getAgendaTypeMeta(agendaType).defaultServiceQuery,
+        agendaType,
+      ),
+    }))
     .sort((left, right) => right.score - left.score)[0];
 
   return preferredService?.score > 0 ? preferredService.service : null;
@@ -644,7 +742,9 @@ async function createAppointmentFromAi({
   service,
   appointmentInfo,
   observation,
+  agendaType = "estetica",
 }) {
+  const agendaMeta = getAgendaTypeMeta(agendaType);
   return sequelize.transaction(async (transaction) => {
     const finance = await Finance.create(
       {
@@ -654,7 +754,7 @@ async function createAppointmentFromAi({
         date: new Date(appointmentInfo.date),
         dueDate: new Date(appointmentInfo.date),
         category: "Serviços",
-        subCategory: "estetica",
+        subCategory: agendaMeta.financeSubCategory,
         expenseType: "variavel",
         frequency: "unico",
         paymentMethod: "Pendente",
@@ -673,7 +773,7 @@ async function createAppointmentFromAi({
         petId: pet.id,
         customerId: customer.id,
         serviceId: service.id,
-        type: "estetica",
+        type: agendaMeta.type,
         date: appointmentInfo.date,
         time: appointmentInfo.time,
         observation: observation || "Criado pela IA do CRM",
@@ -714,14 +814,16 @@ async function suggestAvailableBathSlots({
   control,
   settings,
   fromDate,
+  agendaType = "estetica",
   limit = 4,
 }) {
+  const agendaMeta = getAgendaTypeMeta(agendaType, settings);
   const leadMinutes = Number(control?.scheduling?.minimumLeadMinutes || 0);
   const slotMinutes = Math.max(
     5,
     Number(
       control?.scheduling?.slotMinutes ||
-        settings?.intervalAesthetics ||
+        agendaMeta.slotMinutes ||
         10,
     ) || 10,
   );
@@ -756,7 +858,7 @@ async function suggestAvailableBathSlots({
   const appointments = await Appointment.findAll({
     where: {
       usersId,
-      type: "estetica",
+      type: agendaMeta.type,
       date: {
         [Op.between]: [buildDateOnlyLabel(dayStart), buildDateOnlyLabel(dayEnd)],
       },
@@ -826,7 +928,9 @@ function buildAssistantBathReply({
   validation,
   createdCustomer,
   createdPet,
+  agendaType = "estetica",
 }) {
+  const agendaMeta = getAgendaTypeMeta(agendaType);
   const intro = [];
 
   if (createdCustomer) {
@@ -842,11 +946,11 @@ function buildAssistantBathReply({
 
   if (appointmentLabel) {
     if (validation?.executionMode === "automatic") {
-      return `${introText}ja posso confirmar o ${service.name} do ${pet.name} para ${appointmentLabel}.`;
+      return `${introText}ja posso confirmar ${service.name} do ${pet.name} na agenda de ${agendaMeta.label} para ${appointmentLabel}.`;
     }
 
     if (validation?.executionMode === "approval") {
-      return `${introText}montei a proposta de ${service.name} do ${pet.name} para ${appointmentLabel}, mas ela ainda depende da aprovacao interna.`;
+      return `${introText}montei a proposta de ${service.name} do ${pet.name} na agenda de ${agendaMeta.label} para ${appointmentLabel}, mas ela ainda depende da aprovacao interna.`;
     }
 
     return `${introText}nao consegui confirmar esse horario para ${pet.name}.`;
@@ -854,7 +958,7 @@ function buildAssistantBathReply({
 
   if (suggestions.length) {
     const labels = suggestions.slice(0, 3).map((item) => item.label).join(" | ");
-    return `${introText}encontrei estes horarios para ${service.name} do ${pet.name}: ${labels}.`;
+    return `${introText}encontrei estes horarios na agenda de ${agendaMeta.label} para ${service.name} do ${pet.name}: ${labels}.`;
   }
 
   return `${introText}ainda nao encontrei um horario valido para ${service.name} do ${pet.name}.`;
@@ -1314,7 +1418,7 @@ router.post("/control/evaluate", auth, async (req, res) => {
   }
 });
 
-router.post("/assistant/schedule-bath", auth, async (req, res) => {
+router.post(["/assistant/schedule-appointment", "/assistant/schedule-bath"], auth, async (req, res) => {
   try {
     const usersId = getEstablishmentId(req);
     const crmAiAccess = await requireCrmAiAccess(usersId, res);
@@ -1323,6 +1427,7 @@ router.post("/assistant/schedule-bath", auth, async (req, res) => {
       conversationId,
       customerId,
       petId,
+      agendaType: requestedAgendaType,
       serviceId,
       serviceQuery,
       appointmentAt,
@@ -1336,6 +1441,8 @@ router.post("/assistant/schedule-bath", auth, async (req, res) => {
     } = req.body || {};
 
     const { control, settings } = await getOrCreateControlSettings(usersId);
+    const agendaType = normalizeAgendaType(requestedAgendaType);
+    const agendaMeta = getAgendaTypeMeta(agendaType, settings);
     const appointmentInfo = appointmentAt ? parseAppointmentDateTime(appointmentAt) : null;
     const wantsSuggestions =
       normalizeBoolean(suggestSlots, false) || !appointmentInfo;
@@ -1378,18 +1485,24 @@ router.post("/assistant/schedule-bath", auth, async (req, res) => {
       });
     }
 
-    const service = await resolveBathService(usersId, serviceId, serviceQuery || "Banho");
+    const effectiveServiceQuery = serviceQuery || agendaMeta.defaultServiceQuery;
+    const service = await resolveBathService(
+      usersId,
+      serviceId,
+      effectiveServiceQuery,
+      agendaType,
+    );
 
     if (!service) {
       return res.status(404).json({
         success: false,
-        error: "Nao encontrei um servico de banho/estetica para usar com a IA.",
+        error: `Nao encontrei um servico compativel com a agenda de ${agendaMeta.label} para usar com a IA.`,
       });
     }
 
     const validation = evaluateControlAction(control, "schedule_appointment", {
-      agendaType: "estetica",
-      serviceCategory: service.category || serviceQuery || "Banho",
+      agendaType,
+      serviceCategory: service.category || effectiveServiceQuery || agendaMeta.defaultServiceQuery,
       appointmentAt: appointmentInfo?.raw || "",
       tutorConfirmed,
       isNewCustomer: shouldCreateCustomer,
@@ -1425,6 +1538,7 @@ router.post("/assistant/schedule-bath", auth, async (req, res) => {
       control,
       settings,
       fromDate: baseDate,
+      agendaType,
       limit: 4,
     });
 
@@ -1470,7 +1584,7 @@ router.post("/assistant/schedule-bath", auth, async (req, res) => {
         date: appointmentInfo?.date || "",
         time: appointmentInfo?.timeLabel || "",
         label: appointmentLabel,
-        type: "estetica",
+        type: agendaType,
       },
       slotSuggestions,
       validation,
@@ -1488,6 +1602,7 @@ router.post("/assistant/schedule-bath", auth, async (req, res) => {
           validation,
           createdCustomer: shouldCreateCustomer,
           createdPet: shouldCreatePet,
+          agendaType,
         }),
     };
 
@@ -1498,7 +1613,7 @@ router.post("/assistant/schedule-bath", auth, async (req, res) => {
         customerId: proposal.customer.id || null,
         petId: proposal.pet.id || null,
         authorUserId: req.user.id,
-        actionType: "schedule_bath",
+        actionType: "schedule_appointment",
         status: "proposed",
         summary: `Proposta de ${service.name} para ${proposal.pet.name || "pet"}`,
         assistantReply: proposal.assistantReply,
@@ -1520,9 +1635,9 @@ router.post("/assistant/schedule-bath", auth, async (req, res) => {
         customerId: proposal.customer.id || null,
         petId: proposal.pet.id || null,
         authorUserId: req.user.id,
-        actionType: "schedule_bath",
+        actionType: "schedule_appointment",
         status: "blocked",
-        summary: "Proposta de banho bloqueada",
+        summary: "Proposta de agendamento bloqueada",
         assistantReply: proposal.assistantReply,
         approvalRequired: proposal.validation?.executionMode === "approval",
         approvedByHuman: normalizeBoolean(humanApproved, false),
@@ -1554,9 +1669,9 @@ router.post("/assistant/schedule-bath", auth, async (req, res) => {
         customerId: proposal.customer.id || null,
         petId: proposal.pet.id || null,
         authorUserId: req.user.id,
-        actionType: "schedule_bath",
+        actionType: "schedule_appointment",
         status: "waiting_approval",
-        summary: "Proposta de banho aguardando aprovacao",
+        summary: "Proposta de agendamento aguardando aprovacao",
         assistantReply: proposal.assistantReply,
         approvalRequired: true,
         approvedByHuman: false,
@@ -1623,6 +1738,7 @@ router.post("/assistant/schedule-bath", auth, async (req, res) => {
       service,
       appointmentInfo,
       observation,
+      agendaType,
     });
 
     if (conversation) {
@@ -1632,9 +1748,9 @@ router.post("/assistant/schedule-bath", auth, async (req, res) => {
         authorUserId: req.user.id,
         customerId: customer.id,
         petId: pet.id,
-        body: `ViaPet IA agendou ${service.name} para ${pet.name} em ${formatAppointmentLabel(appointmentInfo)}.`,
+        body: `ViaPet IA agendou ${service.name} para ${pet.name} na agenda de ${agendaMeta.label} em ${formatAppointmentLabel(appointmentInfo)}.`,
         payload: {
-          action: "schedule_bath",
+          action: "schedule_appointment",
           appointmentId: created.appointment.id,
           financeId: created.finance.id,
         },
@@ -1649,7 +1765,7 @@ router.post("/assistant/schedule-bath", auth, async (req, res) => {
       appointmentId: created.appointment.id,
       financeId: created.finance.id,
       authorUserId: req.user.id,
-      actionType: "schedule_bath",
+      actionType: "schedule_appointment",
       status: "executed",
       summary: `Agendamento criado para ${pet.name}`,
       assistantReply: proposal.assistantReply,
@@ -1687,10 +1803,10 @@ router.post("/assistant/schedule-bath", auth, async (req, res) => {
       },
     });
   } catch (error) {
-    console.error("Erro ao agendar banho pela IA CRM:", error);
+    console.error("Erro ao agendar atendimento pela IA CRM:", error);
     return res.status(500).json({
       success: false,
-      error: "Erro ao agendar banho pela IA CRM",
+      error: "Erro ao agendar atendimento pela IA CRM",
       details: error.message,
     });
   }
@@ -1947,6 +2063,8 @@ router.post("/assistant/reschedule-appointment", auth, async (req, res) => {
       });
     }
 
+    const targetAgendaType = normalizeAgendaType(targetAppointment?.type, "estetica");
+
     const appointmentInfo = parseAppointmentDateTime(appointmentAt);
     if (!appointmentInfo) {
       const suggestions = await suggestAvailableBathSlots({
@@ -1954,6 +2072,7 @@ router.post("/assistant/reschedule-appointment", auth, async (req, res) => {
         control,
         settings,
         fromDate: new Date(),
+        agendaType: targetAgendaType,
         limit: 4,
       });
 
@@ -1995,8 +2114,10 @@ router.post("/assistant/reschedule-appointment", auth, async (req, res) => {
     }
 
     const validation = evaluateControlAction(control, "schedule_appointment", {
-      agendaType: "estetica",
-      serviceCategory: targetAppointment?.Service?.category || "Estetica",
+      agendaType: targetAgendaType,
+      serviceCategory:
+        targetAppointment?.Service?.category ||
+        getAgendaTypeMeta(targetAgendaType).defaultServiceQuery,
       appointmentAt: appointmentInfo.raw,
       tutorConfirmed: true,
       isNewCustomer: false,
