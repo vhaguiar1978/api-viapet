@@ -141,6 +141,77 @@ function getViaCentralServiceEntries(appointment = {}) {
     : [];
 }
 
+function getPackageOccurrenceNumber(appointment = {}) {
+  const candidates = [
+    appointment?.packageNumber,
+    appointment?.packageIndex,
+    appointment?.package?.index,
+  ];
+
+  for (const candidate of candidates) {
+    const normalizedNumber = Number(candidate || 0) || 0;
+    if (normalizedNumber > 0) {
+      return normalizedNumber;
+    }
+  }
+
+  return 0;
+}
+
+function getPackageTotalCount(appointment = {}) {
+  const candidates = [
+    appointment?.packageMax,
+    appointment?.packageTotal,
+    appointment?.package?.total,
+  ];
+
+  for (const candidate of candidates) {
+    const normalizedNumber = Number(candidate || 0) || 0;
+    if (normalizedNumber > 0) {
+      return normalizedNumber;
+    }
+  }
+
+  return 0;
+}
+
+function isPackageAppointment(appointment = {}) {
+  return (
+    Boolean(appointment?.package) ||
+    String(appointment?.packageGroupId || "").trim() !== "" ||
+    getPackageTotalCount(appointment) > 1 ||
+    normalizeViaCentralMetricText(
+      `${appointment?.Service?.name || ""} ${appointment?.Service?.category || ""} ${appointment?.finance?.description || ""}`,
+    ).includes("pacot")
+  );
+}
+
+function isPrimaryPackageOccurrence(appointment = {}) {
+  if (!isPackageAppointment(appointment)) {
+    return true;
+  }
+
+  const occurrenceNumber = getPackageOccurrenceNumber(appointment);
+  if (occurrenceNumber > 0) {
+    return occurrenceNumber === 1;
+  }
+
+  const currentDate = String(appointment?.date || "").slice(0, 10);
+  const packageOccurrences = Array.isArray(appointment?.packageOccurrences)
+    ? appointment.packageOccurrences
+    : [];
+  const orderedDates = packageOccurrences
+    .map((item) => String(item?.date || "").slice(0, 10))
+    .filter(Boolean)
+    .sort((left, right) => left.localeCompare(right));
+
+  if (orderedDates.length && currentDate) {
+    return orderedDates[0] === currentDate;
+  }
+
+  return true;
+}
+
 function buildNormalizedDateString(year, month, day) {
   const isoValue = `${year}-${month}-${day}`;
   const parsedDate = new Date(`${isoValue}T12:00:00`);
@@ -1797,6 +1868,10 @@ router.get("/monthly-stats-detailed/:year/:month", authenticate, async (req, res
       );
       if (!sellerStats) return;
 
+      if (!isPrimaryPackageOccurrence(appointment)) {
+        return;
+      }
+
       const serviceEntries = getViaCentralServiceEntries(appointment);
       const appointmentRevenue =
         serviceEntries.reduce((sum, item) => sum + (Number(item.amount || 0) || 0), 0) ||
@@ -1880,6 +1955,10 @@ router.get("/monthly-stats-detailed/:year/:month", authenticate, async (req, res
     appointments.forEach((appointment) => {
       if (appointment.customerId) {
         stats.patients.uniqueCount.add(appointment.customerId);
+      }
+
+      if (!isPrimaryPackageOccurrence(appointment)) {
+        return;
       }
 
       const serviceEntries = getViaCentralServiceEntries(appointment);
