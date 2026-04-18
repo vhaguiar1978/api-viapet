@@ -72,6 +72,8 @@ router.get("/crm-whatsapp/status", authenticate, async (req, res) => {
         lastWebhookAt,
         recentMessages,
         webhookUrl: `${process.env.URL || ""}/webhook`,
+        oauthAvailable: Boolean(process.env.META_APP_ID && process.env.META_APP_SECRET),
+        oauthConnectedAt: config.oauthConnectedAt || null,
       },
     });
   } catch (error) {

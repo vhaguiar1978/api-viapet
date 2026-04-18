@@ -37,6 +37,7 @@ const DEFAULT_CONTROL = {
   provider: "OpenAI",
   instructions:
     "Responder com educacao, confirmar dados importantes antes de agir e encaminhar para humano em caso de risco, reclamacao ou duvida sensivel.",
+  playbookMessages: [],
   escalationKeywords: ["urgente", "reclamacao", "cancelar", "dor", "emergencia"],
   capabilities: {
     replyToMessages: true,
@@ -124,6 +125,32 @@ function normalizeAgendaTypes(value, fallback = DEFAULT_CONTROL.scheduling.allow
 function normalizeAgendaType(value, fallback = "estetica") {
   const normalized = String(value || "").trim().toLowerCase();
   return VALID_AGENDA_TYPES.includes(normalized) ? normalized : fallback;
+}
+
+function normalizePlaybookMessages(value) {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .map((item, index) => {
+      if (!item || typeof item !== "object") return null;
+
+      const role = ["user", "assistant", "system"].includes(
+        String(item.role || "").trim().toLowerCase(),
+      )
+        ? String(item.role || "").trim().toLowerCase()
+        : "user";
+      const text = String(item.text || "").trim();
+      if (!text) return null;
+
+      return {
+        id: String(item.id || `playbook-${index + 1}`).trim(),
+        role,
+        text,
+        createdAt: item.createdAt || new Date().toISOString(),
+      };
+    })
+    .filter(Boolean)
+    .slice(-40);
 }
 
 function getAgendaTypeMeta(agendaType, settings = null) {
@@ -222,6 +249,7 @@ function sanitizeControlSettings(value) {
     instructions: String(
       source.instructions || DEFAULT_CONTROL.instructions,
     ).trim(),
+    playbookMessages: normalizePlaybookMessages(source.playbookMessages),
     escalationKeywords: normalizeStringArray(
       source.escalationKeywords,
       DEFAULT_CONTROL.escalationKeywords,
