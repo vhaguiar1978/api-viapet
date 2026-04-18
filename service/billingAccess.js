@@ -18,6 +18,12 @@ function startOfLocalDay(value) {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate());
 }
 
+function parseValidDate(value) {
+  if (!value) return null;
+  const parsed = value instanceof Date ? new Date(value) : new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
 function calculateDaysUntil(expirationDate, referenceDate = new Date()) {
   const targetDay = startOfLocalDay(expirationDate);
   const referenceDay = startOfLocalDay(referenceDate);
@@ -48,7 +54,7 @@ export async function getOrCreateBillingSettings() {
 
 export function buildBillingProfile(user, subscription, settings) {
   const now = new Date();
-  const expirationDate = user?.expirationDate ? new Date(user.expirationDate) : null;
+  const expirationDate = parseValidDate(user?.expirationDate);
   const daysUntilExpiry = expirationDate ? calculateDaysUntil(expirationDate, now) : null;
   const reminderDays = Number(settings?.reminderDays || DEFAULT_BILLING_VALUES.reminderDays) || DEFAULT_BILLING_VALUES.reminderDays;
   const promotionalMonths = Number(settings?.promotionalMonths || DEFAULT_BILLING_VALUES.promotionalMonths) || DEFAULT_BILLING_VALUES.promotionalMonths;
