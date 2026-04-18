@@ -2,7 +2,6 @@ import express from "express";
 import authenticate from "../../middlewares/auth.js";
 import Users from "../../models/Users.js";
 import Settings from "../../models/Settings.js";
-import BillingSettings from "../../models/BillingSettings.js";
 import Subscription from "../../models/Subscription.js";
 import PaymentHistory from "../../models/PaymentHistory.js";
 import bcrypt from "bcrypt";
@@ -10,82 +9,31 @@ import LoginHistory from "../../models/LoginHistory.js";
 import jwt from "jsonwebtoken";
 import { Op } from "sequelize";
 import { createPixPayment } from "../../service/mercadopago.js";
+import { buildBillingProfile, getOrCreateBillingSettings } from "../../service/billingAccess.js";
 const router = express.Router();
-
-async function getOrCreateBillingSettings() {
-  let settings = await BillingSettings.findOne({
-    order: [["createdAt", "DESC"]],
-  });
-
-  if (!settings) {
-    settings = await BillingSettings.create({
-      monthlyPrice: 69.9,
-      promotionalPrice: 39.9,
-      trialDays: 30,
-      promotionalMonths: 3,
-      reminderDays: 7,
-      mercadoPagoEnabled: true,
-    });
-  }
-
-  return settings;
-}
-
-function getBillingProfile(user, subscription, settings) {
-  const now = new Date();
-  const expirationDate = user?.expirationDate ? new Date(user.expirationDate) : null;
-  const daysUntilExpiry = expirationDate
-    ? Math.ceil((expirationDate - now) / (1000 * 60 * 60 * 24))
-    : null;
-  const planType = String(subscription?.plan_type || "").toLowerCase();
-  const isFree =
-    String(subscription?.notes || "").toLowerCase().includes("sem custo") ||
-    (subscription?.amount != null &&
-      Number(subscription.amount) === 0 &&
-      planType !== "trial");
-
-  let stage = "monthly";
-  let nextChargeAmount = Number(settings.monthlyPrice || 69.9);
-  let nextChargePlanType = "monthly";
-
-  if (isFree) {
-    stage = "free";
-    nextChargeAmount = 0;
-    nextChargePlanType = "monthly";
-  } else if (planType === "trial") {
-    stage = "trial";
-    nextChargeAmount = Number(settings.promotionalPrice || 39.9);
-    nextChargePlanType = "promotional";
-  } else if (
-    planType === "promotional" &&
-    Number(subscription?.promotional_months_used || 0) <
-      Number(settings.promotionalMonths || 3)
-  ) {
-    stage = "promotional";
-    nextChargeAmount = Number(settings.promotionalPrice || 39.9);
-    nextChargePlanType = "promotional";
-  }
-
-  return {
-    stage,
-    daysUntilExpiry,
-    overdue: !isFree && daysUntilExpiry != null && daysUntilExpiry < 0,
-    nextChargeAmount,
-    nextChargePlanType,
-  };
-}
 
 router.get("/account", authenticate, async (req, res) => {
   try {
+    const ownerId =
+      req.user.role === "funcionario" && req.user.establishment
+        ? req.user.establishment
+        : req.user.id;
     const user = await Users.findByPk(req.user.id, {
       attributes: ["id", "name", "email", "role", "plan", "expirationDate"],
     });
-    const establishmentUser = await Users.findByPk(req.user.establishment, {
+    const establishmentUser = await Users.findByPk(ownerId, {
       attributes: ["id", "plan", "expirationDate", "name", "email"],
     });
     const establishment = await Settings.findOne({
-      where: { usersId: req.user.establishment },
+      where: { usersId: ownerId },
     });
+    const [billingSettings, latestSubscription] = await Promise.all([
+      getOrCreateBillingSettings(),
+      Subscription.findOne({
+        where: { user_id: ownerId },
+        order: [["created_at", "DESC"]],
+      }),
+    ]);
 
     if (establishmentUser) {
       user.setDataValue("plan", establishmentUser.plan);
@@ -112,6 +60,12 @@ router.get("/account", authenticate, async (req, res) => {
         user.setDataValue("id", establishment.usersId);
       }
     }
+    const billingProfile = buildBillingProfile(
+      establishmentUser || user,
+      latestSubscription,
+      billingSettings,
+    );
+    user.setDataValue("billingProfile", billingProfile);
     return res.status(200).json(user);
   } catch (error) {
     console.error(error);
@@ -188,7 +142,7 @@ router.post("/account/billing/pix", authenticate, async (req, res) => {
       order: [["created_at", "DESC"]],
     });
 
-    const billingProfile = getBillingProfile(
+    const billingProfile = buildBillingProfile(
       ownerUser,
       latestSubscription,
       settings,
