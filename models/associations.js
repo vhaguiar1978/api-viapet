@@ -12,6 +12,7 @@ import AppointmentItem from "./AppointmentItem.js";
 import AppointmentPayment from "./AppointmentPayment.js";
 import AppointmentStatusHistory from "./AppointmentStatusHistory.js";
 import Products from "./Products.js";
+import Drivers from "./Drivers.js";
 import CrmConversation from "./CrmConversation.js";
 import CrmConversationMessage from "./CrmConversationMessage.js";
 import CrmAiActionLog from "./CrmAiActionLog.js";
@@ -32,6 +33,10 @@ export function setupAssociations() {
   Appointment.belongsTo(Users, {
     foreignKey: "responsibleId",
     as: "responsible",
+  });
+  Appointment.belongsTo(Drivers, {
+    foreignKey: "driverId",
+    as: "driver",
   });
   Appointment.hasMany(AppointmentItem, {
     foreignKey: "appointmentId",
@@ -65,6 +70,10 @@ export function setupAssociations() {
   });
   AppointmentStatusHistory.belongsTo(Appointment, {
     foreignKey: "appointmentId",
+  });
+  Drivers.hasMany(Appointment, {
+    foreignKey: "driverId",
+    as: "appointments",
   });
 
   // Subscription associations
