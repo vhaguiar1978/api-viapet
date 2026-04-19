@@ -2346,7 +2346,11 @@ router.get("/monthly-stats-detailed/:year/:month", authenticate, async (req, res
 
     res.json({
       message: "Estatísticas mensais detalhadas encontradas com sucesso",
-      data: stats,
+      data: {
+        ...stats,
+        financeSummary,
+        overview,
+      },
     });
   } catch (error) {
     console.error("Erro ao buscar estatísticas mensais detalhadas:", error);
