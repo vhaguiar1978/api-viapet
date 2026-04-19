@@ -711,6 +711,247 @@ async function keepOnlyCurrentAgendaFinanceRows(finances = [], usersId) {
   });
 }
 
+function buildFinanceSummaryFromRows(finances = []) {
+  const summary = {
+    entradas: {
+      total: 0,
+      count: 0,
+    },
+    taxas: {
+      total: 0,
+    },
+    commissions: {
+      total: 0,
+    },
+    saidas: {
+      total: 0,
+      count: 0,
+      fixas: 0,
+      variaveis: 0,
+    },
+    saldo: 0,
+    totalSales: 0,
+  };
+
+  (Array.isArray(finances) ? finances : []).forEach((finance) => {
+    const amount = parseFloat(finance.amount) || 0;
+    const feeAmount = parseFloat(finance.feeAmount) || 0;
+
+    if (finance.type === "entrada") {
+      summary.entradas.total += amount;
+      summary.entradas.count += 1;
+      summary.taxas.total += feeAmount;
+    } else {
+      summary.saidas.total += amount;
+      summary.saidas.count += 1;
+      if (finance.expenseType === "fixo") {
+        summary.saidas.fixas += amount;
+      } else {
+        summary.saidas.variaveis += amount;
+      }
+    }
+
+    if (String(finance.category || "").toLowerCase().includes("comiss")) {
+      summary.commissions.total += amount;
+    }
+  });
+
+  summary.saldo = summary.entradas.total - summary.saidas.total;
+  summary.totalSales = summary.entradas.total;
+  return summary;
+}
+
+function buildViaCentralOverviewPayload(appointments = [], sales = [], financeSummary = {}) {
+  const serviceCategoryMap = {};
+  const serviceRowMap = {};
+  const packageServiceMap = {};
+  let serviceAmount = 0;
+  let packageAmount = 0;
+  let packagePaidAmount = 0;
+  let packageOutstandingAmount = 0;
+  let packageCount = 0;
+  let completedPackageCount = 0;
+  let paidPackageCount = 0;
+
+  (Array.isArray(appointments) ? appointments : []).forEach((appointment) => {
+    const finance = appointment?.finance || {};
+    const paymentsList = Array.isArray(appointment?.paymentsList)
+      ? appointment.paymentsList
+      : Array.isArray(appointment?.payments)
+        ? appointment.payments
+        : [];
+    const summary = appointment?.summary || {};
+    const paidAmount = paymentsList
+      .filter((payment) => normalizeViaCentralMetricText(payment?.status) === "pago")
+      .reduce(
+        (sum, payment) => sum + (Number(payment?.grossAmount || payment?.amount || 0) || 0),
+        0,
+      );
+    const totalAmount =
+      Number(summary?.total || 0) ||
+      Number(finance?.grossAmount || finance?.amount || 0) ||
+      Number(appointment?.totalAmount || appointment?.total || 0) ||
+      0;
+    const outstandingAmount =
+      normalizeViaCentralMetricText(summary?.financialStatus || finance?.status) === "pago"
+        ? 0
+        : Number(summary?.balance || 0) || Math.max(totalAmount - paidAmount, 0);
+    const countsInFinancialTotals = isPrimaryPackageOccurrence(appointment);
+    const serviceEntries = getViaCentralServiceEntries(appointment);
+    const serviceEntryAmount = serviceEntries.reduce(
+      (sum, entry) => sum + (Number(entry?.amount || 0) || 0),
+      0,
+    );
+    const appointmentAmount = serviceEntryAmount || totalAmount;
+
+    if (countsInFinancialTotals) {
+      serviceAmount += appointmentAmount;
+      serviceEntries.forEach((entry) => {
+        const entryCount = Number(entry?.count || 0) || 0;
+        const entryAmount = Number(entry?.amount || 0) || 0;
+        const categoryLabel = entry?.category || "Outros";
+        if (!serviceCategoryMap[categoryLabel]) {
+          serviceCategoryMap[categoryLabel] = { label: categoryLabel, count: 0, amount: 0 };
+        }
+        serviceCategoryMap[categoryLabel].count += entryCount;
+        serviceCategoryMap[categoryLabel].amount += entryAmount;
+
+        if (!serviceRowMap[entry.label]) {
+          serviceRowMap[entry.label] = { label: entry.label, count: 0, amount: 0 };
+        }
+        serviceRowMap[entry.label].count += entryCount;
+        serviceRowMap[entry.label].amount += entryAmount;
+      });
+    }
+
+    if (!isPackageAppointment(appointment) || !countsInFinancialTotals) {
+      return;
+    }
+
+    packageCount += 1;
+    packageAmount += appointmentAmount;
+    packagePaidAmount += paidAmount;
+    packageOutstandingAmount += outstandingAmount;
+
+    if (["entregue", "feito", "concluido", "pronto"].includes(normalizeViaCentralMetricText(appointment?.status))) {
+      completedPackageCount += 1;
+    }
+    if (normalizeViaCentralMetricText(summary?.financialStatus || finance?.status) === "pago") {
+      paidPackageCount += 1;
+    }
+
+    serviceEntries.forEach((entry) => {
+      const entryCount = Number(entry?.count || 0) || 0;
+      const entryAmount = Number(entry?.amount || 0) || 0;
+      if (!packageServiceMap[entry.label]) {
+        packageServiceMap[entry.label] = { label: entry.label, count: 0, amount: 0 };
+      }
+      packageServiceMap[entry.label].count += entryCount;
+      packageServiceMap[entry.label].amount += entryAmount;
+    });
+  });
+
+  const serviceItems = Object.values(serviceCategoryMap).sort(
+    (left, right) => right.amount - left.amount || right.count - left.count,
+  );
+  const serviceRows = Object.values(serviceRowMap).sort(
+    (left, right) => right.amount - left.amount || right.count - left.count,
+  );
+  const productAmount = (Array.isArray(sales) ? sales : []).reduce(
+    (sum, sale) => sum + (parseFloat(sale?.total) || 0),
+    0,
+  );
+  const totalProducts = serviceAmount + productAmount || 1;
+  const totalServices = serviceItems.reduce((sum, item) => sum + item.amount, 0) || 1;
+  const totalFees = Number(financeSummary?.taxas?.total || 0) || 0;
+  const totalOutgoing = Number(financeSummary?.saidas?.total || 0) || 0;
+  const totalFixedExpenses = Number(financeSummary?.saidas?.fixas || 0) || 0;
+  const totalVariableCosts = Number(financeSummary?.saidas?.variaveis || 0) || 0;
+  const commissions = Number(financeSummary?.commissions?.total || 0) || 0;
+  const trackedGrossRevenue = serviceAmount + productAmount;
+  const faturamentoLiquido = Math.max(trackedGrossRevenue - totalFees, 0);
+  const estimatedNet = trackedGrossRevenue - totalFees - totalVariableCosts - totalFixedExpenses - commissions;
+  const totalAppointments = (Array.isArray(appointments) ? appointments : []).filter((appointment) => {
+    const normalizedType = normalizeViaCentralMetricText(appointment?.type || "");
+    return (
+      normalizedType.includes("estet") ||
+      normalizedType.includes("clinica") ||
+      normalizedType.includes("internac") ||
+      normalizedType.includes("interna")
+    );
+  }).length;
+  const aestheticRevenue = serviceItems
+    .filter((item) => item.label === "Estetica")
+    .reduce((sum, item) => sum + (Number(item.amount || 0) || 0), 0);
+  const clinicalRevenue = serviceItems
+    .filter((item) => item.label === "Clinica" || item.label === "Cirurgias")
+    .reduce((sum, item) => sum + (Number(item.amount || 0) || 0), 0);
+  const hospitalizationRevenue = serviceItems
+    .filter((item) => item.label === "Internacao")
+    .reduce((sum, item) => sum + (Number(item.amount || 0) || 0), 0);
+  const allocatedServiceFees =
+    trackedGrossRevenue > 0 ? Number(((totalFees * serviceAmount) / trackedGrossRevenue).toFixed(2)) : 0;
+  const serviceNet = Math.max(serviceAmount - allocatedServiceFees, 0);
+
+  return {
+    serviceLegend: serviceItems.map((item) => ({
+      label: item.label,
+      amount: item.amount,
+      count: item.count,
+      percentage: Math.round((item.amount / totalServices) * 100),
+    })),
+    serviceRows,
+    productLegend: [
+      {
+        label: "Produtos",
+        amount: productAmount,
+        percentage: Math.round((productAmount / totalProducts) * 100),
+      },
+      {
+        label: "Servicos",
+        amount: serviceAmount,
+        percentage: Math.round((serviceAmount / totalProducts) * 100),
+      },
+    ],
+    packageMetrics: {
+      total: packageCount,
+      completed: completedPackageCount,
+      pending: Math.max(packageCount - completedPackageCount, 0),
+      paid: paidPackageCount,
+      amount: packageAmount,
+      paidAmount: packagePaidAmount,
+      outstandingAmount: packageOutstandingAmount,
+      topServices: Object.values(packageServiceMap)
+        .sort((left, right) => right.amount - left.amount || right.count - left.count)
+        .slice(0, 5),
+    },
+    totals: {
+      bruto: trackedGrossRevenue,
+      taxas: totalFees,
+      serviceFeesAllocated: allocatedServiceFees,
+      liquidoFaturamento: faturamentoLiquido,
+      custos: totalVariableCosts,
+      fixedExpenses: totalFixedExpenses,
+      totalSaidas: totalOutgoing,
+      comissoes: commissions,
+      liquido: estimatedNet,
+      ticketMedio: totalAppointments ? serviceAmount / totalAppointments : serviceAmount,
+      atendimentos: totalAppointments,
+      serviceRevenue: serviceAmount,
+      productRevenue: productAmount,
+      aestheticRevenue,
+      clinicalRevenue,
+      hospitalizationRevenue,
+      serviceNet,
+    },
+    monthlyPoint: {
+      total: trackedGrossRevenue > 0 ? trackedGrossRevenue : serviceAmount,
+      services: serviceAmount,
+      net: trackedGrossRevenue > 0 ? faturamentoLiquido : serviceAmount,
+    },
+  };
+}
+
 // Criar nova entrada/saída financeira
 router.post("/finance", authenticate, async (req, res) => {
   try {
@@ -1569,7 +1810,11 @@ router.get("/monthly-stats/:year/:month", authenticate, async (req, res) => {
 
     res.json({
       message: "Estatísticas mensais encontradas com sucesso",
-      data: stats,
+      data: {
+        ...stats,
+        financeSummary,
+        overview,
+      },
     });
   } catch (error) {
     console.error("Erro ao buscar estatísticas mensais:", error);
@@ -1836,6 +2081,20 @@ router.get("/monthly-stats-detailed/:year/:month", authenticate, async (req, res
         status: "pago",
       },
     });
+    const finances = await Finance.findAll({
+      where: {
+        usersId,
+        status: {
+          [Op.ne]: "cancelado",
+        },
+        [Op.or]: [
+          { date: { [Op.between]: [startDate, endDate] } },
+          { dueDate: { [Op.between]: [startDate, endDate] } },
+        ],
+      },
+    });
+    const currentFinances = await keepOnlyCurrentAgendaFinanceRows(finances, usersId);
+    const financeSummary = buildFinanceSummaryFromRows(currentFinances);
 
     const sellerIds = Array.from(
       new Set(
@@ -1948,6 +2207,7 @@ router.get("/monthly-stats-detailed/:year/:month", authenticate, async (req, res
       seller && seller !== "all"
         ? allSales.filter((sale) => String(sale.responsible || "") === seller)
         : allSales;
+    const overview = buildViaCentralOverviewPayload(appointments, sales, financeSummary);
 
     const stats = {
       patients: {
