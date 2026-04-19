@@ -560,10 +560,6 @@ router.get("/appointments", auth, async (req, res) => {
           model: Finance,
           as: "finance",
         },
-        {
-          model: Drivers,
-          as: "driver",
-        },
       ],
       order: [
         ["date", "ASC"],
