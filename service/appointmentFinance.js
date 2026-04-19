@@ -46,6 +46,32 @@ const getLatestAppointmentPaymentFinanceId = (payments = []) =>
       return currentTimestamp >= latestTimestamp ? currentPayment : latestPayment;
     }, null)?.financeId || null;
 
+const dedupeSharedPackagePayments = (payments = []) => {
+  const normalizedPayments = Array.isArray(payments) ? payments : [];
+  const seen = new Set();
+
+  return normalizedPayments.filter((payment) => {
+    const financeId = String(payment?.financeId || "").trim();
+    const fingerprint = financeId
+      ? `finance:${financeId}`
+      : [
+          String(payment?.paidAt || payment?.dueDate || payment?.date || "").slice(0, 19),
+          String(payment?.paymentMethod || "").trim().toLowerCase(),
+          Number(payment?.grossAmount ?? payment?.amount ?? 0).toFixed(2),
+          Number(payment?.netAmount ?? payment?.amount ?? 0).toFixed(2),
+          String(payment?.details || "").trim().toLowerCase(),
+          String(payment?.status || "").trim().toLowerCase(),
+        ].join("|");
+
+    if (seen.has(fingerprint)) {
+      return false;
+    }
+
+    seen.add(fingerprint);
+    return true;
+  });
+};
+
 export const calculateMachineFeeBreakdown = (grossAmount, feePercentage = 0) => {
   const gross = toNumber(grossAmount);
   const percent = toNumber(feePercentage);
@@ -346,9 +372,11 @@ export const hydrateAppointmentsWithFinancialDetails = async (
   }, {});
   const sharedPackagePaymentsByGroupId = Object.entries(packageOccurrencesByGroupId).reduce(
     (acc, [packageGroupId, occurrences]) => {
-      const paidPayments = occurrences.flatMap((occurrence) =>
-        (paymentsByAppointmentId[String(occurrence?.id || "")] || []).filter(
-          (payment) => normalizeStatus(payment.status) === "pago",
+      const paidPayments = dedupeSharedPackagePayments(
+        occurrences.flatMap((occurrence) =>
+          (paymentsByAppointmentId[String(occurrence?.id || "")] || []).filter(
+            (payment) => normalizeStatus(payment.status) === "pago",
+          ),
         ),
       );
       acc[packageGroupId] = paidPayments;
@@ -721,13 +749,15 @@ export const getAppointmentComandaDetails = async (appointmentId, usersId) => {
       : [];
   const sharedPackagePayments =
     packageOccurrences.length > 0
-      ? await AppointmentPayment.findAll({
-          where: {
-            appointmentId: packageOccurrences.map((occurrence) => occurrence.id),
-            usersId,
-          },
-          order: [["dueDate", "ASC"], ["createdAt", "ASC"]],
-        })
+      ? dedupeSharedPackagePayments(
+          await AppointmentPayment.findAll({
+            where: {
+              appointmentId: packageOccurrences.map((occurrence) => occurrence.id),
+              usersId,
+            },
+            order: [["dueDate", "ASC"], ["createdAt", "ASC"]],
+          }),
+        )
       : [];
 
   return {
