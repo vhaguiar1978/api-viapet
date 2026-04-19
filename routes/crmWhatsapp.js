@@ -28,6 +28,24 @@ function resolveWhatsappConfig(settings) {
   };
 }
 
+function getMetaErrorMessage(error) {
+  return (
+    error?.response?.data?.error?.message ||
+    error?.response?.data?.message ||
+    error?.message ||
+    ""
+  );
+}
+
+function isMetaTokenInvalidError(error) {
+  const rawMessage = String(getMetaErrorMessage(error) || "").toLowerCase();
+  return (
+    rawMessage.includes("error validating access token") ||
+    rawMessage.includes("session has been invalidated") ||
+    rawMessage.includes("access token") && rawMessage.includes("invalid")
+  );
+}
+
 router.get("/crm-whatsapp/status", authenticate, async (req, res) => {
   try {
     const settings = await Settings.findOne({
@@ -74,6 +92,8 @@ router.get("/crm-whatsapp/status", authenticate, async (req, res) => {
         webhookUrl: `${process.env.URL || ""}/webhook`,
         oauthAvailable: Boolean(process.env.META_APP_ID && process.env.META_APP_SECRET),
         oauthConnectedAt: config.oauthConnectedAt || null,
+        tokenInvalid: Boolean(config.tokenInvalid),
+        tokenErrorMessage: config.tokenErrorMessage || "",
       },
     });
   } catch (error) {
@@ -196,6 +216,8 @@ router.post("/crm-whatsapp/send", authenticate, async (req, res) => {
         accessToken: settings.whatsappConnection?.accessToken || token,
         accessTokenConfigured: true,
         lastOutboundAt: new Date().toISOString(),
+        tokenInvalid: false,
+        tokenErrorMessage: "",
       };
       await settings.save();
     }
@@ -206,8 +228,36 @@ router.post("/crm-whatsapp/send", authenticate, async (req, res) => {
     });
   } catch (error) {
     console.error("Erro ao enviar mensagem do WhatsApp CRM:", error.response?.data || error);
+
+    if (isMetaTokenInvalidError(error)) {
+      try {
+        const settings = await Settings.findOne({
+          where: { usersId: req.user.establishment },
+        });
+        if (settings) {
+          settings.whatsappConnection = {
+            ...(settings.whatsappConnection || {}),
+            accessToken: "",
+            accessTokenConfigured: false,
+            oauthConnectedAt: null,
+            tokenInvalid: true,
+            tokenErrorMessage: getMetaErrorMessage(error),
+          };
+          await settings.save();
+        }
+      } catch (persistError) {
+        console.error("Erro ao marcar token invalido do WhatsApp CRM:", persistError);
+      }
+
+      return res.status(409).json({
+        message: "A conexao com a Meta expirou. Reconecte o WhatsApp para voltar a enviar mensagens.",
+        requiresReconnect: true,
+        tokenInvalid: true,
+      });
+    }
+
     return res.status(500).json({
-      message: error.response?.data?.error?.message || "Nao foi possivel enviar a mensagem pelo WhatsApp CRM",
+      message: getMetaErrorMessage(error) || "Nao foi possivel enviar a mensagem pelo WhatsApp CRM",
       error: error.message,
     });
   }
@@ -241,6 +291,16 @@ router.post("/crm-whatsapp/test-connection", authenticate, async (req, res) => {
       },
     );
 
+    if (settings) {
+      settings.whatsappConnection = {
+        ...(settings.whatsappConnection || {}),
+        accessTokenConfigured: true,
+        tokenInvalid: false,
+        tokenErrorMessage: "",
+      };
+      await settings.save();
+    }
+
     return res.status(200).json({
       message: "Conexao com a Meta validada com sucesso",
       data: {
@@ -257,10 +317,37 @@ router.post("/crm-whatsapp/test-connection", authenticate, async (req, res) => {
       "Erro ao testar conexao do WhatsApp CRM:",
       error.response?.data || error,
     );
+
+    if (isMetaTokenInvalidError(error)) {
+      try {
+        if (settings) {
+          settings.whatsappConnection = {
+            ...(settings.whatsappConnection || {}),
+            accessToken: "",
+            accessTokenConfigured: false,
+            oauthConnectedAt: null,
+            tokenInvalid: true,
+            tokenErrorMessage: getMetaErrorMessage(error),
+          };
+          await settings.save();
+        }
+      } catch (persistError) {
+        console.error("Erro ao salvar status de token invalido do WhatsApp CRM:", persistError);
+      }
+
+      return res.status(409).json({
+        message: "Sua conexao com a Meta expirou. Reconecte o WhatsApp para voltar a receber mensagens.",
+        requiresReconnect: true,
+        tokenInvalid: true,
+        data: {
+          phoneNumberId,
+          businessAccountId,
+        },
+      });
+    }
+
     return res.status(500).json({
-      message:
-        error.response?.data?.error?.message ||
-        "Nao foi possivel validar a conexao com a Meta",
+      message: getMetaErrorMessage(error) || "Nao foi possivel validar a conexao com a Meta",
       error: error.message,
     });
   }
