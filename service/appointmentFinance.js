@@ -6,6 +6,7 @@ import Custumers from "../models/Custumers.js";
 import Finance from "../models/Finance.js";
 import Products from "../models/Products.js";
 import Services from "../models/Services.js";
+import { Op } from "sequelize";
 
 const toNumber = (value) => Number.parseFloat(value || 0) || 0;
 
@@ -160,7 +161,9 @@ const buildLegacyServiceItemsFromServiceMap = (appointment, serviceMap = new Map
 export const hydrateAppointmentsWithFinancialDetails = async (
   appointments = [],
   usersId,
+  options = {},
 ) => {
+  const includePackageContext = Boolean(options?.includePackageContext);
   const normalizedAppointments = (Array.isArray(appointments) ? appointments : [])
     .map((appointment) =>
       typeof appointment?.toJSON === "function" ? appointment.toJSON() : appointment,
@@ -179,24 +182,68 @@ export const hydrateAppointmentsWithFinancialDetails = async (
     return normalizedAppointments;
   }
 
+  const packageGroupIds = includePackageContext
+    ? [
+        ...new Set(
+            normalizedAppointments
+              .map((appointment) => String(appointment?.packageGroupId || "").trim())
+              .filter(Boolean),
+          ),
+      ]
+    : [];
+
+  const packageOccurrences = packageGroupIds.length
+    ? await Appointment.findAll({
+        where: {
+          usersId,
+          packageGroupId: {
+            [Op.in]: packageGroupIds,
+          },
+        },
+        attributes: [
+          "id",
+          "date",
+          "time",
+          "packageNumber",
+          "packageMax",
+          "packageGroupId",
+          "status",
+          "responsibleId",
+          "sellerName",
+        ],
+        order: [
+          ["packageNumber", "ASC"],
+          ["date", "ASC"],
+          ["time", "ASC"],
+        ],
+      })
+    : [];
+
+  const packageOccurrenceIds = packageOccurrences
+    .map((appointment) => appointment?.id)
+    .filter(Boolean);
+  const allRelevantAppointmentIds = [
+    ...new Set([...appointmentIds, ...packageOccurrenceIds]),
+  ];
+
   const [items, payments, history] = await Promise.all([
     AppointmentItem.findAll({
       where: {
-        appointmentId: appointmentIds,
+        appointmentId: allRelevantAppointmentIds,
         usersId,
       },
       order: [["createdAt", "ASC"]],
     }),
     AppointmentPayment.findAll({
       where: {
-        appointmentId: appointmentIds,
+        appointmentId: allRelevantAppointmentIds,
         usersId,
       },
       order: [["dueDate", "ASC"], ["createdAt", "ASC"]],
     }),
     AppointmentStatusHistory.findAll({
       where: {
-        appointmentId: appointmentIds,
+        appointmentId: allRelevantAppointmentIds,
         usersId,
       },
       order: [["createdAt", "DESC"]],
@@ -288,6 +335,27 @@ export const hydrateAppointmentsWithFinancialDetails = async (
     acc[key].push(typeof entry?.toJSON === "function" ? entry.toJSON() : entry);
     return acc;
   }, {});
+  const packageOccurrencesByGroupId = packageOccurrences.reduce((acc, appointment) => {
+    const packageGroupId = String(appointment?.packageGroupId || "").trim();
+    if (!packageGroupId) return acc;
+    if (!acc[packageGroupId]) acc[packageGroupId] = [];
+    acc[packageGroupId].push(
+      typeof appointment?.toJSON === "function" ? appointment.toJSON() : appointment,
+    );
+    return acc;
+  }, {});
+  const sharedPackagePaymentsByGroupId = Object.entries(packageOccurrencesByGroupId).reduce(
+    (acc, [packageGroupId, occurrences]) => {
+      const paidPayments = occurrences.flatMap((occurrence) =>
+        (paymentsByAppointmentId[String(occurrence?.id || "")] || []).filter(
+          (payment) => normalizeStatus(payment.status) === "pago",
+        ),
+      );
+      acc[packageGroupId] = paidPayments;
+      return acc;
+    },
+    {},
+  );
 
   return Promise.all(
     normalizedAppointments.map(async (appointment) => {
@@ -315,6 +383,12 @@ export const hydrateAppointmentsWithFinancialDetails = async (
         legacyItemsList,
         paymentsList,
         statusHistory,
+        packageOccurrences: appointment?.packageGroupId
+          ? packageOccurrencesByGroupId[String(appointment.packageGroupId).trim()] || []
+          : appointment?.packageOccurrences || [],
+        sharedPackagePayments: appointment?.packageGroupId
+          ? sharedPackagePaymentsByGroupId[String(appointment.packageGroupId).trim()] || []
+          : appointment?.sharedPackagePayments || [],
         summary: {
           ...summary,
           usesLegacyItems: !itemsList.length && legacyItemsList.length > 0,
@@ -645,6 +719,16 @@ export const getAppointmentComandaDetails = async (appointmentId, usersId) => {
           ],
         })
       : [];
+  const sharedPackagePayments =
+    packageOccurrences.length > 0
+      ? await AppointmentPayment.findAll({
+          where: {
+            appointmentId: packageOccurrences.map((occurrence) => occurrence.id),
+            usersId,
+          },
+          order: [["dueDate", "ASC"], ["createdAt", "ASC"]],
+        })
+      : [];
 
   return {
     appointment,
@@ -655,6 +739,7 @@ export const getAppointmentComandaDetails = async (appointmentId, usersId) => {
     summary,
     finance,
     packageOccurrences,
+    sharedPackagePayments,
     catalogs: {
       products,
       services,

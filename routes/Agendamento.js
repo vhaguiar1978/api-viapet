@@ -455,6 +455,7 @@ router.get("/appointments/monthly", auth, async (req, res) => {
     const hydratedAppointments = await hydrateAppointmentsWithFinancialDetails(
       appointments,
       req.user.establishment,
+      { includePackageContext: true },
     );
 
     // Calcular dados agregados
@@ -512,7 +513,9 @@ router.get("/appointments/monthly", auth, async (req, res) => {
 // Listar agendamentos
 router.get("/appointments", auth, async (req, res) => {
   try {
-    const { date, status, type } = req.query;
+    const { date, startDate, endDate, status, type } = req.query;
+    const useHydratedResponse = String(req.query?.hydrated || "") === "1";
+    const includePackageContext = String(req.query?.packageContext || "") === "1";
 
     const where = {
       usersId: req.user.establishment,
@@ -520,6 +523,11 @@ router.get("/appointments", auth, async (req, res) => {
 
     if (date) {
       where.date = date;
+    } else if (startDate && endDate) {
+      where.date = {
+        [Op.gte]: startDate,
+        [Op.lte]: endDate,
+      };
     }
     if (status) {
       where.status = status;
@@ -531,6 +539,32 @@ router.get("/appointments", auth, async (req, res) => {
 
     const appointments = await Appointment.findAll({
       where,
+      include: [
+        {
+          model: Pets,
+          as: "Pet",
+        },
+        {
+          model: Custumers,
+          as: "Custumer",
+        },
+        {
+          model: Services,
+          as: "Service",
+        },
+        {
+          model: Users,
+          as: "responsible",
+        },
+        {
+          model: Finance,
+          as: "finance",
+        },
+        {
+          model: Drivers,
+          as: "driver",
+        },
+      ],
       order: [
         ["date", "ASC"],
         ["time", "ASC"],
@@ -538,7 +572,16 @@ router.get("/appointments", auth, async (req, res) => {
     });
 
     // Buscar informações adicionais para cada agendamento
-    const appointmentsWithDetails = await Promise.all(
+    let appointmentsWithDetails = [];
+
+    if (useHydratedResponse) {
+      appointmentsWithDetails = await hydrateAppointmentsWithFinancialDetails(
+        appointments,
+        req.user.establishment,
+        { includePackageContext },
+      );
+    } else {
+      appointmentsWithDetails = await Promise.all(
       appointments.map(async (appointment) => {
         const pet = await Pets.findByPk(appointment.petId);
         const customer = await Custumers.findByPk(appointment.customerId);
@@ -652,6 +695,7 @@ router.get("/appointments", auth, async (req, res) => {
         };
       }),
     );
+    }
 
     const filteredAppointments = appointmentsWithDetails.filter((appointment) =>
       matchesRequestedAgendaType(appointment, requestedAgendaType),
