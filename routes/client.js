@@ -236,34 +236,40 @@ router.get("/customers/:id", auth, async (req, res) => {
 // Rota para listar todos os clientes
 router.get("/customers", auth, async (req, res) => {
   try {
+    const includePets = !["0", "false", "no"].includes(
+      String(req.query.includePets || "true").trim().toLowerCase(),
+    );
     const customers = await Custumers.findAll({
       where: { usersId: req.user.establishment },
       order: [["name", "ASC"]],
     });
 
     const customerIds = customers.map((customer) => customer.id);
-    const pets = customerIds.length
-      ? await Pets.findAll({
-          where: {
-            usersId: req.user.establishment,
-            custumerId: { [Op.in]: customerIds },
-          },
-          order: [["name", "ASC"]],
-        })
-      : [];
+    const pets =
+      includePets && customerIds.length
+        ? await Pets.findAll({
+            where: {
+              usersId: req.user.establishment,
+              custumerId: { [Op.in]: customerIds },
+            },
+            order: [["name", "ASC"]],
+          })
+        : [];
 
-    const petsByCustomerId = pets.reduce((accumulator, pet) => {
-      const key = String(pet.custumerId || "");
-      if (!accumulator[key]) {
-        accumulator[key] = [];
-      }
-      accumulator[key].push(pet);
-      return accumulator;
-    }, {});
+    const petsByCustomerId = includePets
+      ? pets.reduce((accumulator, pet) => {
+          const key = String(pet.custumerId || "");
+          if (!accumulator[key]) {
+            accumulator[key] = [];
+          }
+          accumulator[key].push(pet);
+          return accumulator;
+        }, {})
+      : {};
 
     const customersWithPets = customers.map((customer) => ({
       ...customer.toJSON(),
-      pets: petsByCustomerId[String(customer.id)] || [],
+      pets: includePets ? petsByCustomerId[String(customer.id)] || [] : [],
     }));
 
     return res.status(200).json({

@@ -233,6 +233,9 @@ router.get("/pets/search", auth, async (req, res) => {
 // Rota para listar todos os pets
 router.get("/pets", auth, async (req, res) => {
   try {
+    const includeBelongings = !["0", "false", "no"].includes(
+      String(req.query.includeBelongings || "true").trim().toLowerCase(),
+    );
     const pets = await Pets.findAll({
       where: { usersId: req.user.establishment },
       order: [["name", "ASC"]],
@@ -260,20 +263,25 @@ router.get("/pets", auth, async (req, res) => {
     }, {});
 
     // Busca os pertences de todos os pets
-    const belongings = await Belongings.findAll({
-      where: {
-        petId: pets.map((pet) => pet.id),
-      },
-    });
+    const belongings =
+      includeBelongings && pets.length
+        ? await Belongings.findAll({
+            where: {
+              petId: pets.map((pet) => pet.id),
+            },
+          })
+        : [];
 
     // Cria um mapa de petId -> belongings
-    const belongingsMap = belongings.reduce((acc, belonging) => {
-      if (!acc[belonging.petId]) {
-        acc[belonging.petId] = [];
-      }
-      acc[belonging.petId].push(belonging);
-      return acc;
-    }, {});
+    const belongingsMap = includeBelongings
+      ? belongings.reduce((acc, belonging) => {
+          if (!acc[belonging.petId]) {
+            acc[belonging.petId] = [];
+          }
+          acc[belonging.petId].push(belonging);
+          return acc;
+        }, {})
+      : {};
 
     // Adiciona o nome e telefone do cliente e os pertences a cada pet
     const petsWithCustomerInfo = pets.map((pet) => {
@@ -286,7 +294,7 @@ router.get("/pets", auth, async (req, res) => {
         customerId: pet.custumerId, // Incluir customerId
         customerName: customerData.name, // Usa o nome do cliente do mapa
         customerPhone: customerData.phone, // Usa o telefone do cliente do mapa
-        belongings: belongingsMap[pet.id] || [],
+        belongings: includeBelongings ? belongingsMap[pet.id] || [] : [],
       };
     });
 
