@@ -136,6 +136,32 @@ router.post("/crm-baileys/disconnect", authenticate, async (req, res) => {
   }
 });
 
+// Force reset: clear auth state, destroy instance, ready for fresh QR
+router.post("/crm-baileys/reset", authenticate, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const establishment = req.body.establishment || "default";
+
+    // Reset the existing instance (clears DB auth state too)
+    const baileysService = BaileysService.getInstance(userId, establishment);
+    await baileysService.reset();
+
+    // Remove from singleton map so next call creates a clean instance
+    BaileysService.resetInstance(userId, establishment);
+
+    res.json({
+      success: true,
+      message: "Conexão resetada com sucesso. Clique em Conectar para gerar um novo QR code.",
+    });
+  } catch (error) {
+    console.error("Error in /crm-baileys/reset:", error);
+    res.status(500).json({
+      error: "Failed to reset connection",
+      details: error.message,
+    });
+  }
+});
+
 // Send message via Baileys
 router.post("/crm-baileys/send", authenticate, async (req, res) => {
   try {

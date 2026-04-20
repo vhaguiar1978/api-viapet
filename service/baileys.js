@@ -2,6 +2,8 @@ import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
   isJidBroadcast,
+  initAuthCreds,
+  BufferJSON,
 } from "baileys";
 import qrcode from "qrcode";
 import Settings from "../models/Settings.js";
@@ -9,6 +11,93 @@ import CrmConversation from "../models/CrmConversation.js";
 import CrmConversationMessage from "../models/CrmConversationMessage.js";
 import Custumers from "../models/Custumers.js";
 import { v4 as uuidv4 } from "uuid";
+
+/**
+ * Database-backed auth state for Baileys.
+ * Stores credentials and signal keys inside settings.whatsappConnection.baileys.authState
+ * so they survive Render restarts and re-deploys.
+ */
+async function useDatabaseAuthState(userId) {
+  const settings = await Settings.findOne({ where: { usersId: userId } });
+  if (!settings) throw new Error("Settings not found for user");
+
+  const saved = settings.whatsappConnection?.baileys?.authState || {};
+
+  // Restore or initialize credentials
+  let creds;
+  try {
+    creds = saved.creds
+      ? JSON.parse(JSON.stringify(saved.creds), BufferJSON.reviver)
+      : initAuthCreds();
+  } catch (_) {
+    creds = initAuthCreds();
+  }
+
+  // Restore or initialize signal keys
+  let keys = {};
+  try {
+    if (saved.keys) {
+      for (const [type, typeKeys] of Object.entries(saved.keys)) {
+        keys[type] = {};
+        for (const [id, value] of Object.entries(typeKeys)) {
+          keys[type][id] = JSON.parse(JSON.stringify(value), BufferJSON.reviver);
+        }
+      }
+    }
+  } catch (_) {
+    keys = {};
+  }
+
+  const persistState = async () => {
+    try {
+      const fresh = await Settings.findOne({ where: { usersId: userId } });
+      if (!fresh) return;
+      fresh.whatsappConnection = {
+        ...fresh.whatsappConnection,
+        baileys: {
+          ...fresh.whatsappConnection?.baileys,
+          authState: {
+            creds: JSON.parse(JSON.stringify(creds), BufferJSON.replacer),
+            keys: JSON.parse(JSON.stringify(keys), BufferJSON.replacer),
+          },
+        },
+      };
+      await fresh.save();
+    } catch (err) {
+      console.error("[Baileys] Error persisting auth state:", err.message);
+    }
+  };
+
+  return {
+    state: {
+      creds,
+      keys: {
+        get: async (type, ids) => {
+          const result = {};
+          for (const id of ids) {
+            const val = keys[type]?.[id];
+            result[id] = val !== undefined ? val : null;
+          }
+          return result;
+        },
+        set: async (data) => {
+          for (const [type, typeData] of Object.entries(data)) {
+            if (!keys[type]) keys[type] = {};
+            for (const [id, value] of Object.entries(typeData)) {
+              if (value != null) {
+                keys[type][id] = value;
+              } else {
+                delete keys[type][id];
+              }
+            }
+          }
+          await persistState();
+        },
+      },
+    },
+    saveCreds: persistState,
+  };
+}
 
 class BaileysService {
   constructor(userId, establishment) {
@@ -24,7 +113,7 @@ class BaileysService {
     this.errorPatterns = [];
     this.isInitializing = false;
     this.retryCount = 0;
-    this.maxRetries = 3;
+    this.maxRetries = 5;
   }
 
   async initialize() {
@@ -33,59 +122,54 @@ class BaileysService {
       console.log(`[Baileys] Already initializing for user ${this.userId}, skipping`);
       return { success: true };
     }
-    // If already connected or scanning, don't reinitialize
+    // If already connected or actively scanning, skip
     if (this.connectionStatus === "connected" || this.connectionStatus === "scanning") {
       console.log(`[Baileys] Already ${this.connectionStatus} for user ${this.userId}, skipping`);
       return { success: true };
     }
-    // Stop if max retries exceeded
+    // Stop if max retries exceeded (requires manual reset)
     if (this.retryCount >= this.maxRetries) {
       console.log(`[Baileys] Max retries (${this.maxRetries}) reached for user ${this.userId}`);
       this.connectionStatus = "error";
-      return { success: false };
+      await this.updateSettingsInDb();
+      return { success: false, error: "max_retries" };
     }
 
     this.isInitializing = true;
     try {
-      const settings = await Settings.findOne({
-        where: { usersId: this.userId },
-      });
-
-      if (!settings) {
-        throw new Error("Settings not found for user");
-      }
-
-      // Close existing socket before creating new one
+      // Close existing socket cleanly
       if (this.sock) {
         try { this.sock.end(); } catch (_) {}
         this.sock = null;
       }
 
-      const { state: auth, saveCreds } = await useMultiFileAuthState(
-        `./auth_info_baileys_${this.userId}`,
-      );
-      this.authState = auth;
+      // Load auth state from database (survives restarts)
+      const { state, saveCreds } = await useDatabaseAuthState(this.userId);
+      this.authState = state;
       this.saveCreds = saveCreds;
 
       this.sock = makeWASocket({
-        auth,
+        auth: state,
         printQRInTerminal: false,
-        connectTimeoutMs: 30000,
-        retryRequestDelayMs: 2000,
+        connectTimeoutMs: 60000,
+        retryRequestDelayMs: 3000,
+        qrTimeout: 60000,
+        browser: ["ViaPet", "Chrome", "120.0"],
+        generateHighQualityLinkPreview: false,
       });
 
       this.sock.ev.on("connection.update", this.handleConnectionUpdate.bind(this));
       this.sock.ev.on("messages.upsert", this.handleMessagesUpsert.bind(this));
       this.sock.ev.on("message.reaction", this.handleMessageReaction.bind(this));
-      this.sock.ev.on("creds.update", this.saveCreds);
+      this.sock.ev.on("creds.update", saveCreds);
 
       this.connectionStatus = "connecting";
-      await this.updateSettings(settings);
+      console.log(`[Baileys] Initializing socket for user ${this.userId} (retry ${this.retryCount}/${this.maxRetries})`);
       return { success: true };
     } catch (error) {
-      console.error("Error initializing Baileys:", error);
+      console.error("[Baileys] Error initializing:", error);
       this.connectionStatus = "error";
-      throw error;
+      return { success: false, error: error.message };
     } finally {
       this.isInitializing = false;
     }
@@ -97,7 +181,8 @@ class BaileysService {
     if (qr) {
       this.qrCode = await qrcode.toDataURL(qr);
       this.connectionStatus = "scanning";
-      this.retryCount = 0; // Reset retries when QR arrives
+      this.retryCount = 0; // QR arrived = fresh start
+      console.log(`[Baileys] QR code generated for user ${this.userId}`);
       await this.updateSettingsInDb();
     }
 
@@ -105,19 +190,31 @@ class BaileysService {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const isLoggedOut = statusCode === DisconnectReason.loggedOut;
 
+      console.log(`[Baileys] Connection closed for user ${this.userId}, code=${statusCode}, loggedOut=${isLoggedOut}`);
+
       if (isLoggedOut) {
+        // User logged out — clear auth state from DB too
         this.connectionStatus = "disconnected";
         this.qrCode = null;
         this.retryCount = 0;
+        await this.clearAuthStateInDb();
+        await this.updateSettingsInDb();
+      } else if (statusCode === DisconnectReason.restartRequired) {
+        // WA asked for restart, do it immediately
+        console.log(`[Baileys] Restart required for user ${this.userId}`);
+        this.connectionStatus = "connecting";
+        this.isInitializing = false;
+        setTimeout(() => this.initialize(), 1000);
       } else {
         this.retryCount += 1;
         if (this.retryCount < this.maxRetries) {
-          console.log(`[Baileys] Connection closed, retry ${this.retryCount}/${this.maxRetries}`);
+          const delay = this.retryCount * 5000;
+          console.log(`[Baileys] Retry ${this.retryCount}/${this.maxRetries} in ${delay}ms for user ${this.userId}`);
           this.connectionStatus = "connecting";
-          const delay = this.retryCount * 3000;
+          this.isInitializing = false;
           setTimeout(() => this.initialize(), delay);
         } else {
-          console.log(`[Baileys] Max retries reached, stopping reconnection`);
+          console.log(`[Baileys] Max retries reached for user ${this.userId}`);
           this.connectionStatus = "error";
           await this.updateSettingsInDb();
         }
@@ -126,10 +223,12 @@ class BaileysService {
       this.connectionStatus = "connected";
       this.qrCode = null;
       this.retryCount = 0;
-      const phoneNumber = this.sock.user?.id?.replace(/:.*/, "");
+      const phoneNumber = this.sock.user?.id?.replace(/:.*@.*/, "");
+      console.log(`[Baileys] Connected! User ${this.userId}, phone: ${phoneNumber}`);
       await this.updateSettingsInDb({ connectedPhone: phoneNumber });
     }
 
+    // Always sync status to DB
     await this.updateSettingsInDb();
   }
 
@@ -139,20 +238,22 @@ class BaileysService {
     for (const msg of messages) {
       if (msg.key.fromMe) continue;
       if (isJidBroadcast(msg.key.remoteJid)) continue;
-
       await this.processInboundMessage(msg);
     }
   }
 
   async handleMessageReaction({ reaction, key }) {
-    console.log("Message reaction received:", reaction);
+    console.log("[Baileys] Message reaction received:", reaction);
   }
 
   async processInboundMessage(msg) {
     try {
       const fromJid = msg.key.remoteJid;
       const phone = fromJid.replace("@s.whatsapp.net", "").replace("@g.us", "");
-      const messageBody = msg.message?.conversation || msg.message?.extendedTextMessage?.text || "";
+      const messageBody =
+        msg.message?.conversation ||
+        msg.message?.extendedTextMessage?.text ||
+        "";
 
       if (!messageBody) return;
 
@@ -168,7 +269,6 @@ class BaileysService {
           usersId: this.userId,
           phone,
           name: phone,
-          // Add other required fields based on your model
         });
       }
 
@@ -196,15 +296,14 @@ class BaileysService {
           lastInboundAt: new Date(),
         });
       } else {
-        // Update conversation with latest message info
         conversation.lastMessagePreview = messageBody.substring(0, 100);
         conversation.lastMessageAt = new Date();
         conversation.lastInboundAt = new Date();
-        conversation.unreadCount += 1;
+        conversation.unreadCount = (conversation.unreadCount || 0) + 1;
         await conversation.save();
       }
 
-      // Create message record
+      // Save message
       await CrmConversationMessage.create({
         id: uuidv4(),
         conversationId: conversation.id,
@@ -220,38 +319,32 @@ class BaileysService {
         payload: msg,
       });
 
-      console.log(`Inbound message processed from ${phone}: ${messageBody}`);
+      console.log(`[Baileys] Inbound from ${phone}: ${messageBody.substring(0, 50)}`);
     } catch (error) {
-      console.error("Error processing inbound message:", error);
+      console.error("[Baileys] Error processing inbound message:", error);
     }
   }
 
   async sendMessage(phone, text, options = {}) {
     if (this.connectionStatus !== "connected") {
-      throw new Error(`Cannot send message: Baileys not connected (status: ${this.connectionStatus})`);
+      throw new Error(
+        `Não conectado ao WhatsApp (status: ${this.connectionStatus})`
+      );
     }
 
     try {
-      // Check rate limit
       this.enforceRateLimit();
 
-      // Add random delay
-      const delay = this.getRandomDelay(2000, 5000);
+      const delay = this.getRandomDelay(1500, 4000);
       await new Promise((resolve) => setTimeout(resolve, delay));
 
-      // Format phone number
       const formattedPhone = this.formatPhoneNumber(phone);
-
-      // Send message
       const result = await this.sock.sendMessage(formattedPhone, {
         text,
         ...options,
       });
 
-      // Record message timestamp
       this.messageTimestamps.push(Date.now());
-
-      // Update health metrics
       await this.updateHealthMetrics();
 
       return result;
@@ -263,12 +356,12 @@ class BaileysService {
 
   async sendImage(phone, imageBuffer, caption = "") {
     if (this.connectionStatus !== "connected") {
-      throw new Error("Baileys not connected");
+      throw new Error("Baileys não conectado");
     }
 
     try {
       this.enforceRateLimit();
-      const delay = this.getRandomDelay(2000, 5000);
+      const delay = this.getRandomDelay(1500, 4000);
       await new Promise((resolve) => setTimeout(resolve, delay));
 
       const formattedPhone = this.formatPhoneNumber(phone);
@@ -296,16 +389,13 @@ class BaileysService {
   }
 
   enforceRateLimit() {
-    // Clean up old timestamps (older than 1 hour)
     const oneHourAgo = Date.now() - 60 * 60 * 1000;
     this.messageTimestamps = this.messageTimestamps.filter(
-      (ts) => ts > oneHourAgo,
+      (ts) => ts > oneHourAgo
     );
-
-    // Check if we've exceeded 60 messages per hour
     if (this.messageTimestamps.length >= 60) {
       throw new Error(
-        "Rate limit exceeded: 60 messages per hour. Please wait before sending more messages.",
+        "Limite de 60 mensagens por hora atingido. Aguarde antes de enviar mais."
       );
     }
   }
@@ -316,64 +406,43 @@ class BaileysService {
 
   async detectBanPattern(error) {
     const banSignals = [];
-
-    if (error.response?.status === 429) {
-      banSignals.push("RATE_LIMITED");
-    }
-
-    if (error.message?.includes("You are blocked")) {
-      banSignals.push("BLOCKED");
-    }
-
-    if (error.response?.status === 403) {
-      banSignals.push("FORBIDDEN");
-    }
-
-    if (error.message?.includes("ERR_UNKNOWN")) {
-      banSignals.push("UNKNOWN_ERROR");
-    }
-
-    if (error.code === "ECONNREFUSED") {
-      banSignals.push("CONNECTION_REFUSED");
-    }
+    if (error.response?.status === 429) banSignals.push("RATE_LIMITED");
+    if (error.message?.includes("You are blocked")) banSignals.push("BLOCKED");
+    if (error.response?.status === 403) banSignals.push("FORBIDDEN");
+    if (error.message?.includes("ERR_UNKNOWN")) banSignals.push("UNKNOWN_ERROR");
+    if (error.code === "ECONNREFUSED") banSignals.push("CONNECTION_REFUSED");
 
     if (banSignals.length > 0) {
-      this.errorPatterns.push({
-        timestamp: Date.now(),
-        signals: banSignals,
-      });
-
-      // Clean up old error patterns
+      this.errorPatterns.push({ timestamp: Date.now(), signals: banSignals });
       const oneHourAgo = Date.now() - 60 * 60 * 1000;
-      this.errorPatterns = this.errorPatterns.filter((p) => p.timestamp > oneHourAgo);
-
-      // If more than 5 signals in 1 hour, mark as high risk
+      this.errorPatterns = this.errorPatterns.filter(
+        (p) => p.timestamp > oneHourAgo
+      );
       const recentSignals = this.errorPatterns.reduce(
         (acc, p) => acc + p.signals.length,
-        0,
+        0
       );
-
       if (recentSignals > 5) {
         this.connectionStatus = "banned";
-        console.warn("⚠️ High ban risk detected, marking connection as banned");
+        console.warn("[Baileys] ⚠️ High ban risk detected");
       }
     }
-
     return banSignals;
   }
 
   async updateHealthMetrics() {
     const oneHourAgo = Date.now() - 60 * 60 * 1000;
     const messagesLastHour = this.messageTimestamps.filter(
-      (ts) => ts > oneHourAgo,
+      (ts) => ts > oneHourAgo
     ).length;
-
     const recentErrors = this.errorPatterns.filter(
-      (p) => p.timestamp > oneHourAgo,
+      (p) => p.timestamp > oneHourAgo
     );
-    const errorCount = recentErrors.reduce((acc, p) => acc + p.signals.length, 0);
-
-    const riskScore = Math.min(errorCount / 10, 1); // 0-1 scale
+    const errorCount = recentErrors.reduce(
+      (acc, p) => acc + p.signals.length,
+      0
+    );
+    const riskScore = Math.min(errorCount / 10, 1);
 
     await this.updateSettingsInDb({
       health: {
@@ -381,10 +450,32 @@ class BaileysService {
         lastMessageAt: new Date().toISOString(),
         totalMessagesThisMonth: this.messageTimestamps.length,
         riskScore,
-        lastError: this.errorPatterns[this.errorPatterns.length - 1]?.signals[0] || null,
+        lastError:
+          this.errorPatterns[this.errorPatterns.length - 1]?.signals[0] || null,
         errorCount,
       },
     });
+  }
+
+  async clearAuthStateInDb() {
+    try {
+      const settings = await Settings.findOne({
+        where: { usersId: this.userId },
+      });
+      if (settings) {
+        const baileysConfig = settings.whatsappConnection?.baileys || {};
+        settings.whatsappConnection = {
+          ...settings.whatsappConnection,
+          baileys: {
+            ...baileysConfig,
+            authState: null,
+          },
+        };
+        await settings.save();
+      }
+    } catch (error) {
+      console.error("[Baileys] Error clearing auth state:", error);
+    }
   }
 
   async updateSettingsInDb(additionalData = {}) {
@@ -392,60 +483,67 @@ class BaileysService {
       const settings = await Settings.findOne({
         where: { usersId: this.userId },
       });
-
       if (settings) {
         const baileysConfig = settings.whatsappConnection?.baileys || {};
-
         settings.whatsappConnection = {
           ...settings.whatsappConnection,
           baileys: {
             ...baileysConfig,
             connectionStatus: this.connectionStatus,
             qrCode: this.qrCode,
-            lastQrGeneratedAt: this.qrCode ? new Date().toISOString() : baileysConfig.lastQrGeneratedAt,
+            lastQrGeneratedAt: this.qrCode
+              ? new Date().toISOString()
+              : baileysConfig.lastQrGeneratedAt,
             ...additionalData,
           },
         };
-
         await settings.save();
       }
     } catch (error) {
-      console.error("Error updating settings:", error);
+      console.error("[Baileys] Error updating settings:", error);
     }
-  }
-
-  async updateSettings(settings) {
-    const baileysConfig = settings.whatsappConnection?.baileys || {};
-    settings.whatsappConnection = {
-      ...settings.whatsappConnection,
-      baileys: {
-        ...baileysConfig,
-        connectionStatus: this.connectionStatus,
-        qrCode: this.qrCode,
-        lastQrGeneratedAt: new Date().toISOString(),
-        health: baileysConfig.health || {
-          messagesLastHour: 0,
-          totalMessagesThisMonth: 0,
-          riskScore: 0,
-          errorCount: 0,
-        },
-      },
-    };
-    await settings.save();
   }
 
   async disconnect() {
     try {
       if (this.sock) {
-        await this.sock.logout();
+        try { await this.sock.logout(); } catch (_) {}
+        try { this.sock.end(); } catch (_) {}
         this.sock = null;
       }
       this.connectionStatus = "disconnected";
       this.qrCode = null;
+      this.retryCount = 0;
+      this.isInitializing = false;
+      await this.clearAuthStateInDb();
       await this.updateSettingsInDb();
       return { success: true };
     } catch (error) {
-      console.error("Error disconnecting:", error);
+      console.error("[Baileys] Error disconnecting:", error);
+      throw error;
+    }
+  }
+
+  /**
+   * Force-reset: clears all state and auth, lets the user scan a fresh QR.
+   */
+  async reset() {
+    try {
+      if (this.sock) {
+        try { this.sock.end(); } catch (_) {}
+        this.sock = null;
+      }
+      this.connectionStatus = "disconnected";
+      this.qrCode = null;
+      this.retryCount = 0;
+      this.isInitializing = false;
+      this.messageTimestamps = [];
+      this.errorPatterns = [];
+      await this.clearAuthStateInDb();
+      await this.updateSettingsInDb();
+      return { success: true };
+    } catch (error) {
+      console.error("[Baileys] Error resetting:", error);
       throw error;
     }
   }
@@ -458,12 +556,13 @@ class BaileysService {
     return {
       status: this.connectionStatus,
       qrCode: this.qrCode,
-      connectedPhone: this.sock?.user?.id?.replace(":s.whatsapp.net", ""),
+      connectedPhone: this.sock?.user?.id?.replace(/:.*@.*/, ""),
       health: {
         messagesLastHour: (this.messageTimestamps || []).filter(
-          (ts) => ts > Date.now() - 60 * 60 * 1000,
+          (ts) => ts > Date.now() - 60 * 60 * 1000
         ).length,
-        riskScore: this.errorPatterns.reduce((acc, p) => acc + p.signals.length, 0) / 10,
+        riskScore:
+          this.errorPatterns.reduce((acc, p) => acc + p.signals.length, 0) / 10,
         totalMessages: this.messageTimestamps.length,
       },
     };
@@ -477,6 +576,12 @@ class BaileysService {
       this.instances.set(key, new BaileysService(userId, establishment));
     }
     return this.instances.get(key);
+  }
+
+  static resetInstance(userId, establishment) {
+    const key = `${userId}:${establishment}`;
+    this.instances.delete(key);
+    return new BaileysService(userId, establishment);
   }
 }
 
