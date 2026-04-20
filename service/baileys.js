@@ -4,6 +4,7 @@ import makeWASocket, {
   isJidBroadcast,
   initAuthCreds,
   BufferJSON,
+  Browsers,
 } from "baileys";
 import qrcode from "qrcode";
 import Settings from "../models/Settings.js";
@@ -114,6 +115,8 @@ class BaileysService {
     this.isInitializing = false;
     this.retryCount = 0;
     this.maxRetries = 5;
+    this.lastError = null;
+    this.connectionAttempts = 0;
   }
 
   async initialize() {
@@ -148,14 +151,16 @@ class BaileysService {
       this.authState = state;
       this.saveCreds = saveCreds;
 
+      this.connectionAttempts += 1;
       this.sock = makeWASocket({
         auth: state,
         printQRInTerminal: false,
+        browser: Browsers.ubuntu("Chrome"),
         connectTimeoutMs: 60000,
-        retryRequestDelayMs: 3000,
-        qrTimeout: 60000,
-        browser: ["ViaPet", "Chrome", "120.0"],
+        keepAliveIntervalMs: 10000,
+        defaultQueryTimeoutMs: 0,
         generateHighQualityLinkPreview: false,
+        markOnlineOnConnect: false,
       });
 
       this.sock.ev.on("connection.update", this.handleConnectionUpdate.bind(this));
@@ -189,8 +194,10 @@ class BaileysService {
     if (connection === "close") {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const isLoggedOut = statusCode === DisconnectReason.loggedOut;
+      const errorMsg = lastDisconnect?.error?.message || lastDisconnect?.error?.toString() || "Connection closed";
 
-      console.log(`[Baileys] Connection closed for user ${this.userId}, code=${statusCode}, loggedOut=${isLoggedOut}`);
+      this.lastError = { code: statusCode, message: errorMsg, at: new Date().toISOString() };
+      console.log(`[Baileys] Connection closed for user ${this.userId}, code=${statusCode}, error=${errorMsg}`);
 
       if (isLoggedOut) {
         // User logged out — clear auth state from DB too
@@ -567,6 +574,8 @@ class BaileysService {
       status: this.connectionStatus,
       qrCode: this.qrCode,
       connectedPhone: this.sock?.user?.id?.replace(/:.*@.*/, ""),
+      lastError: this.lastError,
+      connectionAttempts: this.connectionAttempts,
       health: {
         messagesLastHour: (this.messageTimestamps || []).filter(
           (ts) => ts > Date.now() - 60 * 60 * 1000

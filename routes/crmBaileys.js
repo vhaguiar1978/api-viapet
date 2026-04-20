@@ -31,16 +31,23 @@ router.post("/crm-baileys/connect", authenticate, async (req, res) => {
     baileysService.setHourlyLimit(hourlyLimit);
 
     // Initialize connection (returns quickly, QR arrives async via events)
-    await baileysService.initialize();
-
+    const initResult = await baileysService.initialize();
     const status = await baileysService.getStatus();
+
+    // If init failed immediately, reflect the real status
+    const responseStatus = status.qrCode ? "scanning"
+      : status.status === "error" ? "error"
+      : "connecting";
 
     res.json({
       success: true,
       data: {
-        status: status.qrCode ? "scanning" : "connecting",
+        status: responseStatus,
         qrCode: status.qrCode || null,
-        message: "Connecting to WhatsApp...",
+        lastError: status.lastError || null,
+        message: responseStatus === "error"
+          ? (status.lastError?.message || "Falha ao conectar")
+          : "Conectando ao WhatsApp...",
       },
     });
   } catch (error) {
@@ -61,21 +68,26 @@ router.get("/crm-baileys/status", authenticate, async (req, res) => {
     const baileysService = BaileysService.getInstance(userId, establishment);
     const status = await baileysService.getStatus();
 
-    // Fallback: if no QR in memory, read from DB
-    let qrCode = status.qrCode;
-    let connectionStatus = status.status;
-    if (!qrCode) {
-      const settings = await Settings.findOne({ where: { usersId: userId } });
-      const dbBaileys = settings?.whatsappConnection?.baileys || {};
-      if (dbBaileys.qrCode) {
-        qrCode = dbBaileys.qrCode;
-        connectionStatus = dbBaileys.connectionStatus || "scanning";
-      }
-    }
+    // Always read DB to get persisted status/QR (handles cold-start cases)
+    const settings = await Settings.findOne({ where: { usersId: userId } });
+    const dbBaileys = settings?.whatsappConnection?.baileys || {};
+
+    // Prefer in-memory QR, fall back to DB
+    const qrCode = status.qrCode || dbBaileys.qrCode || null;
+    // Prefer in-memory status, but if memory says "disconnected" and DB says something else, use DB
+    const connectionStatus = (status.status !== "disconnected")
+      ? status.status
+      : (dbBaileys.connectionStatus || "disconnected");
 
     res.json({
       success: true,
-      data: { ...status, qrCode, status: connectionStatus },
+      data: {
+        ...status,
+        qrCode,
+        status: connectionStatus,
+        lastError: status.lastError || null,
+        connectionAttempts: status.connectionAttempts || 0,
+      },
     });
   } catch (error) {
     console.error("Error in /crm-baileys/status:", error);
