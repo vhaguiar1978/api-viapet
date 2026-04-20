@@ -22,9 +22,30 @@ class BaileysService {
     this.lastMessageTime = 0;
     this.messageTimestamps = [];
     this.errorPatterns = [];
+    this.isInitializing = false;
+    this.retryCount = 0;
+    this.maxRetries = 3;
   }
 
   async initialize() {
+    // Prevent concurrent initializations
+    if (this.isInitializing) {
+      console.log(`[Baileys] Already initializing for user ${this.userId}, skipping`);
+      return { success: true };
+    }
+    // If already connected or scanning, don't reinitialize
+    if (this.connectionStatus === "connected" || this.connectionStatus === "scanning") {
+      console.log(`[Baileys] Already ${this.connectionStatus} for user ${this.userId}, skipping`);
+      return { success: true };
+    }
+    // Stop if max retries exceeded
+    if (this.retryCount >= this.maxRetries) {
+      console.log(`[Baileys] Max retries (${this.maxRetries}) reached for user ${this.userId}`);
+      this.connectionStatus = "error";
+      return { success: false };
+    }
+
+    this.isInitializing = true;
     try {
       const settings = await Settings.findOne({
         where: { usersId: this.userId },
@@ -34,9 +55,12 @@ class BaileysService {
         throw new Error("Settings not found for user");
       }
 
-      const baileysConfig = settings.whatsappConnection?.baileys || {};
+      // Close existing socket before creating new one
+      if (this.sock) {
+        try { this.sock.end(); } catch (_) {}
+        this.sock = null;
+      }
 
-      // Use multi-file auth state with custom storage
       const { state: auth, saveCreds } = await useMultiFileAuthState(
         `./auth_info_baileys_${this.userId}`,
       );
@@ -46,9 +70,10 @@ class BaileysService {
       this.sock = makeWASocket({
         auth,
         printQRInTerminal: false,
+        connectTimeoutMs: 30000,
+        retryRequestDelayMs: 2000,
       });
 
-      // Event handlers
       this.sock.ev.on("connection.update", this.handleConnectionUpdate.bind(this));
       this.sock.ev.on("messages.upsert", this.handleMessagesUpsert.bind(this));
       this.sock.ev.on("message.reaction", this.handleMessageReaction.bind(this));
@@ -61,6 +86,8 @@ class BaileysService {
       console.error("Error initializing Baileys:", error);
       this.connectionStatus = "error";
       throw error;
+    } finally {
+      this.isInitializing = false;
     }
   }
 
@@ -70,25 +97,36 @@ class BaileysService {
     if (qr) {
       this.qrCode = await qrcode.toDataURL(qr);
       this.connectionStatus = "scanning";
+      this.retryCount = 0; // Reset retries when QR arrives
       await this.updateSettingsInDb();
     }
 
     if (connection === "close") {
-      const shouldReconnect =
-        lastDisconnect?.error?.output?.statusCode !==
-        DisconnectReason.loggedOut;
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const isLoggedOut = statusCode === DisconnectReason.loggedOut;
 
-      if (lastDisconnect?.error?.output?.statusCode === DisconnectReason.loggedOut) {
+      if (isLoggedOut) {
         this.connectionStatus = "disconnected";
         this.qrCode = null;
-      } else if (shouldReconnect) {
-        this.connectionStatus = "reconnecting";
-        await this.initialize();
+        this.retryCount = 0;
+      } else {
+        this.retryCount += 1;
+        if (this.retryCount < this.maxRetries) {
+          console.log(`[Baileys] Connection closed, retry ${this.retryCount}/${this.maxRetries}`);
+          this.connectionStatus = "connecting";
+          const delay = this.retryCount * 3000;
+          setTimeout(() => this.initialize(), delay);
+        } else {
+          console.log(`[Baileys] Max retries reached, stopping reconnection`);
+          this.connectionStatus = "error";
+          await this.updateSettingsInDb();
+        }
       }
     } else if (connection === "open") {
       this.connectionStatus = "connected";
       this.qrCode = null;
-      const phoneNumber = this.sock.user?.id?.replace(":s.whatsapp.net", "");
+      this.retryCount = 0;
+      const phoneNumber = this.sock.user?.id?.replace(/:.*/, "");
       await this.updateSettingsInDb({ connectedPhone: phoneNumber });
     }
 
