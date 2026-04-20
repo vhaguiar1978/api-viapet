@@ -114,9 +114,10 @@ class BaileysService {
     this.errorPatterns = [];
     this.isInitializing = false;
     this.retryCount = 0;
-    this.maxRetries = 5;
+    this.maxRetries = 2;
     this.lastError = null;
     this.connectionAttempts = 0;
+    this._connectTimeout = null;
   }
 
   async initialize() {
@@ -156,7 +157,7 @@ class BaileysService {
         auth: state,
         printQRInTerminal: false,
         browser: Browsers.ubuntu("Chrome"),
-        connectTimeoutMs: 60000,
+        connectTimeoutMs: 20000,
         keepAliveIntervalMs: 10000,
         defaultQueryTimeoutMs: 0,
         generateHighQualityLinkPreview: false,
@@ -169,7 +170,21 @@ class BaileysService {
       this.sock.ev.on("creds.update", saveCreds);
 
       this.connectionStatus = "connecting";
-      console.log(`[Baileys] Initializing socket for user ${this.userId} (retry ${this.retryCount}/${this.maxRetries})`);
+      console.log(`[Baileys] Initializing socket for user ${this.userId} (attempt ${this.connectionAttempts})`);
+
+      // Hard timeout: if no QR or connection in 25s, mark error with clear reason
+      if (this._connectTimeout) clearTimeout(this._connectTimeout);
+      this._connectTimeout = setTimeout(async () => {
+        if (this.connectionStatus === "connecting") {
+          const msg = "WhatsApp não respondeu em 25s. O servidor pode estar bloqueado pelo WhatsApp (IP do Render).";
+          console.warn(`[Baileys] Connect timeout for user ${this.userId}: ${msg}`);
+          this.lastError = { code: "CONNECT_TIMEOUT", message: msg, at: new Date().toISOString() };
+          this.connectionStatus = "error";
+          this.isInitializing = false;
+          try { this.sock?.end(); } catch (_) {}
+          await this.updateSettingsInDb();
+        }
+      }, 25000);
       return { success: true };
     } catch (error) {
       console.error("[Baileys] Error initializing:", error);
@@ -184,9 +199,10 @@ class BaileysService {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
+      if (this._connectTimeout) { clearTimeout(this._connectTimeout); this._connectTimeout = null; }
       this.qrCode = await qrcode.toDataURL(qr);
       this.connectionStatus = "scanning";
-      this.retryCount = 0; // QR arrived = fresh start
+      this.retryCount = 0;
       console.log(`[Baileys] QR code generated for user ${this.userId}`);
       await this.updateSettingsInDb();
     }
@@ -227,6 +243,7 @@ class BaileysService {
         }
       }
     } else if (connection === "open") {
+      if (this._connectTimeout) { clearTimeout(this._connectTimeout); this._connectTimeout = null; }
       this.connectionStatus = "connected";
       this.qrCode = null;
       this.retryCount = 0;
