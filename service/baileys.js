@@ -511,6 +511,8 @@ class BaileysService {
             lastQrGeneratedAt: this.qrCode
               ? new Date().toISOString()
               : baileysConfig.lastQrGeneratedAt,
+            lastError: this.lastError || baileysConfig.lastError || null,
+            connectionAttempts: this.connectionAttempts,
             ...additionalData,
           },
         };

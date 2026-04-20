@@ -85,8 +85,8 @@ router.get("/crm-baileys/status", authenticate, async (req, res) => {
         ...status,
         qrCode,
         status: connectionStatus,
-        lastError: status.lastError || null,
-        connectionAttempts: status.connectionAttempts || 0,
+        lastError: status.lastError || dbBaileys.lastError || null,
+        connectionAttempts: status.connectionAttempts || dbBaileys.connectionAttempts || 0,
       },
     });
   } catch (error) {
