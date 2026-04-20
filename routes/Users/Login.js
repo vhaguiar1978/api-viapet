@@ -54,31 +54,6 @@ function readFirstAccessState(user) {
   }
 }
 
-async function validateEstablishmentExpiration(user) {
-  const establishment = await Users.findOne({
-    where: { id: user.establishment },
-  });
-
-  if (!establishment || !establishment.expirationDate) {
-    return { ok: true, establishment };
-  }
-
-  const expirationDate = new Date(establishment.expirationDate);
-  const currentDate = new Date();
-  currentDate.setHours(0, 0, 0, 0);
-  expirationDate.setDate(expirationDate.getDate() + 1);
-
-  if (expirationDate < currentDate) {
-    return {
-      ok: false,
-      message:
-        "A assinatura do estabelecimento expirou. Por favor, entre em contato com o proprietario.",
-    };
-  }
-
-  return { ok: true, establishment };
-}
-
 async function registerLoginHistory(userId, req, status = "success") {
   if (!userId) {
     return;
@@ -123,13 +98,6 @@ router.post("/login", async (req, res) => {
     if (!user.status) {
       return res.status(403).json({
         message: "Usuario inativo. Entre em contato com o administrador.",
-      });
-    }
-
-    const establishmentValidation = await validateEstablishmentExpiration(user);
-    if (!establishmentValidation.ok) {
-      return res.status(403).json({
-        message: establishmentValidation.message,
       });
     }
 

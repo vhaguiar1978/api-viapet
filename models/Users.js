@@ -48,7 +48,7 @@ const Users = sequelize.define(
       type: DataTypes.TEXT,
     },
     timeRecoveryPass: {
-      type: DataTypes.TIME,
+      type: DataTypes.DATE,
     },
     expirationDate: {
       type: DataTypes.DATE,

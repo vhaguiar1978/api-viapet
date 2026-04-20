@@ -1081,14 +1081,10 @@ router.post("/webhook", async (req, res) => {
 
       console.log("Buscando cliente com as variações:", phoneVariations);
 
-      // Busca o cliente pelo número de telefone
-      const customer = await Custumers.findOne({
-        where: {
-          phone: {
-            [Op.in]: phoneVariations,
-          },
-        },
-      });
+      // Busca o cliente pelo número de telefone, priorizando o estabelecimento correto
+      const customerWhere = { phone: { [Op.in]: phoneVariations } };
+      if (resolvedUsersId) customerWhere.usersId = resolvedUsersId;
+      const customer = await Custumers.findOne({ where: customerWhere });
 
       if (customer) {
         console.log("Cliente encontrado:", customer.id);
@@ -1247,6 +1243,14 @@ router.post("/webhook", async (req, res) => {
       } else {
         console.log("Nenhum cliente encontrado para o número:", from);
 
+        if (!resolvedUsersId) {
+          console.warn(
+            `[WEBHOOK] phoneNumberId "${phone_number_id}" não encontrado em nenhum estabelecimento. ` +
+            "Configure o Phone Number ID nas configurações do WhatsApp do estabelecimento."
+          );
+          return res.sendStatus(200);
+        }
+
         await syncInboundConversation({
           usersId: resolvedUsersId,
           from,
@@ -1257,6 +1261,14 @@ router.post("/webhook", async (req, res) => {
         });
       }
     } else {
+      if (!resolvedUsersId) {
+        console.warn(
+          `[WEBHOOK] phoneNumberId "${phone_number_id}" não encontrado em nenhum estabelecimento. ` +
+          "Configure o Phone Number ID nas configurações do WhatsApp do estabelecimento."
+        );
+        return res.sendStatus(200);
+      }
+
       await syncInboundConversation({
         usersId: resolvedUsersId,
         from,
