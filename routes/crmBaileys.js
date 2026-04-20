@@ -26,6 +26,10 @@ router.post("/crm-baileys/connect", authenticate, async (req, res) => {
     // Get or create Baileys service instance
     const baileysService = BaileysService.getInstance(userId, establishment);
 
+    // Apply hourly limit from settings (configurable per user)
+    const hourlyLimit = settings.whatsappConnection?.baileys?.hourlyLimit || 200;
+    baileysService.setHourlyLimit(hourlyLimit);
+
     // Initialize connection (returns quickly, QR arrives async via events)
     await baileysService.initialize();
 
@@ -287,6 +291,7 @@ router.get("/crm-baileys/health", authenticate, async (req, res) => {
         status: baileysConfig.connectionStatus || "unknown",
         health,
         connectedPhone: baileysConfig.connectedPhone || null,
+        hourlyLimit: baileysConfig.hourlyLimit || 200,
         recommendedAction,
         warningLevel:
           health.riskScore > 0.7
@@ -302,6 +307,41 @@ router.get("/crm-baileys/health", authenticate, async (req, res) => {
       error: "Failed to get health status",
       details: error.message,
     });
+  }
+});
+
+// Update hourly send limit
+router.post("/crm-baileys/config", authenticate, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { hourlyLimit } = req.body;
+
+    if (hourlyLimit !== undefined && (isNaN(hourlyLimit) || hourlyLimit < 10 || hourlyLimit > 500)) {
+      return res.status(400).json({ error: "hourlyLimit deve ser entre 10 e 500" });
+    }
+
+    const settings = await Settings.findOne({ where: { usersId: userId } });
+    if (!settings) return res.status(404).json({ error: "Settings not found" });
+
+    const baileysConfig = settings.whatsappConnection?.baileys || {};
+    settings.whatsappConnection = {
+      ...settings.whatsappConnection,
+      baileys: {
+        ...baileysConfig,
+        ...(hourlyLimit !== undefined && { hourlyLimit: Number(hourlyLimit) }),
+      },
+    };
+    await settings.save();
+
+    // Apply immediately to running instance
+    const establishment = req.body.establishment || "default";
+    const baileysService = BaileysService.getInstance(userId, establishment);
+    if (hourlyLimit !== undefined) baileysService.setHourlyLimit(hourlyLimit);
+
+    res.json({ success: true, data: { hourlyLimit: Number(hourlyLimit) } });
+  } catch (error) {
+    console.error("Error in /crm-baileys/config:", error);
+    res.status(500).json({ error: "Failed to update config", details: error.message });
   }
 });
 

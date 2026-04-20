@@ -393,11 +393,21 @@ class BaileysService {
     this.messageTimestamps = this.messageTimestamps.filter(
       (ts) => ts > oneHourAgo
     );
-    if (this.messageTimestamps.length >= 60) {
+    // Limit is configurable via settings (baileys.hourlyLimit), default 200/hour
+    const limit = this._hourlyLimit || 200;
+    if (this.messageTimestamps.length >= limit) {
       throw new Error(
-        "Limite de 60 mensagens por hora atingido. Aguarde antes de enviar mais."
+        `Limite de ${limit} mensagens por hora atingido. Aguarde antes de enviar mais.`
       );
     }
+  }
+
+  /**
+   * Set the hourly send limit for this instance.
+   * Called after loading from settings.
+   */
+  setHourlyLimit(limit) {
+    this._hourlyLimit = Number(limit) || 200;
   }
 
   getRandomDelay(min, max) {
