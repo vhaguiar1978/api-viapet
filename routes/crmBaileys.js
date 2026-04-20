@@ -52,7 +52,7 @@ router.post("/crm-baileys/connect", authenticate, async (req, res) => {
 // Get current connection status
 router.get("/crm-baileys/status", authenticate, async (req, res) => {
   try {
-    const { userId } = req.user;
+    const userId = req.user.id;
     const establishment = req.query.establishment || "default";
 
     const baileysService = BaileysService.getInstance(userId, establishment);
@@ -74,7 +74,7 @@ router.get("/crm-baileys/status", authenticate, async (req, res) => {
 // Get fresh QR code
 router.get("/crm-baileys/qr", authenticate, async (req, res) => {
   try {
-    const { userId } = req.user;
+    const userId = req.user.id;
     const establishment = req.query.establishment || "default";
 
     const baileysService = BaileysService.getInstance(userId, establishment);
@@ -106,7 +106,7 @@ router.get("/crm-baileys/qr", authenticate, async (req, res) => {
 // Disconnect
 router.post("/crm-baileys/disconnect", authenticate, async (req, res) => {
   try {
-    const { userId } = req.user;
+    const userId = req.user.id;
     const establishment = req.body.establishment || "default";
 
     const baileysService = BaileysService.getInstance(userId, establishment);
@@ -128,7 +128,7 @@ router.post("/crm-baileys/disconnect", authenticate, async (req, res) => {
 // Send message via Baileys
 router.post("/crm-baileys/send", authenticate, async (req, res) => {
   try {
-    const { userId } = req.user;
+    const userId = req.user.id;
     const { phone, text, conversationId } = req.body;
     const establishment = req.body.establishment || "default";
 
@@ -216,7 +216,7 @@ router.post("/crm-baileys/send", authenticate, async (req, res) => {
 // Get health status and ban risk
 router.get("/crm-baileys/health", authenticate, async (req, res) => {
   try {
-    const { userId } = req.user;
+    const userId = req.user.id;
     const establishment = req.query.establishment || "default";
 
     const settings = await Settings.findOne({
