@@ -69,9 +69,21 @@ router.get("/crm-baileys/status", authenticate, async (req, res) => {
     const baileysService = BaileysService.getInstance(userId, establishment);
     const status = await baileysService.getStatus();
 
+    // Fallback: if no QR in memory, read from DB
+    let qrCode = status.qrCode;
+    let connectionStatus = status.status;
+    if (!qrCode) {
+      const settings = await Settings.findOne({ where: { usersId: userId } });
+      const dbBaileys = settings?.whatsappConnection?.baileys || {};
+      if (dbBaileys.qrCode) {
+        qrCode = dbBaileys.qrCode;
+        connectionStatus = dbBaileys.connectionStatus || "scanning";
+      }
+    }
+
     res.json({
       success: true,
-      data: status,
+      data: { ...status, qrCode, status: connectionStatus },
     });
   } catch (error) {
     console.error("Error in /crm-baileys/status:", error);
