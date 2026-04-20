@@ -26,29 +26,17 @@ router.post("/crm-baileys/connect", authenticate, async (req, res) => {
     // Get or create Baileys service instance
     const baileysService = BaileysService.getInstance(userId, establishment);
 
-    // Initialize connection
+    // Initialize connection (returns quickly, QR arrives async via events)
     await baileysService.initialize();
-
-    // Wait up to 15s for QR code to be generated
-    const qrCode = await new Promise((resolve) => {
-      const deadline = Date.now() + 15000;
-      const check = setInterval(async () => {
-        const s = await baileysService.getStatus();
-        if (s.qrCode || s.status === "connected" || Date.now() > deadline) {
-          clearInterval(check);
-          resolve(s.qrCode || null);
-        }
-      }, 500);
-    });
 
     const status = await baileysService.getStatus();
 
     res.json({
       success: true,
       data: {
-        status: qrCode ? "scanning" : status.status,
-        qrCode,
-        message: qrCode ? "QR code generated. Scan with your phone." : "Connecting...",
+        status: status.qrCode ? "scanning" : "connecting",
+        qrCode: status.qrCode || null,
+        message: "Connecting to WhatsApp...",
       },
     });
   } catch (error) {
