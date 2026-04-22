@@ -8,6 +8,10 @@ import { v4 as uuidv4 } from "uuid";
 
 const router = express.Router();
 
+function getEstablishmentId(req) {
+  return req.user?.establishment || req.user?.id || null;
+}
+
 function normalizeBaileysErrorMessage(errorValue = "") {
   const raw = String(errorValue || "").trim();
   const lower = raw.toLowerCase();
@@ -49,7 +53,7 @@ function buildBaileysConnectPayload(status = {}) {
 // Initialize Baileys connection and get QR code
 router.post("/crm-baileys/connect", authenticate, async (req, res) => {
   try {
-    const userId = req.user.id;
+    const userId = getEstablishmentId(req);
     const establishment = req.body.establishment || "default";
 
     // Get user settings to verify establishment
@@ -112,7 +116,7 @@ router.post("/crm-baileys/connect", authenticate, async (req, res) => {
 // Get current connection status
 router.get("/crm-baileys/status", authenticate, async (req, res) => {
   try {
-    const userId = req.user.id;
+    const userId = getEstablishmentId(req);
     const establishment = req.query.establishment || "default";
 
     const baileysService = BaileysService.getInstance(userId, establishment);
@@ -151,7 +155,7 @@ router.get("/crm-baileys/status", authenticate, async (req, res) => {
 // Get fresh QR code
 router.get("/crm-baileys/qr", authenticate, async (req, res) => {
   try {
-    const userId = req.user.id;
+    const userId = getEstablishmentId(req);
     const establishment = req.query.establishment || "default";
 
     const baileysService = BaileysService.getInstance(userId, establishment);
@@ -183,7 +187,7 @@ router.get("/crm-baileys/qr", authenticate, async (req, res) => {
 // Disconnect
 router.post("/crm-baileys/disconnect", authenticate, async (req, res) => {
   try {
-    const userId = req.user.id;
+    const userId = getEstablishmentId(req);
     const establishment = req.body.establishment || "default";
 
     const baileysService = BaileysService.getInstance(userId, establishment);
@@ -205,7 +209,7 @@ router.post("/crm-baileys/disconnect", authenticate, async (req, res) => {
 // Force reset: clear auth state, destroy instance, ready for fresh QR
 router.post("/crm-baileys/reset", authenticate, async (req, res) => {
   try {
-    const userId = req.user.id;
+    const userId = getEstablishmentId(req);
     const establishment = req.body.establishment || "default";
 
     // Reset the existing instance (clears DB auth state too)
@@ -231,7 +235,7 @@ router.post("/crm-baileys/reset", authenticate, async (req, res) => {
 // Send message via Baileys
 router.post("/crm-baileys/send", authenticate, async (req, res) => {
   try {
-    const userId = req.user.id;
+    const userId = getEstablishmentId(req);
     const { phone, text, conversationId } = req.body;
     const establishment = req.body.establishment || "default";
 
@@ -319,8 +323,7 @@ router.post("/crm-baileys/send", authenticate, async (req, res) => {
 // Get health status and ban risk
 router.get("/crm-baileys/health", authenticate, async (req, res) => {
   try {
-    const userId = req.user.id;
-    const establishment = req.query.establishment || "default";
+    const userId = getEstablishmentId(req);
 
     const settings = await Settings.findOne({
       where: { usersId: userId },
@@ -375,7 +378,7 @@ router.get("/crm-baileys/health", authenticate, async (req, res) => {
 // Update hourly send limit
 router.post("/crm-baileys/config", authenticate, async (req, res) => {
   try {
-    const userId = req.user.id;
+    const userId = getEstablishmentId(req);
     const { hourlyLimit } = req.body;
 
     if (hourlyLimit !== undefined && (isNaN(hourlyLimit) || hourlyLimit < 10 || hourlyLimit > 500)) {

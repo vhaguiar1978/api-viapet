@@ -12,6 +12,10 @@ const JWT_SECRET = process.env.JWT_SECRET || "secret";
 const API_URL = process.env.URL || "http://localhost:4003";
 const CALLBACK_URI = `${API_URL}/crm-whatsapp/oauth/callback`;
 
+function getEstablishmentId(req) {
+  return req.user?.establishment || req.user?.id || null;
+}
+
 // Página HTML retornada ao popup após o OAuth
 function oauthResultPage(status, extra = {}) {
   const payload = JSON.stringify({ type: "whatsapp_oauth", status, ...extra });
@@ -65,7 +69,7 @@ router.get("/crm-whatsapp/oauth/url", authenticate, (req, res) => {
   }
 
   const state = jwt.sign(
-    { eid: req.user.establishment, t: "waoauth" },
+    { eid: getEstablishmentId(req), t: "waoauth" },
     JWT_SECRET,
     { expiresIn: "15m" },
   );
@@ -157,7 +161,7 @@ router.get("/crm-whatsapp/oauth/callback", async (req, res) => {
 router.get("/crm-whatsapp/oauth/pending-phones", authenticate, async (req, res) => {
   try {
     const settings = await Settings.findOne({
-      where: { usersId: req.user.establishment },
+      where: { usersId: getEstablishmentId(req) },
       attributes: ["whatsappConnection"],
     });
     const phones = settings?.whatsappConnection?.pendingOauthPhones || [];
@@ -172,7 +176,7 @@ router.get("/crm-whatsapp/oauth/pending-phones", authenticate, async (req, res) 
 router.post("/crm-whatsapp/oauth/select-phone", authenticate, async (req, res) => {
   try {
     const { phoneNumberId } = req.body || {};
-    const settings = await Settings.findOne({ where: { usersId: req.user.establishment } });
+    const settings = await Settings.findOne({ where: { usersId: getEstablishmentId(req) } });
     if (!settings) {
       return res.status(404).json({ message: "Configurações não encontradas" });
     }
@@ -207,7 +211,7 @@ router.post("/crm-whatsapp/oauth/select-phone", authenticate, async (req, res) =
 // Desconecta o WhatsApp do estabelecimento
 router.delete("/crm-whatsapp/oauth/disconnect", authenticate, async (req, res) => {
   try {
-    const settings = await Settings.findOne({ where: { usersId: req.user.establishment } });
+    const settings = await Settings.findOne({ where: { usersId: getEstablishmentId(req) } });
     if (!settings) {
       return res.status(404).json({ message: "Configurações não encontradas" });
     }

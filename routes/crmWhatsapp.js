@@ -8,6 +8,10 @@ import Custumers from "../models/Custumers.js";
 
 const router = express.Router();
 
+function getEstablishmentId(req) {
+  return req.user?.establishment || req.user?.id || null;
+}
+
 function normalizePhone(value) {
   const digits = String(value || "").replace(/\D/g, "");
   if (!digits) return "";
@@ -49,7 +53,7 @@ function isMetaTokenInvalidError(error) {
 router.get("/crm-whatsapp/status", authenticate, async (req, res) => {
   try {
     const settings = await Settings.findOne({
-      where: { usersId: req.user.establishment },
+      where: { usersId: getEstablishmentId(req) },
       attributes: ["whatsappConnection"],
     });
 
@@ -58,7 +62,7 @@ router.get("/crm-whatsapp/status", authenticate, async (req, res) => {
     const lastWebhookAt = config.lastWebhookAt || null;
     const recentMessages = await CrmWhatsappMessage.count({
       where: {
-        usersId: req.user.establishment,
+        usersId: getEstablishmentId(req),
         createdAt: {
           [Op.gte]: new Date(Date.now() - 1000 * 60 * 60 * 24 * 7),
         },
@@ -109,7 +113,7 @@ router.get("/crm-whatsapp/messages", authenticate, async (req, res) => {
   try {
     const { customerId, phone } = req.query;
     const where = {
-      usersId: req.user.establishment,
+      usersId: getEstablishmentId(req),
     };
 
     if (customerId) {
@@ -152,7 +156,7 @@ router.post("/crm-whatsapp/send", authenticate, async (req, res) => {
     }
 
     const settings = await Settings.findOne({
-      where: { usersId: req.user.establishment },
+      where: { usersId: getEstablishmentId(req) },
     });
 
     const { config, phoneNumberId, token, verifyToken } =
@@ -192,7 +196,7 @@ router.post("/crm-whatsapp/send", authenticate, async (req, res) => {
     );
 
     const saved = await CrmWhatsappMessage.create({
-      usersId: req.user.establishment,
+      usersId: getEstablishmentId(req),
       customerId: customerId || null,
       customerName: customerName || null,
       phone: destinationPhone,
@@ -232,7 +236,7 @@ router.post("/crm-whatsapp/send", authenticate, async (req, res) => {
     if (isMetaTokenInvalidError(error)) {
       try {
         const settings = await Settings.findOne({
-          where: { usersId: req.user.establishment },
+          where: { usersId: getEstablishmentId(req) },
         });
         if (settings) {
           settings.whatsappConnection = {
@@ -264,9 +268,10 @@ router.post("/crm-whatsapp/send", authenticate, async (req, res) => {
 });
 
 router.post("/crm-whatsapp/test-connection", authenticate, async (req, res) => {
+  let settings = null;
   try {
-    const settings = await Settings.findOne({
-      where: { usersId: req.user.establishment },
+    settings = await Settings.findOne({
+      where: { usersId: getEstablishmentId(req) },
       attributes: ["whatsappConnection"],
     });
 
@@ -357,7 +362,7 @@ router.post("/crm-whatsapp/test-connection", authenticate, async (req, res) => {
 router.get("/whatsapp-crm-config", authenticate, async (req, res) => {
   try {
     const settings = await Settings.findOne({
-      where: { usersId: req.user.establishment },
+      where: { usersId: getEstablishmentId(req) },
       attributes: ["whatsappConnection"],
     });
 
@@ -397,7 +402,7 @@ router.post("/whatsapp-crm-config", authenticate, async (req, res) => {
     } = req.body || {};
 
     let settings = await Settings.findOne({
-      where: { usersId: req.user.establishment },
+      where: { usersId: getEstablishmentId(req) },
     });
 
     if (!settings) {
@@ -451,7 +456,7 @@ router.post("/crm-whatsapp/broadcast", authenticate, async (req, res) => {
     }
 
     const settings = await Settings.findOne({
-      where: { usersId: req.user.establishment },
+      where: { usersId: getEstablishmentId(req) },
     });
 
     const { phoneNumberId, token } = resolveWhatsappConfig(settings);
@@ -472,7 +477,7 @@ router.post("/crm-whatsapp/broadcast", authenticate, async (req, res) => {
       // Use all customers with phone
       const customers = await Custumers.findAll({
         where: {
-          usersId: req.user.establishment,
+          usersId: getEstablishmentId(req),
           status: true,
           phone: { [Op.not]: null, [Op.ne]: "" },
         },
@@ -514,7 +519,7 @@ router.post("/crm-whatsapp/broadcast", authenticate, async (req, res) => {
         );
 
         await CrmWhatsappMessage.create({
-          usersId: req.user.establishment,
+        usersId: getEstablishmentId(req),
           customerId: customerId || null,
           customerName: name || null,
           phone,
