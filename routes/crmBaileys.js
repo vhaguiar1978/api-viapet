@@ -8,6 +8,44 @@ import { v4 as uuidv4 } from "uuid";
 
 const router = express.Router();
 
+function normalizeBaileysErrorMessage(errorValue = "") {
+  const raw = String(errorValue || "").trim();
+  const lower = raw.toLowerCase();
+
+  if (!raw) return "";
+  if (lower === "connection failure" || lower.includes("stream errored out")) {
+    return "Falha na conexão com o WhatsApp. Vamos gerar uma nova sessão para reconectar.";
+  }
+  if (lower.includes("timed out") || lower.includes("timeout")) {
+    return "Tempo de resposta excedido ao conectar no WhatsApp. Tente novamente em alguns segundos.";
+  }
+  if (lower.includes("forbidden") || lower.includes("blocked")) {
+    return "Conexão bloqueada temporariamente pelo WhatsApp. Aguarde e tente novamente.";
+  }
+  return raw;
+}
+
+function buildBaileysConnectPayload(status = {}) {
+  const responseStatus = status.qrCode ? "scanning"
+    : status.status === "error" ? "error"
+    : "connecting";
+  const normalizedError = normalizeBaileysErrorMessage(status?.lastError?.message || "");
+
+  return {
+    status: responseStatus,
+    qrCode: status.qrCode || null,
+    lastError: status.lastError
+      ? {
+          ...status.lastError,
+          message: normalizedError || status.lastError.message,
+        }
+      : null,
+    message: responseStatus === "error"
+      ? (normalizedError || status.lastError?.message || "Falha ao conectar")
+      : "Conectando ao WhatsApp...",
+  };
+}
+
 // Initialize Baileys connection and get QR code
 router.post("/crm-baileys/connect", authenticate, async (req, res) => {
   try {
@@ -31,24 +69,36 @@ router.post("/crm-baileys/connect", authenticate, async (req, res) => {
     baileysService.setHourlyLimit(hourlyLimit);
 
     // Initialize connection (returns quickly, QR arrives async via events)
-    const initResult = await baileysService.initialize();
-    const status = await baileysService.getStatus();
+    await baileysService.initialize();
+    let status = await baileysService.getStatus();
+    let payload = buildBaileysConnectPayload(status);
 
-    // If init failed immediately, reflect the real status
-    const responseStatus = status.qrCode ? "scanning"
-      : status.status === "error" ? "error"
-      : "connecting";
+    // Auto-recuperação: quando vier erro genérico, limpa sessão e tenta uma vez de novo
+    if (payload.status === "error") {
+      const rawError = String(status?.lastError?.message || "").trim().toLowerCase();
+      const canRecover =
+        rawError === "connection failure" ||
+        rawError.includes("stream errored out") ||
+        rawError.includes("bad session");
+
+      if (canRecover) {
+        try {
+          await baileysService.reset();
+          BaileysService.resetInstance(userId, establishment);
+          const freshService = BaileysService.getInstance(userId, establishment);
+          freshService.setHourlyLimit(hourlyLimit);
+          await freshService.initialize();
+          status = await freshService.getStatus();
+          payload = buildBaileysConnectPayload(status);
+        } catch (recoverError) {
+          console.warn("Baileys auto-recovery failed:", recoverError?.message || recoverError);
+        }
+      }
+    }
 
     res.json({
       success: true,
-      data: {
-        status: responseStatus,
-        qrCode: status.qrCode || null,
-        lastError: status.lastError || null,
-        message: responseStatus === "error"
-          ? (status.lastError?.message || "Falha ao conectar")
-          : "Conectando ao WhatsApp...",
-      },
+      data: payload,
     });
   } catch (error) {
     console.error("Error in /crm-baileys/connect:", error);
