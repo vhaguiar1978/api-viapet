@@ -23,6 +23,25 @@ class EmailService {
     return rawUrl.replace(/\/+$/, "");
   }
 
+  buildPartnerLandingLink() {
+    const explicitLandingUrl =
+      process.env.PUBLIC_SITE_URL ||
+      process.env.MARKETING_URL ||
+      process.env.WEBSITE_URL ||
+      "";
+
+    if (explicitLandingUrl) {
+      return this.normalizeFrontendUrl(explicitLandingUrl);
+    }
+
+    const frontendUrl = this.normalizeFrontendUrl(process.env.FRONTEND_URL);
+    if (/^https?:\/\/app\.viapet\.app$/i.test(frontendUrl)) {
+      return "https://viapet.app";
+    }
+
+    return frontendUrl || "https://viapet.app";
+  }
+
   buildPasswordResetLink(token) {
     const frontendUrl = this.normalizeFrontendUrl(process.env.FRONTEND_URL);
     return `${frontendUrl}/redefinir-senha?token=${token}`;
@@ -82,6 +101,7 @@ class EmailService {
   async initializeTransporter() {
     try {
       const settings = await Admin.findOne();
+      const partnerLandingLink = this.buildPartnerLandingLink();
 
       if (!settings) {
         throw new Error("Configurações de SMTP não encontradas");
@@ -401,8 +421,12 @@ class EmailService {
               <p style="font-size: 16px; color: #666;">Não perca essa oportunidade única! Entre em contato conosco para aproveitar esta oferta especial.</p>
 
               <div style="text-align: center; margin-top: 30px;">
-                <a href="#" style="background-color: #4CAF50; color: white; padding: 15px 30px; text-decoration: none; border-radius: 5px; font-weight: bold;">APROVEITAR AGORA</a>
+                <a href="${partnerLandingLink}" target="_blank" rel="noopener noreferrer" style="background-color: #4CAF50; color: white; padding: 15px 30px; text-decoration: none; border-radius: 5px; font-weight: bold; display: inline-block;">APROVEITAR AGORA</a>
               </div>
+
+              <p style="font-size: 13px; color: #777; margin-top: 18px; word-break: break-all;">
+                Se o botão não abrir, copie e cole este link no navegador: ${partnerLandingLink}
+              </p>
 
               <p style="font-size: 14px; color: #999; margin-top: 30px; text-align: center;">
                 Esta oferta é válida por tempo limitado. Em caso de dúvidas, entre em contato com nosso suporte.
