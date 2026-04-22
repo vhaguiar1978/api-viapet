@@ -5,6 +5,62 @@ import PersonalFinance from "../models/personal_finances.js";
 
 const router = express.Router();
 
+function buildNormalizedDateString(year, month, day) {
+  const y = Number(year);
+  const m = Number(month);
+  const d = Number(day);
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return null;
+  if (y < 1900 || y > 3000) return null;
+  if (m < 1 || m > 12) return null;
+  if (d < 1 || d > 31) return null;
+  return `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+}
+
+function normalizeFinanceDateInput(value) {
+  if (!value) return null;
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return buildNormalizedDateString(value.getUTCFullYear(), value.getUTCMonth() + 1, value.getUTCDate());
+  }
+  const raw = String(value).trim();
+  if (!raw) return null;
+
+  const isoMatch = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (isoMatch) return buildNormalizedDateString(isoMatch[1], isoMatch[2], isoMatch[3]);
+
+  const brMatch = raw.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (brMatch) return buildNormalizedDateString(brMatch[3], brMatch[2], brMatch[1]);
+
+  const plainMatch = raw.match(/^(\d{4})(\d{2})(\d{2})$/);
+  if (plainMatch) return buildNormalizedDateString(plainMatch[1], plainMatch[2], plainMatch[3]);
+
+  const parsed = new Date(raw);
+  if (!Number.isNaN(parsed.getTime())) {
+    return buildNormalizedDateString(parsed.getUTCFullYear(), parsed.getUTCMonth() + 1, parsed.getUTCDate());
+  }
+  return null;
+}
+
+function parseDateParam(value, endOfDay = false) {
+  if (!value) return null;
+  const normalized = normalizeFinanceDateInput(value);
+  if (!normalized) return null;
+  return endOfDay
+    ? new Date(`${normalized}T23:59:59.999Z`)
+    : new Date(`${normalized}T00:00:00.000Z`);
+}
+
+function normalizePersonalFinanceStatusInput(value, fallback = "pendente") {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) return fallback;
+  if (normalized === "p" || normalized === "pago") return "pago";
+  if (normalized === "n" || normalized === "nao" || normalized === "não" || normalized === "nao pago" || normalized === "não pago" || normalized === "pendente") {
+    return "pendente";
+  }
+  if (normalized === "atrasado") return "atrasado";
+  if (normalized === "cancelado") return "cancelado";
+  return fallback;
+}
+
 // Criar nova entrada/saída financeira pessoal
 router.post("/personal-finance", authenticate, async (req, res) => {
   try {
@@ -25,12 +81,26 @@ router.post("/personal-finance", authenticate, async (req, res) => {
       status,
     } = req.body;
 
+    const normalizedDate = normalizeFinanceDateInput(date);
+    if (!normalizedDate) {
+      return res.status(400).json({
+        message: "Data invalida para o registro financeiro pessoal",
+      });
+    }
+
+    const normalizedDueDate = dueDate ? normalizeFinanceDateInput(dueDate) : null;
+    if (dueDate && !normalizedDueDate) {
+      return res.status(400).json({
+        message: "Data de vencimento invalida para o registro financeiro pessoal",
+      });
+    }
+
     const finance = await PersonalFinance.create({
       type,
       description,
       amount,
-      date,
-      dueDate,
+      date: normalizedDate,
+      dueDate: normalizedDueDate,
       category,
       subCategory,
       expenseType,
@@ -39,7 +109,7 @@ router.post("/personal-finance", authenticate, async (req, res) => {
       reference,
       notes,
       attachments,
-      status,
+      status: normalizePersonalFinanceStatusInput(status, "pendente"),
       user: req.user.id,
     });
 
@@ -68,12 +138,20 @@ router.get("/personal-finance", authenticate, async (req, res) => {
 
     if (type) where.type = type;
     if (category) where.category = category;
-    if (status) where.status = status;
+    if (status) where.status = normalizePersonalFinanceStatusInput(status, "pendente");
     if (expenseType) where.expenseType = expenseType;
     if (startDate || endDate) {
+      const parsedStartDate = parseDateParam(startDate, false);
+      const parsedEndDate = parseDateParam(endDate, true);
+      if (startDate && !parsedStartDate) {
+        return res.status(400).json({ message: "Data inicial invalida" });
+      }
+      if (endDate && !parsedEndDate) {
+        return res.status(400).json({ message: "Data final invalida" });
+      }
       where.date = {};
-      if (startDate) where.date[Op.gte] = new Date(startDate);
-      if (endDate) where.date[Op.lte] = new Date(endDate);
+      if (parsedStartDate) where.date[Op.gte] = parsedStartDate;
+      if (parsedEndDate) where.date[Op.lte] = parsedEndDate;
     }
 
     const finances = await PersonalFinance.findAll({
@@ -111,7 +189,30 @@ router.put("/personal-finance/:id", authenticate, async (req, res) => {
       });
     }
 
-    const updatedFinance = await finance.update(req.body);
+    const updatePayload = { ...req.body };
+    if (Object.prototype.hasOwnProperty.call(updatePayload, "date")) {
+      const normalizedDate = normalizeFinanceDateInput(updatePayload.date);
+      if (!normalizedDate) {
+        return res.status(400).json({ message: "Data invalida para atualizacao" });
+      }
+      updatePayload.date = normalizedDate;
+    }
+    if (Object.prototype.hasOwnProperty.call(updatePayload, "dueDate")) {
+      if (!updatePayload.dueDate) {
+        updatePayload.dueDate = null;
+      } else {
+        const normalizedDueDate = normalizeFinanceDateInput(updatePayload.dueDate);
+        if (!normalizedDueDate) {
+          return res.status(400).json({ message: "Data de vencimento invalida para atualizacao" });
+        }
+        updatePayload.dueDate = normalizedDueDate;
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(updatePayload, "status")) {
+      updatePayload.status = normalizePersonalFinanceStatusInput(updatePayload.status, finance.status || "pendente");
+    }
+
+    const updatedFinance = await finance.update(updatePayload);
 
     res.json({
       message: "Registro financeiro pessoal atualizado com sucesso",
@@ -169,9 +270,17 @@ router.get("/personal-finance/pending", authenticate, async (req, res) => {
 
     if (type) where.type = type;
     if (dueStartDate || dueEndDate) {
+      const parsedStartDate = parseDateParam(dueStartDate, false);
+      const parsedEndDate = parseDateParam(dueEndDate, true);
+      if (dueStartDate && !parsedStartDate) {
+        return res.status(400).json({ message: "Data inicial de vencimento invalida" });
+      }
+      if (dueEndDate && !parsedEndDate) {
+        return res.status(400).json({ message: "Data final de vencimento invalida" });
+      }
       where.dueDate = {};
-      if (dueStartDate) where.dueDate[Op.gte] = new Date(dueStartDate);
-      if (dueEndDate) where.dueDate[Op.lte] = new Date(dueEndDate);
+      if (parsedStartDate) where.dueDate[Op.gte] = parsedStartDate;
+      if (parsedEndDate) where.dueDate[Op.lte] = parsedEndDate;
     }
 
     const pendingFinances = await PersonalFinance.findAll({
@@ -196,7 +305,12 @@ router.get("/personal-finance/pending", authenticate, async (req, res) => {
 router.patch("/personal-finance/:id/status", authenticate, async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body;
+    const normalizedStatus = normalizePersonalFinanceStatusInput(req.body?.status, null);
+    if (!normalizedStatus) {
+      return res.status(400).json({
+        message: "Status invalido",
+      });
+    }
 
     const finance = await PersonalFinance.findOne({
       where: {
@@ -211,7 +325,7 @@ router.patch("/personal-finance/:id/status", authenticate, async (req, res) => {
       });
     }
 
-    const updatedFinance = await finance.update({ status });
+    const updatedFinance = await finance.update({ status: normalizedStatus });
 
     res.json({
       message: "Status atualizado com sucesso",
@@ -237,9 +351,17 @@ router.get("/personal-finance/summary", authenticate, async (req, res) => {
     };
 
     if (startDate || endDate) {
+      const parsedStartDate = parseDateParam(startDate, false);
+      const parsedEndDate = parseDateParam(endDate, true);
+      if (startDate && !parsedStartDate) {
+        return res.status(400).json({ message: "Data inicial invalida" });
+      }
+      if (endDate && !parsedEndDate) {
+        return res.status(400).json({ message: "Data final invalida" });
+      }
       where.date = {};
-      if (startDate) where.date[Op.gte] = new Date(startDate);
-      if (endDate) where.date[Op.lte] = new Date(endDate);
+      if (parsedStartDate) where.date[Op.gte] = parsedStartDate;
+      if (parsedEndDate) where.date[Op.lte] = parsedEndDate;
     }
 
     const finances = await PersonalFinance.findAll({ where });
