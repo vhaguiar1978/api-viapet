@@ -1,4 +1,4 @@
-import express from "express";
+﻿import express from "express";
 import Custumers from "../models/Custumers.js";
 import auth from "../middlewares/auth.js";
 import { Op } from "sequelize";
@@ -421,16 +421,16 @@ router.get("/birthdays", auth, async (req, res) => {
       /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
     const birthMonthFilter = Sequelize.literal(
-      `EXTRACT(MONTH FROM "birthDate") = ${Number(currentMonth)}`,
+      `EXTRACT(MONTH FROM ("birthDate" AT TIME ZONE 'America/Sao_Paulo')) = ${Number(currentMonth)}`,
     );
     const birthDayFilter = Sequelize.literal(
-      `EXTRACT(DAY FROM "birthDate") = ${Number(currentDay)}`,
+      `EXTRACT(DAY FROM ("birthDate" AT TIME ZONE 'America/Sao_Paulo')) = ${Number(currentDay)}`,
     );
     const petBirthMonthFilter = Sequelize.literal(
-      `EXTRACT(MONTH FROM "birthdate") = ${Number(currentMonth)}`,
+      `EXTRACT(MONTH FROM ("birthdate" AT TIME ZONE 'America/Sao_Paulo')) = ${Number(currentMonth)}`,
     );
     const petBirthDayFilter = Sequelize.literal(
-      `EXTRACT(DAY FROM "birthdate") = ${Number(currentDay)}`,
+      `EXTRACT(DAY FROM ("birthdate" AT TIME ZONE 'America/Sao_Paulo')) = ${Number(currentDay)}`,
     );
 
     const customersOfTheDay = await Custumers.findAll({
