@@ -102,10 +102,13 @@ router.post("/crm-baileys/connect", authenticate, async (req, res) => {
     // Auto-recuperação: quando vier erro genérico, limpa sessão e tenta uma vez de novo
     if (payload.status === "error") {
       const rawError = String(status?.lastError?.message || "").trim().toLowerCase();
+      const errorCode = Number(status?.lastError?.code || 0);
       const canRecover =
+        errorCode === 405 ||
         rawError === "connection failure" ||
         rawError.includes("stream errored out") ||
-        rawError.includes("bad session");
+        rawError.includes("bad session") ||
+        rawError.includes("code=405");
 
       if (canRecover) {
         try {

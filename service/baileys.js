@@ -119,7 +119,7 @@ class BaileysService {
     this.errorPatterns = [];
     this.isInitializing = false;
     this.retryCount = 0;
-    this.maxRetries = 2;
+    this.maxRetries = 4;
     this.lastError = null;
     this.connectionAttempts = 0;
     this._connectTimeout = null;
@@ -216,6 +216,12 @@ class BaileysService {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const isLoggedOut = statusCode === DisconnectReason.loggedOut;
       const errorMsg = lastDisconnect?.error?.message || lastDisconnect?.error?.toString() || "Connection closed";
+      const normalizedError = String(errorMsg || "").toLowerCase();
+      const shouldClearSessionAndRetry =
+        statusCode === 405 ||
+        normalizedError.includes("connection failure") ||
+        normalizedError.includes("stream errored out") ||
+        normalizedError.includes("bad session");
 
       this.lastError = { code: statusCode, message: errorMsg, at: new Date().toISOString() };
       console.log(`[Baileys] Connection closed for user ${this.userId}, code=${statusCode}, error=${errorMsg}`);
@@ -227,6 +233,24 @@ class BaileysService {
         this.retryCount = 0;
         await this.clearAuthStateInDb();
         await this.updateSettingsInDb();
+      } else if (shouldClearSessionAndRetry) {
+        this.retryCount += 1;
+        if (this.retryCount <= this.maxRetries) {
+          const delay = Math.min(this.retryCount * 2500, 10000);
+          console.log(
+            `[Baileys] Recovering session for user ${this.userId} (${this.retryCount}/${this.maxRetries}) in ${delay}ms`,
+          );
+          this.connectionStatus = "connecting";
+          this.qrCode = null;
+          this.isInitializing = false;
+          await this.clearAuthStateInDb();
+          await this.updateSettingsInDb();
+          setTimeout(() => this.initialize(), delay);
+        } else {
+          console.log(`[Baileys] Recovery max retries reached for user ${this.userId}`);
+          this.connectionStatus = "error";
+          await this.updateSettingsInDb();
+        }
       } else if (statusCode === DisconnectReason.restartRequired) {
         // WA asked for restart, do it immediately
         console.log(`[Baileys] Restart required for user ${this.userId}`);
