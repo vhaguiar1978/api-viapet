@@ -176,7 +176,7 @@ router.get("/crm-baileys/status", authenticate, async (req, res) => {
 // Get fresh QR code
 router.get("/crm-baileys/qr", authenticate, async (req, res) => {
   try {
-    const userId = getEstablishmentId(req);
+    const { userId } = await resolveSettingsOwner(req);
     const establishment = req.query.establishment || "default";
 
     const baileysService = BaileysService.getInstance(userId, establishment);
@@ -208,7 +208,7 @@ router.get("/crm-baileys/qr", authenticate, async (req, res) => {
 // Disconnect
 router.post("/crm-baileys/disconnect", authenticate, async (req, res) => {
   try {
-    const userId = getEstablishmentId(req);
+    const { userId } = await resolveSettingsOwner(req);
     const establishment = req.body.establishment || "default";
 
     const baileysService = BaileysService.getInstance(userId, establishment);
@@ -230,7 +230,7 @@ router.post("/crm-baileys/disconnect", authenticate, async (req, res) => {
 // Force reset: clear auth state, destroy instance, ready for fresh QR
 router.post("/crm-baileys/reset", authenticate, async (req, res) => {
   try {
-    const userId = getEstablishmentId(req);
+    const { userId } = await resolveSettingsOwner(req);
     const establishment = req.body.establishment || "default";
 
     // Reset the existing instance (clears DB auth state too)
@@ -256,7 +256,7 @@ router.post("/crm-baileys/reset", authenticate, async (req, res) => {
 // Send message via Baileys
 router.post("/crm-baileys/send", authenticate, async (req, res) => {
   try {
-    const userId = getEstablishmentId(req);
+    const { userId } = await resolveSettingsOwner(req);
     const { phone, text, conversationId } = req.body;
     const establishment = req.body.establishment || "default";
 
