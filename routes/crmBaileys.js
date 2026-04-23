@@ -12,6 +12,37 @@ function getEstablishmentId(req) {
   return req.user?.establishment || req.user?.id || null;
 }
 
+function getCandidateUserIds(req) {
+  return [req.user?.establishment, req.user?.id]
+    .map((value) => String(value || "").trim())
+    .filter((value, index, array) => value && array.indexOf(value) === index);
+}
+
+async function resolveSettingsOwner(req) {
+  const candidateIds = getCandidateUserIds(req);
+
+  for (const candidateId of candidateIds) {
+    const settings = await Settings.findOne({
+      where: { usersId: candidateId },
+    });
+    if (settings) {
+      return { userId: candidateId, settings };
+    }
+  }
+
+  const preferredId = getEstablishmentId(req);
+  if (!preferredId) {
+    throw new Error("Estabelecimento nao identificado");
+  }
+
+  const settings = await Settings.create({
+    usersId: preferredId,
+    whatsappConnection: {},
+  });
+
+  return { userId: preferredId, settings };
+}
+
 function normalizeBaileysErrorMessage(errorValue = "") {
   const raw = String(errorValue || "").trim();
   const lower = raw.toLowerCase();
@@ -53,17 +84,8 @@ function buildBaileysConnectPayload(status = {}) {
 // Initialize Baileys connection and get QR code
 router.post("/crm-baileys/connect", authenticate, async (req, res) => {
   try {
-    const userId = getEstablishmentId(req);
+    const { userId, settings } = await resolveSettingsOwner(req);
     const establishment = req.body.establishment || "default";
-
-    // Get user settings to verify establishment
-    const settings = await Settings.findOne({
-      where: { usersId: userId },
-    });
-
-    if (!settings) {
-      return res.status(404).json({ error: "User settings not found" });
-    }
 
     // Get or create Baileys service instance
     const baileysService = BaileysService.getInstance(userId, establishment);
@@ -116,14 +138,13 @@ router.post("/crm-baileys/connect", authenticate, async (req, res) => {
 // Get current connection status
 router.get("/crm-baileys/status", authenticate, async (req, res) => {
   try {
-    const userId = getEstablishmentId(req);
+    const { userId, settings } = await resolveSettingsOwner(req);
     const establishment = req.query.establishment || "default";
 
     const baileysService = BaileysService.getInstance(userId, establishment);
     const status = await baileysService.getStatus();
 
     // Always read DB to get persisted status/QR (handles cold-start cases)
-    const settings = await Settings.findOne({ where: { usersId: userId } });
     const dbBaileys = settings?.whatsappConnection?.baileys || {};
 
     // Prefer in-memory QR, fall back to DB
@@ -323,15 +344,7 @@ router.post("/crm-baileys/send", authenticate, async (req, res) => {
 // Get health status and ban risk
 router.get("/crm-baileys/health", authenticate, async (req, res) => {
   try {
-    const userId = getEstablishmentId(req);
-
-    const settings = await Settings.findOne({
-      where: { usersId: userId },
-    });
-
-    if (!settings) {
-      return res.status(404).json({ error: "Settings not found" });
-    }
+    const { settings } = await resolveSettingsOwner(req);
 
     const baileysConfig = settings.whatsappConnection?.baileys || {};
     const health = baileysConfig.health || {
@@ -378,15 +391,12 @@ router.get("/crm-baileys/health", authenticate, async (req, res) => {
 // Update hourly send limit
 router.post("/crm-baileys/config", authenticate, async (req, res) => {
   try {
-    const userId = getEstablishmentId(req);
+    const { userId, settings } = await resolveSettingsOwner(req);
     const { hourlyLimit } = req.body;
 
     if (hourlyLimit !== undefined && (isNaN(hourlyLimit) || hourlyLimit < 10 || hourlyLimit > 500)) {
       return res.status(400).json({ error: "hourlyLimit deve ser entre 10 e 500" });
     }
-
-    const settings = await Settings.findOne({ where: { usersId: userId } });
-    if (!settings) return res.status(404).json({ error: "Settings not found" });
 
     const baileysConfig = settings.whatsappConnection?.baileys || {};
     settings.whatsappConnection = {

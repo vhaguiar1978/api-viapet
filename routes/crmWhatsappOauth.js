@@ -16,6 +16,35 @@ function getEstablishmentId(req) {
   return req.user?.establishment || req.user?.id || null;
 }
 
+function getCandidateUserIds(req) {
+  return [req.user?.establishment, req.user?.id]
+    .map((value) => String(value || "").trim())
+    .filter((value, index, array) => value && array.indexOf(value) === index);
+}
+
+async function resolveSettingsOwner(req) {
+  const candidateIds = getCandidateUserIds(req);
+
+  for (const candidateId of candidateIds) {
+    const settings = await Settings.findOne({ where: { usersId: candidateId } });
+    if (settings) {
+      return { userId: candidateId, settings };
+    }
+  }
+
+  const preferredId = getEstablishmentId(req);
+  if (!preferredId) {
+    throw new Error("Estabelecimento nao identificado");
+  }
+
+  const settings = await Settings.create({
+    usersId: preferredId,
+    whatsappConnection: {},
+  });
+
+  return { userId: preferredId, settings };
+}
+
 // Página HTML retornada ao popup após o OAuth
 function oauthResultPage(status, extra = {}) {
   const payload = JSON.stringify({ type: "whatsapp_oauth", status, ...extra });
@@ -126,9 +155,12 @@ router.get("/crm-whatsapp/oauth/callback", async (req, res) => {
       return res.send(oauthResultPage("error", { reason: "no_phone_numbers" }));
     }
 
-    const settings = await Settings.findOne({ where: { usersId: establishmentId } });
+    let settings = await Settings.findOne({ where: { usersId: establishmentId } });
     if (!settings) {
-      return res.send(oauthResultPage("error", { reason: "settings_not_found" }));
+      settings = await Settings.create({
+        usersId: establishmentId,
+        whatsappConnection: {},
+      });
     }
 
     if (phoneNumbers.length === 1) {
@@ -160,10 +192,7 @@ router.get("/crm-whatsapp/oauth/callback", async (req, res) => {
 // Retorna a lista de números pendentes de seleção
 router.get("/crm-whatsapp/oauth/pending-phones", authenticate, async (req, res) => {
   try {
-    const settings = await Settings.findOne({
-      where: { usersId: getEstablishmentId(req) },
-      attributes: ["whatsappConnection"],
-    });
+    const { settings } = await resolveSettingsOwner(req);
     const phones = settings?.whatsappConnection?.pendingOauthPhones || [];
     return res.json({ data: phones });
   } catch (err) {
@@ -176,7 +205,7 @@ router.get("/crm-whatsapp/oauth/pending-phones", authenticate, async (req, res) 
 router.post("/crm-whatsapp/oauth/select-phone", authenticate, async (req, res) => {
   try {
     const { phoneNumberId } = req.body || {};
-    const settings = await Settings.findOne({ where: { usersId: getEstablishmentId(req) } });
+    const { settings } = await resolveSettingsOwner(req);
     if (!settings) {
       return res.status(404).json({ message: "Configurações não encontradas" });
     }
@@ -211,7 +240,7 @@ router.post("/crm-whatsapp/oauth/select-phone", authenticate, async (req, res) =
 // Desconecta o WhatsApp do estabelecimento
 router.delete("/crm-whatsapp/oauth/disconnect", authenticate, async (req, res) => {
   try {
-    const settings = await Settings.findOne({ where: { usersId: getEstablishmentId(req) } });
+    const { settings } = await resolveSettingsOwner(req);
     if (!settings) {
       return res.status(404).json({ message: "Configurações não encontradas" });
     }

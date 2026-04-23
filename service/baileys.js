@@ -19,8 +19,13 @@ import { v4 as uuidv4 } from "uuid";
  * so they survive Render restarts and re-deploys.
  */
 async function useDatabaseAuthState(userId) {
-  const settings = await Settings.findOne({ where: { usersId: userId } });
-  if (!settings) throw new Error("Settings not found for user");
+  let settings = await Settings.findOne({ where: { usersId: userId } });
+  if (!settings) {
+    settings = await Settings.create({
+      usersId: userId,
+      whatsappConnection: {},
+    });
+  }
 
   const saved = settings.whatsappConnection?.baileys?.authState || {};
 
@@ -283,7 +288,7 @@ class BaileysService {
 
       // Find or create customer
       let customer = await Custumers.findOne({
-        where: { phone },
+        where: { phone, usersId: this.userId },
         attributes: ["id", "name"],
       });
 
