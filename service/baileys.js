@@ -123,6 +123,23 @@ class BaileysService {
     this.lastError = null;
     this.connectionAttempts = 0;
     this._connectTimeout = null;
+    this.browserPreset = String(process.env.BAILEYS_BROWSER || "windows").toLowerCase();
+  }
+
+  resolveBrowserProfile() {
+    if (this.browserPreset === "macos" || this.browserPreset === "mac") {
+      return Browsers.macOS("Desktop");
+    }
+    if (this.browserPreset === "ubuntu" || this.browserPreset === "linux") {
+      return Browsers.ubuntu("Chrome");
+    }
+    if (this.browserPreset === "baileys") {
+      return Browsers.baileys("Chrome");
+    }
+    if (this.browserPreset === "appropriate") {
+      return Browsers.appropriate("Desktop");
+    }
+    return Browsers.windows("Desktop");
   }
 
   async initialize() {
@@ -152,6 +169,15 @@ class BaileysService {
         this.sock = null;
       }
 
+      const previousError = String(this.lastError?.message || "").toLowerCase();
+      if (
+        this.lastError?.code === 405 ||
+        previousError.includes("connection failure") ||
+        previousError.includes("stream errored out")
+      ) {
+        await this.clearAuthStateInDb();
+      }
+
       // Load auth state from database (survives restarts)
       const { state, saveCreds } = await useDatabaseAuthState(this.userId);
       this.authState = state;
@@ -161,7 +187,7 @@ class BaileysService {
       this.sock = makeWASocket({
         auth: state,
         printQRInTerminal: false,
-        browser: Browsers.ubuntu("Chrome"),
+        browser: this.resolveBrowserProfile(),
         connectTimeoutMs: 20000,
         keepAliveIntervalMs: 10000,
         defaultQueryTimeoutMs: 0,
