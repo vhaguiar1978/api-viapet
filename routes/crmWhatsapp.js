@@ -8,6 +8,24 @@ import Custumers from "../models/Custumers.js";
 
 const router = express.Router();
 
+function getMetaAppId() {
+  return String(
+    process.env.META_APP_ID ||
+      process.env.METAAPP_ID ||
+      process.env.META_APPID ||
+      "",
+  ).trim();
+}
+
+function getMetaAppSecret() {
+  return String(
+    process.env.META_APP_SECRET ||
+      process.env.METAAPP_SECRET ||
+      process.env.META_SECRET ||
+      "",
+  ).trim();
+}
+
 function getEstablishmentId(req) {
   return req.user?.establishment || req.user?.id || null;
 }
@@ -94,7 +112,7 @@ router.get("/crm-whatsapp/status", authenticate, async (req, res) => {
         lastWebhookAt,
         recentMessages,
         webhookUrl: `${process.env.URL || ""}/webhook`,
-        oauthAvailable: Boolean(process.env.META_APP_ID && process.env.META_APP_SECRET),
+        oauthAvailable: Boolean(getMetaAppId() && getMetaAppSecret()),
         oauthConnectedAt: config.oauthConnectedAt || null,
         tokenInvalid: Boolean(config.tokenInvalid),
         tokenErrorMessage: config.tokenErrorMessage || "",

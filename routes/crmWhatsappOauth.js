@@ -6,13 +6,32 @@ import Settings from "../models/Settings.js";
 
 const router = express.Router();
 
-const META_APP_ID = process.env.META_APP_ID || "";
-const META_APP_SECRET = process.env.META_APP_SECRET || "";
 const JWT_SECRET = process.env.JWT_SECRET || "secret";
-const API_URL = process.env.URL || "http://localhost:4003";
 const FRONTEND_URL = String(process.env.FRONTEND_URL || "https://app.viapet.app").replace(/\/+$/, "");
-const CALLBACK_URI = `${API_URL}/crm-whatsapp/oauth/callback`;
 const WHATSAPP_MESSAGES_URL = `${FRONTEND_URL}/mensagens`;
+
+function getMetaAppId() {
+  return String(
+    process.env.META_APP_ID ||
+      process.env.METAAPP_ID ||
+      process.env.META_APPID ||
+      "",
+  ).trim();
+}
+
+function getMetaAppSecret() {
+  return String(
+    process.env.META_APP_SECRET ||
+      process.env.METAAPP_SECRET ||
+      process.env.META_SECRET ||
+      "",
+  ).trim();
+}
+
+function getCallbackUri() {
+  const apiUrl = String(process.env.URL || process.env.API_URL || "http://localhost:4003").trim();
+  return `${apiUrl.replace(/\/+$/, "")}/crm-whatsapp/oauth/callback`;
+}
 
 function getEstablishmentId(req) {
   return req.user?.establishment || req.user?.id || null;
@@ -106,11 +125,14 @@ function oauthResultPage(status, extra = {}) {
 // ─── GET /crm-whatsapp/oauth/url ─────────────────────────────────────────────
 // Retorna a URL do OAuth da Meta para o frontend abrir em popup
 router.get("/crm-whatsapp/oauth/url", authenticate, (req, res) => {
-  if (!META_APP_ID || !META_APP_SECRET) {
+  const metaAppId = getMetaAppId();
+  const callbackUri = getCallbackUri();
+
+  if (!metaAppId) {
     return res.status(503).json({
       message:
         "A integração OAuth com a Meta ainda não está ativada neste servidor. " +
-        "Configure as variáveis META_APP_ID e META_APP_SECRET.",
+        "Configure a variável META_APP_ID.",
     });
   }
 
@@ -121,8 +143,8 @@ router.get("/crm-whatsapp/oauth/url", authenticate, (req, res) => {
   );
 
   const params = new URLSearchParams({
-    client_id: META_APP_ID,
-    redirect_uri: CALLBACK_URI,
+    client_id: metaAppId,
+    redirect_uri: callbackUri,
     scope: "whatsapp_business_management,whatsapp_business_messaging",
     state,
     response_type: "code",
@@ -134,6 +156,9 @@ router.get("/crm-whatsapp/oauth/url", authenticate, (req, res) => {
 // ─── GET /crm-whatsapp/oauth/callback ────────────────────────────────────────
 // Meta redireciona aqui após o login do usuário (rota pública)
 router.get("/crm-whatsapp/oauth/callback", async (req, res) => {
+  const metaAppId = getMetaAppId();
+  const metaAppSecret = getMetaAppSecret();
+  const callbackUri = getCallbackUri();
   const { code, state, error } = req.query;
 
   if (error) {
@@ -155,11 +180,15 @@ router.get("/crm-whatsapp/oauth/callback", async (req, res) => {
 
   try {
     // 1. Troca code → access token
+    if (!metaAppId || !metaAppSecret) {
+      return res.send(oauthResultPage("error", { reason: "meta_env_missing" }));
+    }
+
     const tokenRes = await axios.get("https://graph.facebook.com/oauth/access_token", {
       params: {
-        client_id: META_APP_ID,
-        client_secret: META_APP_SECRET,
-        redirect_uri: CALLBACK_URI,
+        client_id: metaAppId,
+        client_secret: metaAppSecret,
+        redirect_uri: callbackUri,
         code,
       },
     });
