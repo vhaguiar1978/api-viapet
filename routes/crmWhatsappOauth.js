@@ -10,7 +10,9 @@ const META_APP_ID = process.env.META_APP_ID || "";
 const META_APP_SECRET = process.env.META_APP_SECRET || "";
 const JWT_SECRET = process.env.JWT_SECRET || "secret";
 const API_URL = process.env.URL || "http://localhost:4003";
+const FRONTEND_URL = String(process.env.FRONTEND_URL || "https://app.viapet.app").replace(/\/+$/, "");
 const CALLBACK_URI = `${API_URL}/crm-whatsapp/oauth/callback`;
+const WHATSAPP_MESSAGES_URL = `${FRONTEND_URL}/mensagens`;
 
 function getEstablishmentId(req) {
   return req.user?.establishment || req.user?.id || null;
@@ -48,6 +50,8 @@ async function resolveSettingsOwner(req) {
 // Página HTML retornada ao popup após o OAuth
 function oauthResultPage(status, extra = {}) {
   const payload = JSON.stringify({ type: "whatsapp_oauth", status, ...extra });
+  const fallbackTarget = `${WHATSAPP_MESSAGES_URL}?waoauth=${encodeURIComponent(status)}`;
+  const fallbackTargetJs = JSON.stringify(fallbackTarget);
   const icon = status === "connected" ? "✅" : status === "select" ? "📱" : "❌";
   const msg =
     status === "connected"
@@ -76,11 +80,24 @@ function oauthResultPage(status, extra = {}) {
   <div class="card">
     <div class="icon">${icon}</div>
     <p>${msg}</p>
-    <small>Esta janela vai fechar automaticamente.</small>
+    <small>Voce sera redirecionado automaticamente para o ViaPet.</small>
+    <p style="margin-top:14px;">
+      <a href="${fallbackTarget}" style="color:#4f46e5;text-decoration:none;font-weight:600;">
+        Voltar para Mensagens
+      </a>
+    </p>
   </div>
   <script>
-    try { window.opener && window.opener.postMessage(${payload}, "*"); } catch(e) {}
-    setTimeout(() => window.close(), 1800);
+    try {
+      if (window.opener && !window.opener.closed) {
+        window.opener.postMessage(${payload}, "*");
+        setTimeout(() => window.close(), 1200);
+      } else {
+        window.location.replace(${fallbackTargetJs});
+      }
+    } catch(e) {
+      window.location.replace(${fallbackTargetJs});
+    }
   </script>
 </body>
 </html>`;
