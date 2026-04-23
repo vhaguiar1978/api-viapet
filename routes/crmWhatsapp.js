@@ -9,25 +9,35 @@ import Custumers from "../models/Custumers.js";
 const router = express.Router();
 
 function getMetaAppId() {
-  return String(
-    process.env.META_APP_ID ||
-      process.env.METAAPP_ID ||
-      process.env.META_APPID ||
-      "",
-  ).trim();
+  return readFirstValidEnv([
+    "META_APP_ID",
+    "METAAPP_ID",
+    "META_APPID",
+    "META_APP_ID_ALT",
+  ]);
 }
 
 function getMetaAppSecret() {
-  return String(
-    process.env.META_APP_SECRET ||
-      process.env.METAAPP_SECRET ||
-      process.env.META_SECRET ||
-      "",
-  ).trim();
+  return readFirstValidEnv([
+    "META_APP_SECRET",
+    "METAAPP_SECRET",
+    "META_SECRET",
+    "META_APP_SECRET_ALT",
+  ]);
 }
 
 function getEstablishmentId(req) {
   return req.user?.establishment || req.user?.id || null;
+}
+
+function readFirstValidEnv(keys = []) {
+  for (const key of keys) {
+    const value = process.env[key];
+    if (typeof value !== "string") continue;
+    const normalized = value.trim();
+    if (normalized) return normalized;
+  }
+  return "";
 }
 
 function normalizePhone(value) {
