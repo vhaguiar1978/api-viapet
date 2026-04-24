@@ -174,6 +174,19 @@ router.post("/login", async (req, res) => {
     });
   } catch (error) {
     console.error("Erro no login:", error);
+    // Erros de conexão com BD: retornar 503 com mensagem clara
+    const isDbError =
+      error.code === "ERR_INVALID_IP_ADDRESS" ||
+      error.name === "SequelizeConnectionError" ||
+      error.name === "SequelizeConnectionRefusedError" ||
+      error.name === "SequelizeHostNotFoundError" ||
+      /ECONNREFUSED|ETIMEDOUT|ENETUNREACH|hostname/i.test(error.message || "");
+    if (isDbError) {
+      return res.status(503).json({
+        message: "Serviço temporariamente indisponível. Banco de dados não alcançável.",
+        code: "DB_UNAVAILABLE",
+      });
+    }
     return res.status(500).json({
       message: "Erro no servidor",
       error: error.message,

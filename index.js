@@ -93,6 +93,31 @@ app.use(
 app.get("/health", (_req, res) => {
   res.status(200).json({ ok: true, service: "api-viapet" });
 });
+
+// Endpoint de diagnóstico DB — ajuda a depurar env vars inválidos no Render
+app.get("/api/db-status", async (_req, res) => {
+  const rawDbUrl = process.env.DATABASE_URL || "";
+  const dbUrlSafe = rawDbUrl
+    ? rawDbUrl.replace(/\/\/[^@]+@/, "//***:***@").substring(0, 60) + "..."
+    : "(não definido)";
+
+  const info = {
+    NODE_ENV: process.env.NODE_ENV,
+    hasDatabaseUrl: Boolean(rawDbUrl && rawDbUrl !== "undefined" && rawDbUrl !== "null"),
+    DATABASE_URL_safe: dbUrlSafe,
+    DB_HOST: process.env.DB_HOST || "(não definido)",
+    DB_NAME: process.env.DB_NAME || "(não definido)",
+    SUPABASE_POOLER_HOST: process.env.SUPABASE_POOLER_HOST || "(não definido)",
+    DB_DIALECT: process.env.DB_DIALECT || "(não definido)",
+  };
+
+  try {
+    await sequelize.authenticate();
+    return res.json({ ok: true, db: "conectado", config: info });
+  } catch (err) {
+    return res.status(500).json({ ok: false, db: "erro", error: err.message, config: info });
+  }
+});
 app.use("/uploads", express.static("uploads"));
 app.use(loginRouter);
 app.use(loginFuncRouter);
