@@ -25,11 +25,11 @@ const envFile =
 
 config({ path: path.resolve(__dirname, "..", envFile) });
 
+// Força DNS IPv4 para evitar ENETUNREACH no Render + Supabase
 try {
   dns.setDefaultResultOrder("ipv4first");
-  console.log("DNS padrao ajustado para ipv4first");
-} catch (error) {
-  console.warn("Nao foi possivel ajustar DNS para ipv4first:", error.message);
+} catch (_error) {
+  // noop — Node < 17
 }
 
 const resolvedDatabaseUrl = firstValidEnv(
@@ -40,16 +40,6 @@ const resolvedDatabaseUrl = firstValidEnv(
   "SUPABASE_DB_URL",
 );
 
-console.log(`Ambiente: ${process.env.NODE_ENV || "production"}`);
-console.log(`Arquivo de configuracao: ${envFile}`);
-
-if (resolvedDatabaseUrl) {
-  console.log("Banco de dados configurado via DATABASE_URL");
-} else {
-  console.log(
-    `Banco de dados: ${firstValidEnv("DB_HOST", "PGHOST", "POSTGRES_HOST")}:${firstValidEnv("DB_PORT", "PGPORT", "POSTGRES_PORT")}/${firstValidEnv("DB_NAME", "PGDATABASE", "POSTGRES_DATABASE")}`
-  );
-}
-
-console.log(`NODE_ENV detectado: "${process.env.NODE_ENV}"`);
-console.log(`Tipo da variavel NODE_ENV: ${typeof process.env.NODE_ENV}`);
+console.log(`[env] Ambiente: ${process.env.NODE_ENV}`);
+console.log(`[env] Arquivo: ${envFile}`);
+console.log(`[env] DATABASE_URL configurada: ${resolvedDatabaseUrl ? "sim" : "não"}`);
