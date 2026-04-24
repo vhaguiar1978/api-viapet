@@ -27,6 +27,7 @@ dns.lookup = function forceIpv4Lookup(hostname, options, callback) {
 
   // Guard against invalid hostnames (e.g. "undefined" string when env var is missing)
   if (!hostname || hostname === "undefined" || hostname === "null") {
+    console.error("[dns.lookup] hostname invalido:", hostname, new Error().stack);
     const err = Object.assign(new Error(`Invalid IP address: ${hostname}`), {
       code: "ERR_INVALID_IP_ADDRESS",
     });
