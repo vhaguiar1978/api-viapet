@@ -37,6 +37,33 @@ dns.lookup = function forceIpv4Lookup(hostname, options, callback) {
 const isDevelopment = process.env.NODE_ENV === "development";
 const hasDatabaseUrl = Boolean(process.env.DATABASE_URL);
 
+function normalizeDatabaseUrl(rawUrl) {
+  if (!rawUrl) {
+    return rawUrl;
+  }
+
+  try {
+    const parsed = new URL(rawUrl);
+    const hostname = (parsed.hostname || "").toLowerCase();
+
+    // Fallback robusto para Supabase em produção (Render + host db.* costuma falhar por DNS/IPv6).
+    if (hostname.startsWith("db.") && hostname.endsWith(".supabase.co")) {
+      const projectRef = hostname.replace(/^db\./, "").replace(/\.supabase\.co$/, "");
+      const poolerHost =
+        process.env.SUPABASE_POOLER_HOST || "aws-1-us-east-1.pooler.supabase.com";
+
+      parsed.hostname = poolerHost;
+      if (parsed.username === "postgres" && projectRef) {
+        parsed.username = `postgres.${projectRef}`;
+      }
+    }
+
+    return parsed.toString();
+  } catch (_error) {
+    return rawUrl;
+  }
+}
+
 const dbConfig = {
   database: process.env.DB_NAME,
   username: process.env.DB_USER,
@@ -78,8 +105,10 @@ const sharedOptions = {
     : {}),
 };
 
+const resolvedDatabaseUrl = normalizeDatabaseUrl(process.env.DATABASE_URL);
+
 const sequelize = hasDatabaseUrl
-  ? new Sequelize(process.env.DATABASE_URL, sharedOptions)
+  ? new Sequelize(resolvedDatabaseUrl, sharedOptions)
   : new Sequelize(dbConfig.database, dbConfig.username, dbConfig.password, {
       host: dbConfig.host,
       port: dbConfig.port,
