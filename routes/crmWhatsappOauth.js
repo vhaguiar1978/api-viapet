@@ -144,11 +144,11 @@ function oauthResultPage(status, extra = {}) {
 // Retorna a URL do OAuth da Meta para o frontend abrir em popup
 router.get("/crm-whatsapp/oauth/url", authenticate, (req, res) => {
   const metaAppId = getMetaAppId();
-  const metaAppSecret = getMetaAppSecret();
   const callbackUri = getCallbackUri();
 
-  if (!metaAppId || !metaAppSecret) {
-    return res.status(503).json({
+  if (!metaAppId) {
+    return res.status(200).json({
+      oauthAvailable: false,
       message:
         "A integração OAuth com a Meta ainda não está ativada neste servidor. " +
         "Configure as variáveis META_APP_ID e META_APP_SECRET.",

@@ -108,6 +108,8 @@ router.get("/crm-whatsapp/status", authenticate, async (req, res) => {
         new Date(lastWebhookAt).getTime() >= Date.now() - 1000 * 60 * 60 * 24 * 2,
     );
 
+    const hasMetaAppId = Boolean(getMetaAppId());
+    const hasMetaAppSecret = Boolean(getMetaAppSecret());
     return res.status(200).json({
       message: "Status do WhatsApp CRM carregado com sucesso",
       data: {
@@ -124,7 +126,8 @@ router.get("/crm-whatsapp/status", authenticate, async (req, res) => {
         lastWebhookAt,
         recentMessages,
         webhookUrl: `${process.env.URL || ""}/webhook`,
-        oauthAvailable: Boolean(getMetaAppId() && getMetaAppSecret()),
+        oauthAvailable: hasMetaAppId,
+        oauthReady: hasMetaAppId && hasMetaAppSecret,
         oauthConnectedAt: config.oauthConnectedAt || null,
         tokenInvalid: Boolean(config.tokenInvalid),
         tokenErrorMessage: config.tokenErrorMessage || "",
@@ -144,7 +147,8 @@ router.get("/crm-whatsapp/status", authenticate, async (req, res) => {
           webhookUrl: `${process.env.URL || ""}/webhook`,
           phoneNumberId: "",
           businessAccountId: "",
-          oauthAvailable: Boolean(getMetaAppId() && getMetaAppSecret()),
+          oauthAvailable: Boolean(getMetaAppId()),
+          oauthReady: Boolean(getMetaAppId() && getMetaAppSecret()),
           oauthConnectedAt: null,
           tokenInvalid: false,
           tokenErrorMessage: "",
