@@ -25,6 +25,17 @@ dns.lookup = function forceIpv4Lookup(hostname, options, callback) {
     resolvedOptions = { family: resolvedOptions };
   }
 
+  // Guard against invalid hostnames (e.g. "undefined" string when env var is missing)
+  if (!hostname || hostname === "undefined" || hostname === "null") {
+    const err = Object.assign(new Error(`Invalid IP address: ${hostname}`), {
+      code: "ERR_INVALID_IP_ADDRESS",
+    });
+    if (typeof resolvedCallback === "function") {
+      return process.nextTick(() => resolvedCallback(err));
+    }
+    throw err;
+  }
+
   const normalizedOptions = { ...(resolvedOptions || {}) };
   if (!normalizedOptions.family || normalizedOptions.family === 6) {
     normalizedOptions.family = 4;
@@ -49,8 +60,11 @@ function normalizeDatabaseUrl(rawUrl) {
     // Fallback robusto para Supabase em produção (Render + host db.* costuma falhar por DNS/IPv6).
     if (hostname.startsWith("db.") && hostname.endsWith(".supabase.co")) {
       const projectRef = hostname.replace(/^db\./, "").replace(/\.supabase\.co$/, "");
+      const envPoolerHost = process.env.SUPABASE_POOLER_HOST;
       const poolerHost =
-        process.env.SUPABASE_POOLER_HOST || "aws-1-us-east-1.pooler.supabase.com";
+        (envPoolerHost && envPoolerHost !== "undefined" && envPoolerHost !== "null")
+          ? envPoolerHost
+          : "aws-1-us-east-1.pooler.supabase.com";
 
       parsed.hostname = poolerHost;
       if (parsed.username === "postgres" && projectRef) {
