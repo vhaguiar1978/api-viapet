@@ -11,6 +11,29 @@ if (typeof dns.setDefaultResultOrder === "function") {
   }
 }
 
+const originalLookup = dns.lookup.bind(dns);
+dns.lookup = function forceIpv4Lookup(hostname, options, callback) {
+  let resolvedOptions = options;
+  let resolvedCallback = callback;
+
+  if (typeof resolvedOptions === "function") {
+    resolvedCallback = resolvedOptions;
+    resolvedOptions = {};
+  }
+
+  if (typeof resolvedOptions === "number") {
+    resolvedOptions = { family: resolvedOptions };
+  }
+
+  const normalizedOptions = { ...(resolvedOptions || {}) };
+  if (!normalizedOptions.family || normalizedOptions.family === 6) {
+    normalizedOptions.family = 4;
+  }
+  normalizedOptions.all = false;
+
+  return originalLookup(hostname, normalizedOptions, resolvedCallback);
+};
+
 const isDevelopment = process.env.NODE_ENV === "development";
 const hasDatabaseUrl = Boolean(process.env.DATABASE_URL);
 
