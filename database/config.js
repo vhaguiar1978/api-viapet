@@ -69,9 +69,10 @@ function normalizeDatabaseUrl(rawUrl) {
   if (supabaseDoubleAt) {
     const [, proto, user, passRaw, host, path = "/postgres", search = "", hash = ""] =
       supabaseDoubleAt;
-    // passRaw não contém o @ final que foi "consumido" como separador de URL.
-    // A senha real era passRaw + '@' (um @ — o segundo @ estava como separador).
-    const realPass = passRaw + "@";
+    // passRaw não contém os @@ que foram consumidos pelo padrão do regex.
+    // O usuário digitou a senha com @@ sem encode: a senha real é passRaw + '@@'.
+    // Ex.: senha 'Ale202320@@' → URL incorreta 'Ale202320@@host' → passRaw='Ale202320' → realPass='Ale202320@@'
+    const realPass = passRaw + "@@";
     const encodedPass = encodeURIComponent(realPass);
     urlToProcess = `${proto}://${user}:${encodedPass}@${host}${path}${search}${hash}`;
     console.log("[db] URL com @@ detectado — password recodificado corretamente");
