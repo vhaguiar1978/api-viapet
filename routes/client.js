@@ -162,6 +162,13 @@ router.post("/customers", auth, async (req, res) => {
       status = true, // Valor padrão true
     } = req.body;
 
+    let formattedBirthDateCreate = null;
+    if (birthDate) {
+      formattedBirthDateCreate = birthDate.includes("T")
+        ? birthDate
+        : `${birthDate}T12:00:00.000Z`;
+    }
+
     // Cria o novo cliente
     const customer = await Custumers.create({
       usersId: req.user.establishment, // ID do usuário logado
@@ -177,7 +184,7 @@ router.post("/customers", auth, async (req, res) => {
       profissao: profissao || null,
       rg: rg || null,
       observation,
-      birthDate: birthDate || null,
+      birthDate: formattedBirthDateCreate,
       cpf: cpf || null,
       status,
     });
@@ -410,6 +417,45 @@ router.put("/customers", auth, async (req, res) => {
   }
 });
 
+router.get("/birthdays/debug", auth, async (req, res) => {
+  try {
+    const { Sequelize: Seq } = await import("sequelize");
+    const totalCustomers = await Custumers.count({
+      where: { usersId: req.user.establishment },
+    });
+    const customersWithBirthDate = await Custumers.count({
+      where: { usersId: req.user.establishment, birthDate: { [Op.not]: null } },
+    });
+    const totalPets = await Pets.count({
+      where: { usersId: req.user.establishment },
+    });
+    const petsWithBirthdate = await Pets.count({
+      where: { usersId: req.user.establishment, birthdate: { [Op.not]: null } },
+    });
+    const sampleCustomers = await Custumers.findAll({
+      where: { usersId: req.user.establishment, birthDate: { [Op.not]: null } },
+      attributes: ["id", "name", "birthDate"],
+      limit: 5,
+    });
+    const samplePets = await Pets.findAll({
+      where: { usersId: req.user.establishment, birthdate: { [Op.not]: null } },
+      attributes: ["id", "name", "birthdate"],
+      limit: 5,
+    });
+    return res.status(200).json({
+      establishment: req.user.establishment,
+      totalCustomers,
+      customersWithBirthDate,
+      totalPets,
+      petsWithBirthdate,
+      sampleCustomers,
+      samplePets,
+    });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
 router.get("/birthdays", auth, async (req, res) => {
   try {
     const today = new Date(
@@ -420,17 +466,19 @@ router.get("/birthdays", auth, async (req, res) => {
     const uuidPattern =
       /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+    console.log(`[birthdays] establishment=${req.user.establishment} month=${currentMonth} day=${currentDay}`);
+
     const birthMonthFilter = Sequelize.literal(
-      `EXTRACT(MONTH FROM ("birthDate" AT TIME ZONE 'America/Sao_Paulo')) = ${Number(currentMonth)}`,
+      `EXTRACT(MONTH FROM "birthDate") = ${Number(currentMonth)}`,
     );
     const birthDayFilter = Sequelize.literal(
-      `EXTRACT(DAY FROM ("birthDate" AT TIME ZONE 'America/Sao_Paulo')) = ${Number(currentDay)}`,
+      `EXTRACT(DAY FROM "birthDate") = ${Number(currentDay)}`,
     );
     const petBirthMonthFilter = Sequelize.literal(
-      `EXTRACT(MONTH FROM ("birthdate" AT TIME ZONE 'America/Sao_Paulo')) = ${Number(currentMonth)}`,
+      `EXTRACT(MONTH FROM "birthdate") = ${Number(currentMonth)}`,
     );
     const petBirthDayFilter = Sequelize.literal(
-      `EXTRACT(DAY FROM ("birthdate" AT TIME ZONE 'America/Sao_Paulo')) = ${Number(currentDay)}`,
+      `EXTRACT(DAY FROM "birthdate") = ${Number(currentDay)}`,
     );
 
     const customersOfTheDay = await Custumers.findAll({
@@ -517,6 +565,8 @@ router.get("/birthdays", auth, async (req, res) => {
         customerName: ownerMap[pet.custumerId]?.name || "Tutor nao encontrado",
         customerPhone: ownerMap[pet.custumerId]?.phone || "",
       }));
+
+    console.log(`[birthdays] results: customers=${customersOfTheDay.length} monthCustomers=${customersOfTheMonth.length} pets=${petsOfTheDay.length} monthPets=${petsOfTheMonth.length}`);
 
     return res.status(200).json({
       message: "Aniversariantes encontrados com sucesso",
