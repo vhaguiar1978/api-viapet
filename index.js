@@ -42,9 +42,35 @@ import whatsappOfficialRouter from "./routes/whatsappOfficial.js";
 import FilterRouter from "./routes/filter.routes.js";
 import appointmentComandaRouter from "./routes/appointmentComanda.js";
 import vaccinePlansRouter from "./routes/vaccinePlans.js";
+import net from "node:net";
 process.env.TZ = "America/Sao_Paulo";
 const app = express();
 app.set("trust proxy", 1);
+
+function sanitizeForwardedForHeader(value) {
+  if (typeof value !== "string") return undefined;
+  const cleaned = value
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part && part.toLowerCase() !== "undefined" && part.toLowerCase() !== "null")
+    .filter((part) => {
+      const normalized = part.includes(":") && part.startsWith("::ffff:") ? part.replace("::ffff:", "") : part;
+      return net.isIP(normalized) !== 0;
+    });
+
+  if (cleaned.length === 0) return undefined;
+  return cleaned.join(", ");
+}
+
+app.use((req, _res, next) => {
+  const sanitized = sanitizeForwardedForHeader(req.headers["x-forwarded-for"]);
+  if (sanitized) {
+    req.headers["x-forwarded-for"] = sanitized;
+  } else {
+    delete req.headers["x-forwarded-for"];
+  }
+  next();
+});
 // Aumenta o limite do body parser
 app.use(
   bodyParser.json({

@@ -2,6 +2,7 @@ import express from "express";
 import bcrypt from "bcryptjs";
 import validator from "validator";
 import jwt from "jsonwebtoken";
+import net from "node:net";
 import "dotenv/config";
 import Users from "../../models/Users.js";
 import LoginHistory from "../../models/LoginHistory.js";
@@ -67,11 +68,7 @@ async function registerLoginHistory(userId, req, status = "success") {
     return;
   }
   try {
-    const clientIp =
-      req.ip ||
-      req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
-      req.connection?.remoteAddress ||
-      "0.0.0.0";
+    const clientIp = resolveClientIp(req) || "0.0.0.0";
     await LoginHistory.create({
       userId,
       ip: clientIp,
@@ -83,6 +80,33 @@ async function registerLoginHistory(userId, req, status = "success") {
   } catch (error) {
     console.warn("Falha ao gravar historico de login:", error.message);
   }
+}
+
+function normalizeIpCandidate(value) {
+  if (!value || typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.toLowerCase() === "undefined" || trimmed.toLowerCase() === "null") {
+    return null;
+  }
+  const normalized = trimmed.startsWith("::ffff:") ? trimmed.replace("::ffff:", "") : trimmed;
+  return net.isIP(normalized) ? normalized : null;
+}
+
+function resolveClientIp(req) {
+  const xff = req?.headers?.["x-forwarded-for"];
+  if (typeof xff === "string" && xff.trim()) {
+    const first = xff.split(",")[0];
+    const parsed = normalizeIpCandidate(first);
+    if (parsed) return parsed;
+  }
+
+  const socketIp = normalizeIpCandidate(req?.socket?.remoteAddress);
+  if (socketIp) return socketIp;
+
+  const connectionIp = normalizeIpCandidate(req?.connection?.remoteAddress);
+  if (connectionIp) return connectionIp;
+
+  return null;
 }
 
 router.post("/login", async (req, res) => {
