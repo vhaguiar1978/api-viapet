@@ -161,9 +161,36 @@ async function ensureAppointmentSchema() {
   }
 }
 
+async function ensureUsersSchema() {
+  const queryInterface = sequelize.getQueryInterface();
+
+  try {
+    const usersTable = await queryInterface.describeTable("users");
+
+    if (!usersTable.lastAccess) {
+      await queryInterface.addColumn("users", "lastAccess", {
+        type: DataTypes.DATE,
+        allowNull: true,
+      });
+      console.log("Coluna lastAccess adicionada em Users");
+    }
+
+    if (!usersTable.phone) {
+      await queryInterface.addColumn("users", "phone", {
+        type: DataTypes.STRING,
+        allowNull: true,
+      });
+      console.log("Coluna phone adicionada em Users");
+    }
+  } catch (error) {
+    console.error("Nao foi possivel validar o schema de Users:", error);
+  }
+}
+
 sequelize
   .sync()
   .then(async () => {
+    await ensureUsersSchema();
     await ensureAppointmentSchema();
     console.log("Conectado ao banco de dados");
   })

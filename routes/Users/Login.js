@@ -161,9 +161,11 @@ router.post("/login", async (req, res) => {
     const token = buildAuthToken(user);
 
     await registerLoginHistory(user.id, req, "success");
-    await user.update({
-      lastAccess: new Date(),
-    });
+    try {
+      await user.update({ lastAccess: new Date() });
+    } catch {
+      // coluna pode nao existir em instancias antigas
+    }
 
     return res.status(200).json({
       message: `Login bem-sucedido! Bem-vindo novamente ${user.name}`,
