@@ -47,7 +47,12 @@ dns.lookup = function forceIpv4Lookup(hostname, options, callback) {
 };
 
 const isDevelopment = process.env.NODE_ENV === "development";
-const hasDatabaseUrl = Boolean(process.env.DATABASE_URL);
+
+function isValidEnvString(val) {
+  return Boolean(val) && val !== "undefined" && val !== "null";
+}
+
+const hasDatabaseUrl = isValidEnvString(process.env.DATABASE_URL);
 
 function normalizeDatabaseUrl(rawUrl) {
   if (!rawUrl) {
@@ -83,7 +88,9 @@ const dbConfig = {
   database: process.env.DB_NAME,
   username: process.env.DB_USER,
   password: process.env.DB_PASS,
-  host: isDevelopment ? process.env.DB_HOST || "localhost" : process.env.DB_HOST,
+  host: isDevelopment
+    ? (isValidEnvString(process.env.DB_HOST) ? process.env.DB_HOST : "localhost")
+    : (isValidEnvString(process.env.DB_HOST) ? process.env.DB_HOST : undefined),
   port: process.env.DB_PORT || 3306,
   dialect: process.env.DB_DIALECT || (hasDatabaseUrl ? "postgres" : "mysql"),
   logging: isDevelopment ? console.log : false,
@@ -120,7 +127,9 @@ const sharedOptions = {
     : {}),
 };
 
-const resolvedDatabaseUrl = normalizeDatabaseUrl(process.env.DATABASE_URL);
+const resolvedDatabaseUrl = hasDatabaseUrl
+  ? normalizeDatabaseUrl(process.env.DATABASE_URL)
+  : null;
 
 const sequelize = hasDatabaseUrl
   ? new Sequelize(resolvedDatabaseUrl, sharedOptions)
