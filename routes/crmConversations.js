@@ -234,6 +234,37 @@ function buildWhatsappMessagePayload({
   };
 }
 
+function getMetaErrorMessage(error) {
+  return (
+    error?.response?.data?.error?.message ||
+    error?.response?.data?.message ||
+    error?.message ||
+    ""
+  );
+}
+
+function isMetaTokenInvalidError(error) {
+  const rawMessage = String(getMetaErrorMessage(error) || "").toLowerCase();
+  return (
+    rawMessage.includes("error validating access token") ||
+    rawMessage.includes("session has been invalidated") ||
+    rawMessage.includes("access token") && rawMessage.includes("invalid")
+  );
+}
+
+async function persistInvalidMetaToken(settings, error) {
+  if (!settings) return;
+  settings.whatsappConnection = {
+    ...(settings.whatsappConnection || {}),
+    accessToken: "",
+    accessTokenConfigured: false,
+    oauthConnectedAt: null,
+    tokenInvalid: true,
+    tokenErrorMessage: getMetaErrorMessage(error),
+  };
+  await settings.save();
+}
+
 function sanitizeStatus(value, fallback = "pending") {
   const normalized = String(value || "").trim().toLowerCase();
   return ALLOWED_STATUSES.has(normalized) ? normalized : fallback;
@@ -934,10 +965,23 @@ router.post("/crm-conversations/:conversationId/messages", authenticate, async (
         });
       } catch (sendError) {
         console.error("Erro ao enviar mensagem na nova conversa CRM:", sendError.response?.data || sendError);
+
+        if (isMetaTokenInvalidError(sendError)) {
+          try {
+            await persistInvalidMetaToken(settings, sendError);
+          } catch (persistError) {
+            console.error("Erro ao marcar token invalido na conversa CRM:", persistError);
+          }
+
+          return res.status(409).json({
+            message: "A conexao com a Meta expirou. Reconecte o WhatsApp para voltar a enviar mensagens.",
+            requiresReconnect: true,
+            tokenInvalid: true,
+          });
+        }
+
         return res.status(500).json({
-          message:
-            sendError.response?.data?.error?.message ||
-            "Nao foi possivel enviar a mensagem pelo WhatsApp",
+          message: getMetaErrorMessage(sendError) || "Nao foi possivel enviar a mensagem pelo WhatsApp",
           error: sendError.message,
         });
       }

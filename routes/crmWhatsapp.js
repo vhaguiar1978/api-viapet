@@ -80,6 +80,19 @@ function isMetaTokenInvalidError(error) {
   );
 }
 
+async function persistInvalidMetaToken(settings, error) {
+  if (!settings) return;
+  settings.whatsappConnection = {
+    ...(settings.whatsappConnection || {}),
+    accessToken: "",
+    accessTokenConfigured: false,
+    oauthConnectedAt: null,
+    tokenInvalid: true,
+    tokenErrorMessage: getMetaErrorMessage(error),
+  };
+  await settings.save();
+}
+
 router.get("/crm-whatsapp/status", authenticate, async (req, res) => {
   try {
     const settings = await Settings.findOne({
@@ -288,17 +301,7 @@ router.post("/crm-whatsapp/send", authenticate, async (req, res) => {
         const settings = await Settings.findOne({
           where: { usersId: getEstablishmentId(req) },
         });
-        if (settings) {
-          settings.whatsappConnection = {
-            ...(settings.whatsappConnection || {}),
-            accessToken: "",
-            accessTokenConfigured: false,
-            oauthConnectedAt: null,
-            tokenInvalid: true,
-            tokenErrorMessage: getMetaErrorMessage(error),
-          };
-          await settings.save();
-        }
+        await persistInvalidMetaToken(settings, error);
       } catch (persistError) {
         console.error("Erro ao marcar token invalido do WhatsApp CRM:", persistError);
       }
@@ -375,17 +378,7 @@ router.post("/crm-whatsapp/test-connection", authenticate, async (req, res) => {
 
     if (isMetaTokenInvalidError(error)) {
       try {
-        if (settings) {
-          settings.whatsappConnection = {
-            ...(settings.whatsappConnection || {}),
-            accessToken: "",
-            accessTokenConfigured: false,
-            oauthConnectedAt: null,
-            tokenInvalid: true,
-            tokenErrorMessage: getMetaErrorMessage(error),
-          };
-          await settings.save();
-        }
+        await persistInvalidMetaToken(settings, error);
       } catch (persistError) {
         console.error("Erro ao salvar status de token invalido do WhatsApp CRM:", persistError);
       }
@@ -416,20 +409,21 @@ router.get("/whatsapp-crm-config", authenticate, async (req, res) => {
       attributes: ["whatsappConnection"],
     });
 
-    const config = settings?.whatsappConnection || {};
+    const { config, phoneNumberId, businessAccountId, verifyToken, token } =
+      resolveWhatsappConfig(settings);
 
     return res.status(200).json({
       message: "Configuracao do WhatsApp CRM carregada com sucesso",
       data: {
         provider: config.provider || "WhatsApp Cloud API",
-        phoneNumberId: config.phoneNumberId || "",
-        businessAccountId: config.businessAccountId || "",
-        verifyToken: config.verifyToken || "",
-        accessTokenConfigured: Boolean(config.accessToken || config.accessTokenConfigured),
-        accessTokenPreview: config.accessToken ? config.accessToken.slice(-4) : "",
+        phoneNumberId,
+        businessAccountId,
+        verifyToken,
+        accessTokenConfigured: Boolean(config.accessToken || config.accessTokenConfigured || token),
+        accessTokenPreview: config.accessToken ? config.accessToken.slice(-4) : token ? "Configurado no servidor" : "",
         defaultCountryCode: config.defaultCountryCode || "55",
         webhookUrl: `${process.env.URL || ""}/webhook`,
-        status: config.phoneNumberId ? "configured" : "pending",
+        status: phoneNumberId ? "configured" : "pending",
       },
     });
   } catch (error) {
@@ -585,6 +579,21 @@ router.post("/crm-whatsapp/broadcast", authenticate, async (req, res) => {
 
         results.sent += 1;
       } catch (sendError) {
+        if (isMetaTokenInvalidError(sendError)) {
+          try {
+            await persistInvalidMetaToken(settings, sendError);
+          } catch (persistError) {
+            console.error("Erro ao salvar token invalido no broadcast CRM:", persistError);
+          }
+
+          return res.status(409).json({
+            message: "A conexao com a Meta expirou. Reconecte o WhatsApp para voltar a enviar mensagens.",
+            requiresReconnect: true,
+            tokenInvalid: true,
+            data: results,
+          });
+        }
+
         results.failed += 1;
         results.errors.push({
           phone,
