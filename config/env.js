@@ -1,6 +1,7 @@
 import { config } from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
+import dns from "dns";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -13,6 +14,13 @@ const envFile =
   process.env.NODE_ENV === "development" ? ".env.development" : ".env";
 
 config({ path: path.resolve(__dirname, "..", envFile) });
+
+try {
+  dns.setDefaultResultOrder("ipv4first");
+  console.log("DNS padrao ajustado para ipv4first");
+} catch (error) {
+  console.warn("Nao foi possivel ajustar DNS para ipv4first:", error.message);
+}
 
 console.log(`Ambiente: ${process.env.NODE_ENV || "production"}`);
 console.log(`Arquivo de configuracao: ${envFile}`);

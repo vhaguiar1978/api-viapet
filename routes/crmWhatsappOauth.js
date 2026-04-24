@@ -6,7 +6,13 @@ import Settings from "../models/Settings.js";
 
 const router = express.Router();
 
-const JWT_SECRET = process.env.JWT_SECRET || "secret";
+function getJwtSecret() {
+  return readFirstValidEnv([
+    "JWT_SECRET",
+    "JWTSECRET",
+    "JWT_SECRET_KEY",
+  ]) || "viapet_jwt_fallback_change_me";
+}
 const FRONTEND_URL = String(process.env.FRONTEND_URL || "https://app.viapet.app").replace(/\/+$/, "");
 const WHATSAPP_MESSAGES_URL = `${FRONTEND_URL}/mensagens`;
 
@@ -14,6 +20,7 @@ function getMetaAppId() {
   return readFirstValidEnv([
     "META_APP_ID",
     "METAAPP_ID",
+    "METAAPPID",
     "META_APPID",
     "META_APP_ID_ALT",
   ]);
@@ -23,6 +30,7 @@ function getMetaAppSecret() {
   return readFirstValidEnv([
     "META_APP_SECRET",
     "METAAPP_SECRET",
+    "METAAPPSECRET",
     "META_SECRET",
     "META_APP_SECRET_ALT",
   ]);
@@ -37,7 +45,7 @@ function readFirstValidEnv(keys = []) {
   for (const key of keys) {
     const value = process.env[key];
     if (typeof value !== "string") continue;
-    const normalized = value.trim();
+    const normalized = value.trim().replace(/^['"]+|['"]+$/g, "");
     if (normalized) return normalized;
   }
   return "";
@@ -136,19 +144,20 @@ function oauthResultPage(status, extra = {}) {
 // Retorna a URL do OAuth da Meta para o frontend abrir em popup
 router.get("/crm-whatsapp/oauth/url", authenticate, (req, res) => {
   const metaAppId = getMetaAppId();
+  const metaAppSecret = getMetaAppSecret();
   const callbackUri = getCallbackUri();
 
-  if (!metaAppId) {
+  if (!metaAppId || !metaAppSecret) {
     return res.status(503).json({
       message:
         "A integração OAuth com a Meta ainda não está ativada neste servidor. " +
-        "Configure a variável META_APP_ID.",
+        "Configure as variáveis META_APP_ID e META_APP_SECRET.",
     });
   }
 
   const state = jwt.sign(
     { eid: getEstablishmentId(req), t: "waoauth" },
-    JWT_SECRET,
+    getJwtSecret(),
     { expiresIn: "15m" },
   );
 
@@ -181,7 +190,7 @@ router.get("/crm-whatsapp/oauth/callback", async (req, res) => {
 
   let establishmentId;
   try {
-    const decoded = jwt.verify(state, JWT_SECRET);
+    const decoded = jwt.verify(state, getJwtSecret());
     if (decoded.t !== "waoauth") throw new Error("type inválido");
     establishmentId = decoded.eid;
   } catch {

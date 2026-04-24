@@ -12,6 +12,7 @@ function getMetaAppId() {
   return readFirstValidEnv([
     "META_APP_ID",
     "METAAPP_ID",
+    "METAAPPID",
     "META_APPID",
     "META_APP_ID_ALT",
   ]);
@@ -21,6 +22,7 @@ function getMetaAppSecret() {
   return readFirstValidEnv([
     "META_APP_SECRET",
     "METAAPP_SECRET",
+    "METAAPPSECRET",
     "META_SECRET",
     "META_APP_SECRET_ALT",
   ]);
@@ -34,7 +36,7 @@ function readFirstValidEnv(keys = []) {
   for (const key of keys) {
     const value = process.env[key];
     if (typeof value !== "string") continue;
-    const normalized = value.trim();
+    const normalized = value.trim().replace(/^['"]+|['"]+$/g, "");
     if (normalized) return normalized;
   }
   return "";
@@ -130,9 +132,25 @@ router.get("/crm-whatsapp/status", authenticate, async (req, res) => {
     });
   } catch (error) {
     console.error("Erro ao buscar status do WhatsApp CRM:", error);
-    return res.status(500).json({
-      message: "Erro no servidor",
-      error: error.message,
+    return res.status(200).json({
+      message: "Status parcial do WhatsApp CRM (modo de contingencia)",
+      data: {
+        ...{
+          provider: "WhatsApp Cloud API",
+          configured: false,
+          connected: false,
+          recentMessages: 0,
+          lastWebhookAt: null,
+          webhookUrl: `${process.env.URL || ""}/webhook`,
+          phoneNumberId: "",
+          businessAccountId: "",
+          oauthAvailable: Boolean(getMetaAppId() && getMetaAppSecret()),
+          oauthConnectedAt: null,
+          tokenInvalid: false,
+          tokenErrorMessage: "",
+        },
+        degraded: true,
+      },
     });
   }
 });

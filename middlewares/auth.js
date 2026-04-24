@@ -1,6 +1,14 @@
 import jwt from "jsonwebtoken";
 import "dotenv/config";
-const JWT_SECRET = process.env.JWT_SECRET;
+
+function getJwtSecret() {
+  return (
+    process.env.JWT_SECRET ||
+    process.env.JWTSECRET ||
+    process.env.JWT_SECRET_KEY ||
+    "viapet_jwt_fallback_change_me"
+  );
+}
 
 const authenticate = (req, res, next) => {
   const token = req.headers.authorization?.split(" ")[1]; // Bearer <token>
@@ -12,7 +20,7 @@ const authenticate = (req, res, next) => {
   }
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(token, getJwtSecret());
     req.user = {
       id: decoded.id,
       role: decoded.role,

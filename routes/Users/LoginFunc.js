@@ -8,12 +8,20 @@ import EmailService from "../../service/email.js";
 import { readFirstAccessState } from "./Login.js";
 
 const router = express.Router();
-const JWT_SECRET = process.env.JWT_SECRET;
+
+function getJwtSecret() {
+  return (
+    process.env.JWT_SECRET ||
+    process.env.JWTSECRET ||
+    process.env.JWT_SECRET_KEY ||
+    "viapet_jwt_fallback_change_me"
+  );
+}
 
 function buildAuthToken(user) {
   return jwt.sign(
     { id: user.id, role: user.role, establishment: user.establishment },
-    JWT_SECRET,
+    getJwtSecret(),
     { expiresIn: "7d" },
   );
 }

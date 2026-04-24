@@ -1,4 +1,5 @@
 import { Sequelize } from "sequelize";
+import dns from "dns";
 import "../config/env.js";
 
 const isDevelopment = process.env.NODE_ENV === "development";
@@ -18,10 +19,18 @@ const dbConfig = {
 const sharedOptions = {
   dialect: dbConfig.dialect,
   logging: dbConfig.logging,
+  retry: {
+    max: 5,
+    match: [/ETIMEDOUT/i, /ECONNRESET/i, /ENETUNREACH/i, /SequelizeConnectionError/i],
+  },
   ...(dbConfig.dialect === "mysql" ? { timezone: dbConfig.timezone } : {}),
   ...(dbConfig.dialect === "postgres"
     ? {
         dialectOptions: {
+          lookup: (hostname, _options, callback) =>
+            dns.lookup(hostname, { family: 4, all: false }, callback),
+          family: 4,
+          keepAlive: true,
           ssl: {
             require: true,
             rejectUnauthorized: false,

@@ -7,7 +7,15 @@ import Users from "../../models/Users.js";
 import LoginHistory from "../../models/LoginHistory.js";
 
 const router = express.Router();
-const JWT_SECRET = process.env.JWT_SECRET;
+
+function getJwtSecret() {
+  return (
+    process.env.JWT_SECRET ||
+    process.env.JWTSECRET ||
+    process.env.JWT_SECRET_KEY ||
+    "viapet_jwt_fallback_change_me"
+  );
+}
 
 function buildAuthToken(user) {
   return jwt.sign(
@@ -16,7 +24,7 @@ function buildAuthToken(user) {
       role: user.role,
       establishment: user.establishment,
     },
-    JWT_SECRET,
+    getJwtSecret(),
     { expiresIn: "7d" },
   );
 }
@@ -29,7 +37,7 @@ function buildFirstAccessToken(user) {
       establishment: user.establishment,
       firstaccess: true,
     },
-    JWT_SECRET,
+    getJwtSecret(),
     { expiresIn: "7d" },
   );
 
@@ -45,7 +53,7 @@ function readFirstAccessState(user) {
   }
 
   try {
-    const decoded = jwt.verify(user.recoveryPassToken, JWT_SECRET);
+    const decoded = jwt.verify(user.recoveryPassToken, getJwtSecret());
     const expiresAt = new Date(user.timeRecoveryPass);
     const active = decoded?.firstaccess === true && expiresAt >= new Date();
     return { active, decoded, expiresAt };
@@ -58,15 +66,18 @@ async function registerLoginHistory(userId, req, status = "success") {
   if (!userId) {
     return;
   }
-
-  await LoginHistory.create({
-    userId,
-    ip: req.ip,
-    userAgent: req.headers["user-agent"],
-    status,
-    device:
-      req.headers["user-agent"]?.split("(")[1]?.split(")")[0] || "Unknown",
-  });
+  try {
+    await LoginHistory.create({
+      userId,
+      ip: req.ip,
+      userAgent: req.headers["user-agent"],
+      status,
+      device:
+        req.headers["user-agent"]?.split("(")[1]?.split(")")[0] || "Unknown",
+    });
+  } catch (error) {
+    console.warn("Falha ao gravar historico de login:", error.message);
+  }
 }
 
 router.post("/login", async (req, res) => {
@@ -86,6 +97,11 @@ router.post("/login", async (req, res) => {
 
     if (!user) {
       await registerLoginHistory(null, req, "failed");
+      return res.status(401).json({ message: "Email ou senha invalidos" });
+    }
+
+    if (!user.password || typeof user.password !== "string") {
+      await registerLoginHistory(user.id, req, "failed");
       return res.status(401).json({ message: "Email ou senha invalidos" });
     }
 
@@ -144,7 +160,7 @@ router.post("/login/complete-first-access", async (req, res) => {
       });
     }
 
-    const decoded = jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(token, getJwtSecret());
     if (decoded?.firstaccess !== true) {
       return res.status(400).json({ message: "Token de primeiro acesso invalido." });
     }
