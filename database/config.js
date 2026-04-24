@@ -126,9 +126,6 @@ const sharedOptions = {
   ...(dbConfig.dialect === "postgres"
     ? {
         dialectOptions: {
-          lookup: (hostname, _options, callback) =>
-            dns.lookup(hostname, { family: 4, all: false }, callback),
-          family: 4,
           keepAlive: true,
           ssl: {
             require: true,
