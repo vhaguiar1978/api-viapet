@@ -6,7 +6,7 @@ import Settings from "../models/Settings.js";
 
 const router = express.Router();
 const OAUTH_SCOPE =
-  "business_management,whatsapp_business_management,whatsapp_business_messaging";
+  "whatsapp_business_management,whatsapp_business_messaging";
 
 function getJwtSecret() {
   return readFirstValidEnv([
@@ -99,13 +99,13 @@ function getOauthErrorPresentation(reason = "") {
       return {
         message: "Nenhum numero de WhatsApp Business foi encontrado.",
         details:
-          "Confirme se o usuario tem um numero ativo na Meta e se o app possui business_management.",
+          "Confirme se o usuario tem um numero ativo na Meta e permissao para acessar a conta do WhatsApp Business.",
       };
     case "exchange_failed":
       return {
         message: "A Meta nao concluiu a conexao do WhatsApp.",
         details:
-          "Revise as permissoes business_management, whatsapp_business_management e whatsapp_business_messaging.",
+          "Revise as permissoes whatsapp_business_management e whatsapp_business_messaging.",
       };
     case "meta_env_missing":
       return {
