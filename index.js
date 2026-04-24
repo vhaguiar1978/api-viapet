@@ -38,16 +38,23 @@ import crmWhatsappRouter from "./routes/crmWhatsapp.js";
 import crmWhatsappOauthRouter from "./routes/crmWhatsappOauth.js";
 import crmConversationsRouter from "./routes/crmConversations.js";
 import crmBaileysRouter from "./routes/crmBaileys.js";
+import whatsappOfficialRouter from "./routes/whatsappOfficial.js";
 import FilterRouter from "./routes/filter.routes.js";
 import appointmentComandaRouter from "./routes/appointmentComanda.js";
 import vaccinePlansRouter from "./routes/vaccinePlans.js";
 process.env.TZ = "America/Sao_Paulo";
 const app = express();
+app.set("trust proxy", 1);
 // Aumenta o limite do body parser
-app.use(bodyParser.json({ limit: "10mb" }));
+app.use(
+  bodyParser.json({
+    limit: "10mb",
+    verify: (req, _res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
 app.use(bodyParser.urlencoded({ limit: "10mb", extended: true }));
-
-app.use(express.json());
 app.use(
   cors({
     // MODIFIED CORS CONFIGURATION - ALLOW ALL ORIGINS FOR TESTING - INSECURE FOR PRODUCTION!
@@ -82,6 +89,7 @@ app.use(salesRouter);
 app.use(appointmentRouter);
 app.use(adminRouter);
 app.use(whatsappRouter);
+app.use(whatsappOfficialRouter);
 app.use(financeRouter);
 app.use(personalFinanceRouter);
 app.use(driversRouter);

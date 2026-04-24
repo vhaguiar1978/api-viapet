@@ -67,9 +67,14 @@ async function registerLoginHistory(userId, req, status = "success") {
     return;
   }
   try {
+    const clientIp =
+      req.ip ||
+      req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
+      req.connection?.remoteAddress ||
+      "0.0.0.0";
     await LoginHistory.create({
       userId,
-      ip: req.ip,
+      ip: clientIp,
       userAgent: req.headers["user-agent"],
       status,
       device:
