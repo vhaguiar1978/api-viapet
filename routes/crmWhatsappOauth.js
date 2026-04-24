@@ -5,6 +5,8 @@ import authenticate from "../middlewares/auth.js";
 import Settings from "../models/Settings.js";
 
 const router = express.Router();
+const OAUTH_SCOPE =
+  "business_management,whatsapp_business_management,whatsapp_business_messaging";
 
 function getJwtSecret() {
   return readFirstValidEnv([
@@ -13,7 +15,10 @@ function getJwtSecret() {
     "JWT_SECRET_KEY",
   ]) || "viapet_jwt_fallback_change_me";
 }
-const FRONTEND_URL = String(process.env.FRONTEND_URL || "https://app.viapet.app").replace(/\/+$/, "");
+
+const FRONTEND_URL = String(
+  process.env.FRONTEND_URL || "https://app.viapet.app",
+).replace(/\/+$/, "");
 const WHATSAPP_MESSAGES_URL = `${FRONTEND_URL}/mensagens`;
 
 function getMetaAppId() {
@@ -37,7 +42,9 @@ function getMetaAppSecret() {
 }
 
 function getCallbackUri() {
-  const apiUrl = String(process.env.URL || process.env.API_URL || "http://localhost:4003").trim();
+  const apiUrl = String(
+    process.env.URL || process.env.API_URL || "http://localhost:4003",
+  ).trim();
   return `${apiUrl.replace(/\/+$/, "")}/crm-whatsapp/oauth/callback`;
 }
 
@@ -84,40 +91,113 @@ async function resolveSettingsOwner(req) {
   return { userId: preferredId, settings };
 }
 
-// Página HTML retornada ao popup após o OAuth
+function getOauthErrorPresentation(reason = "") {
+  const normalizedReason = String(reason || "").trim().toLowerCase();
+
+  switch (normalizedReason) {
+    case "no_phone_numbers":
+      return {
+        message: "Nenhum numero de WhatsApp Business foi encontrado.",
+        details:
+          "Confirme se o usuario tem um numero ativo na Meta e se o app possui business_management.",
+      };
+    case "exchange_failed":
+      return {
+        message: "A Meta nao concluiu a conexao do WhatsApp.",
+        details:
+          "Revise as permissoes business_management, whatsapp_business_management e whatsapp_business_messaging.",
+      };
+    case "meta_env_missing":
+      return {
+        message: "A conexao da Meta nao esta configurada no servidor.",
+        details:
+          "Cadastre META_APP_ID e META_APP_SECRET no ambiente da API antes de tentar novamente.",
+      };
+    case "invalid_state":
+      return {
+        message: "A sessao de conexao expirou.",
+        details:
+          "Abra a integracao novamente no ViaPet e refaca a conexao com a Meta.",
+      };
+    case "missing_params":
+      return {
+        message: "A Meta nao devolveu os dados da conexao.",
+        details: "Refaca a conexao pelo botao da Meta para gerar um novo retorno.",
+      };
+    case "cancelled":
+      return {
+        message: "A conexao com a Meta foi cancelada.",
+        details:
+          "Se quiser continuar, abra a integracao novamente e conclua todas as etapas.",
+      };
+    default:
+      return {
+        message: "Erro ao conectar. Tente novamente.",
+        details:
+          "Se o erro continuar, revise as permissoes e o numero configurado na Meta.",
+      };
+  }
+}
+
 function oauthResultPage(status, extra = {}) {
-  const payload = JSON.stringify({ type: "whatsapp_oauth", status, ...extra });
-  const fallbackTarget = `${WHATSAPP_MESSAGES_URL}?waoauth=${encodeURIComponent(status)}`;
+  const normalizedStatus = String(status || "").trim().toLowerCase();
+  const reason = String(extra?.reason || "").trim().toLowerCase();
+  const payload = JSON.stringify({
+    type: "whatsapp_oauth",
+    status: normalizedStatus,
+    ...extra,
+  });
+  const fallbackParams = new URLSearchParams({
+    waoauth: normalizedStatus,
+  });
+
+  if (reason) {
+    fallbackParams.set("waoauth_reason", reason);
+  }
+
+  const fallbackTarget = `${WHATSAPP_MESSAGES_URL}?${fallbackParams.toString()}`;
   const fallbackTargetJs = JSON.stringify(fallbackTarget);
-  const icon = status === "connected" ? "✅" : status === "select" ? "📱" : "❌";
-  const msg =
-    status === "connected"
+  const icon =
+    normalizedStatus === "connected"
+      ? "OK"
+      : normalizedStatus === "select"
+        ? "..."
+        : "X";
+  const errorPresentation = getOauthErrorPresentation(reason);
+  const message =
+    normalizedStatus === "connected"
       ? "WhatsApp conectado com sucesso!"
-      : status === "select"
-      ? "Selecione o número no ViaPet."
-      : "Erro ao conectar. Tente novamente.";
+      : normalizedStatus === "select"
+        ? "Selecione o numero no ViaPet."
+        : errorPresentation.message;
+  const subtitle =
+    normalizedStatus === "connected"
+      ? "Voce sera redirecionado automaticamente para o ViaPet."
+      : normalizedStatus === "select"
+        ? "Abra o ViaPet para escolher qual numero deseja usar no CRM."
+        : errorPresentation.details;
 
   return `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
   <meta charset="utf-8">
-  <title>WhatsApp — ViaPet</title>
+  <title>WhatsApp - ViaPet</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; display: flex;
            align-items: center; justify-content: center; height: 100vh; margin: 0;
            background: #f4f4f5; }
     .card { text-align: center; padding: 40px 48px; background: #fff;
-            border-radius: 16px; box-shadow: 0 4px 24px rgba(0,0,0,.08); }
-    .icon { font-size: 40px; margin-bottom: 12px; }
+            border-radius: 16px; box-shadow: 0 4px 24px rgba(0,0,0,.08); max-width: 520px; }
+    .icon { font-size: 40px; margin-bottom: 12px; color: #111; font-weight: 700; }
     p { margin: 0 0 8px; font-size: 16px; color: #111; font-weight: 500; }
-    small { color: #888; font-size: 13px; }
+    small { color: #666; font-size: 13px; line-height: 1.5; display: block; }
   </style>
 </head>
 <body>
   <div class="card">
     <div class="icon">${icon}</div>
-    <p>${msg}</p>
-    <small>Voce sera redirecionado automaticamente para o ViaPet.</small>
+    <p>${message}</p>
+    <small>${subtitle}</small>
     <p style="margin-top:14px;">
       <a href="${fallbackTarget}" style="color:#4f46e5;text-decoration:none;font-weight:600;">
         Voltar para Mensagens
@@ -132,7 +212,7 @@ function oauthResultPage(status, extra = {}) {
       } else {
         window.location.replace(${fallbackTargetJs});
       }
-    } catch(e) {
+    } catch (error) {
       window.location.replace(${fallbackTargetJs});
     }
   </script>
@@ -140,8 +220,6 @@ function oauthResultPage(status, extra = {}) {
 </html>`;
 }
 
-// ─── GET /crm-whatsapp/oauth/url ─────────────────────────────────────────────
-// Retorna a URL do OAuth da Meta para o frontend abrir em popup
 router.get("/crm-whatsapp/oauth/url", authenticate, (req, res) => {
   const metaAppId = getMetaAppId();
   const callbackUri = getCallbackUri();
@@ -150,8 +228,8 @@ router.get("/crm-whatsapp/oauth/url", authenticate, (req, res) => {
     return res.status(200).json({
       oauthAvailable: false,
       message:
-        "A integração OAuth com a Meta ainda não está ativada neste servidor. " +
-        "Configure as variáveis META_APP_ID e META_APP_SECRET.",
+        "A integracao OAuth com a Meta ainda nao esta ativada neste servidor. " +
+        "Configure as variaveis META_APP_ID e META_APP_SECRET.",
     });
   }
 
@@ -164,16 +242,16 @@ router.get("/crm-whatsapp/oauth/url", authenticate, (req, res) => {
   const params = new URLSearchParams({
     client_id: metaAppId,
     redirect_uri: callbackUri,
-    scope: "whatsapp_business_management,whatsapp_business_messaging",
+    scope: OAUTH_SCOPE,
     state,
     response_type: "code",
   });
 
-  return res.json({ url: `https://www.facebook.com/dialog/oauth?${params.toString()}` });
+  return res.json({
+    url: `https://www.facebook.com/dialog/oauth?${params.toString()}`,
+  });
 });
 
-// ─── GET /crm-whatsapp/oauth/callback ────────────────────────────────────────
-// Meta redireciona aqui após o login do usuário (rota pública)
 router.get("/crm-whatsapp/oauth/callback", async (req, res) => {
   const metaAppId = getMetaAppId();
   const metaAppSecret = getMetaAppSecret();
@@ -181,7 +259,7 @@ router.get("/crm-whatsapp/oauth/callback", async (req, res) => {
   const { code, state, error } = req.query;
 
   if (error) {
-    return res.send(oauthResultPage("cancelled"));
+    return res.send(oauthResultPage("cancelled", { reason: "cancelled" }));
   }
 
   if (!code || !state) {
@@ -191,29 +269,31 @@ router.get("/crm-whatsapp/oauth/callback", async (req, res) => {
   let establishmentId;
   try {
     const decoded = jwt.verify(state, getJwtSecret());
-    if (decoded.t !== "waoauth") throw new Error("type inválido");
+    if (decoded.t !== "waoauth") {
+      throw new Error("Tipo de state invalido");
+    }
     establishmentId = decoded.eid;
   } catch {
     return res.send(oauthResultPage("error", { reason: "invalid_state" }));
   }
 
   try {
-    // 1. Troca code → access token
     if (!metaAppId || !metaAppSecret) {
       return res.send(oauthResultPage("error", { reason: "meta_env_missing" }));
     }
 
-    const tokenRes = await axios.get("https://graph.facebook.com/oauth/access_token", {
-      params: {
-        client_id: metaAppId,
-        client_secret: metaAppSecret,
-        redirect_uri: callbackUri,
-        code,
+    const tokenRes = await axios.get(
+      "https://graph.facebook.com/oauth/access_token",
+      {
+        params: {
+          client_id: metaAppId,
+          client_secret: metaAppSecret,
+          redirect_uri: callbackUri,
+          code,
+        },
       },
-    });
+    );
     const accessToken = tokenRes.data.access_token;
-
-    // 2. Coleta todos os números de telefone disponíveis nas WABAs do usuário
     const phoneNumbers = await collectPhoneNumbers(accessToken);
 
     if (phoneNumbers.length === 0) {
@@ -229,7 +309,6 @@ router.get("/crm-whatsapp/oauth/callback", async (req, res) => {
     }
 
     if (phoneNumbers.length === 1) {
-      // Um único número → conecta diretamente
       const { phoneNumberId, businessAccountId } = phoneNumbers[0];
       settings.whatsappConnection = buildConnectedConfig(
         settings.whatsappConnection,
@@ -239,13 +318,13 @@ router.get("/crm-whatsapp/oauth/callback", async (req, res) => {
       return res.send(oauthResultPage("connected"));
     }
 
-    // Múltiplos números → armazena para o usuário escolher
     settings.whatsappConnection = {
       ...(settings.whatsappConnection || {}),
       pendingOauthToken: accessToken,
       pendingOauthPhones: phoneNumbers,
     };
     await settings.save();
+
     return res.send(oauthResultPage("select"));
   } catch (err) {
     console.error("[OAUTH] Erro no callback:", err.response?.data || err.message);
@@ -253,8 +332,6 @@ router.get("/crm-whatsapp/oauth/callback", async (req, res) => {
   }
 });
 
-// ─── GET /crm-whatsapp/oauth/pending-phones ──────────────────────────────────
-// Retorna a lista de números pendentes de seleção
 router.get("/crm-whatsapp/oauth/pending-phones", authenticate, async (req, res) => {
   try {
     const { settings } = await resolveSettingsOwner(req);
@@ -265,31 +342,33 @@ router.get("/crm-whatsapp/oauth/pending-phones", authenticate, async (req, res) 
   }
 });
 
-// ─── POST /crm-whatsapp/oauth/select-phone ───────────────────────────────────
-// Usuário escolhe qual número usar quando há múltiplos disponíveis
 router.post("/crm-whatsapp/oauth/select-phone", authenticate, async (req, res) => {
   try {
     const { phoneNumberId } = req.body || {};
     const { settings } = await resolveSettingsOwner(req);
     if (!settings) {
-      return res.status(404).json({ message: "Configurações não encontradas" });
+      return res.status(404).json({ message: "Configuracoes nao encontradas" });
     }
 
     const phones = settings.whatsappConnection?.pendingOauthPhones || [];
-    const selected = phones.find((p) => p.phoneNumberId === phoneNumberId);
+    const selected = phones.find((phone) => phone.phoneNumberId === phoneNumberId);
     if (!selected) {
-      return res.status(400).json({ message: "Número não encontrado na lista pendente" });
+      return res.status(400).json({ message: "Numero nao encontrado na lista pendente" });
     }
 
     const accessToken = settings.whatsappConnection?.pendingOauthToken || "";
     settings.whatsappConnection = buildConnectedConfig(
       settings.whatsappConnection,
-      { phoneNumberId: selected.phoneNumberId, businessAccountId: selected.businessAccountId, accessToken },
+      {
+        phoneNumberId: selected.phoneNumberId,
+        businessAccountId: selected.businessAccountId,
+        accessToken,
+      },
     );
     await settings.save();
 
     return res.json({
-      message: "Número conectado com sucesso",
+      message: "Numero conectado com sucesso",
       data: {
         phoneNumberId: selected.phoneNumberId,
         displayPhone: selected.displayPhone,
@@ -301,13 +380,11 @@ router.post("/crm-whatsapp/oauth/select-phone", authenticate, async (req, res) =
   }
 });
 
-// ─── DELETE /crm-whatsapp/oauth/disconnect ───────────────────────────────────
-// Desconecta o WhatsApp do estabelecimento
 router.delete("/crm-whatsapp/oauth/disconnect", authenticate, async (req, res) => {
   try {
     const { settings } = await resolveSettingsOwner(req);
     if (!settings) {
-      return res.status(404).json({ message: "Configurações não encontradas" });
+      return res.status(404).json({ message: "Configuracoes nao encontradas" });
     }
 
     settings.whatsappConnection = {
@@ -328,8 +405,6 @@ router.delete("/crm-whatsapp/oauth/disconnect", authenticate, async (req, res) =
   }
 });
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
 function buildConnectedConfig(current = {}, { phoneNumberId, businessAccountId, accessToken }) {
   return {
     ...current,
@@ -348,18 +423,28 @@ function buildConnectedConfig(current = {}, { phoneNumberId, businessAccountId, 
 
 async function collectPhoneNumbers(accessToken) {
   const phoneNumbers = [];
+  const errors = [];
 
-  // Tentativa 1: via /me/businesses → WABAs → phone_numbers
   try {
     const bizRes = await axios.get("https://graph.facebook.com/v21.0/me/businesses", {
-      params: { access_token: accessToken, fields: "id,name" },
+      params: {
+        access_token: accessToken,
+        fields: "id,name",
+      },
     });
+
     for (const biz of bizRes.data.data || []) {
       try {
         const wabaRes = await axios.get(
           `https://graph.facebook.com/v21.0/${biz.id}/owned_whatsapp_business_accounts`,
-          { params: { access_token: accessToken, fields: "id,name" } },
+          {
+            params: {
+              access_token: accessToken,
+              fields: "id,name",
+            },
+          },
         );
+
         for (const waba of wabaRes.data.data || []) {
           try {
             const phonesRes = await axios.get(
@@ -371,25 +456,33 @@ async function collectPhoneNumbers(accessToken) {
                 },
               },
             );
-            for (const p of phonesRes.data.data || []) {
+
+            for (const phone of phonesRes.data.data || []) {
               phoneNumbers.push({
-                phoneNumberId: p.id,
-                displayPhone: p.display_phone_number,
-                verifiedName: p.verified_name || "",
-                qualityRating: p.quality_rating || "UNKNOWN",
+                phoneNumberId: phone.id,
+                displayPhone: phone.display_phone_number,
+                verifiedName: phone.verified_name || "",
+                qualityRating: phone.quality_rating || "UNKNOWN",
                 businessAccountId: waba.id,
                 businessName: waba.name || biz.name || "",
               });
             }
-          } catch {}
+          } catch (error) {
+            errors.push(error.response?.data || error.message);
+          }
         }
-      } catch {}
+      } catch (error) {
+        errors.push(error.response?.data || error.message);
+      }
     }
-  } catch {}
+  } catch (error) {
+    errors.push(error.response?.data || error.message);
+  }
 
-  if (phoneNumbers.length > 0) return phoneNumbers;
+  if (phoneNumbers.length > 0) {
+    return phoneNumbers;
+  }
 
-  // Tentativa 2 (fallback): via /me/whatsapp_business_accounts com phone_numbers embutidos
   try {
     const directRes = await axios.get(
       "https://graph.facebook.com/v21.0/me/whatsapp_business_accounts",
@@ -401,19 +494,26 @@ async function collectPhoneNumbers(accessToken) {
         },
       },
     );
+
     for (const waba of directRes.data.data || []) {
-      for (const p of waba.phone_numbers?.data || []) {
+      for (const phone of waba.phone_numbers?.data || []) {
         phoneNumbers.push({
-          phoneNumberId: p.id,
-          displayPhone: p.display_phone_number,
-          verifiedName: p.verified_name || "",
-          qualityRating: p.quality_rating || "UNKNOWN",
+          phoneNumberId: phone.id,
+          displayPhone: phone.display_phone_number,
+          verifiedName: phone.verified_name || "",
+          qualityRating: phone.quality_rating || "UNKNOWN",
           businessAccountId: waba.id,
           businessName: waba.name || "",
         });
       }
     }
-  } catch {}
+  } catch (error) {
+    errors.push(error.response?.data || error.message);
+  }
+
+  if (phoneNumbers.length === 0 && errors.length > 0) {
+    console.error("[OAUTH] Nenhum numero retornado pela Meta:", errors);
+  }
 
   return phoneNumbers;
 }
