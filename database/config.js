@@ -2,6 +2,15 @@ import { Sequelize } from "sequelize";
 import dns from "dns";
 import "../config/env.js";
 
+// Render + Supabase podem retornar IPv6 primeiro; forçamos IPv4 para evitar ENETUNREACH.
+if (typeof dns.setDefaultResultOrder === "function") {
+  try {
+    dns.setDefaultResultOrder("ipv4first");
+  } catch (_error) {
+    // noop
+  }
+}
+
 const isDevelopment = process.env.NODE_ENV === "development";
 const hasDatabaseUrl = Boolean(process.env.DATABASE_URL);
 
