@@ -2,6 +2,16 @@ import { Sequelize } from "sequelize";
 import dns from "dns";
 import "../config/env.js";
 
+function firstValidEnv(...keys) {
+  for (const key of keys) {
+    const value = process.env[key];
+    if (Boolean(value) && value !== "undefined" && value !== "null") {
+      return value;
+    }
+  }
+  return undefined;
+}
+
 // Render + Supabase podem retornar IPv6 primeiro; forçamos IPv4 para evitar ENETUNREACH.
 if (typeof dns.setDefaultResultOrder === "function") {
   try {
@@ -52,7 +62,15 @@ function isValidEnvString(val) {
   return Boolean(val) && val !== "undefined" && val !== "null";
 }
 
-const hasDatabaseUrl = isValidEnvString(process.env.DATABASE_URL);
+const resolvedEnvDatabaseUrl = firstValidEnv(
+  "DATABASE_URL",
+  "POSTGRES_URL",
+  "POSTGRES_PRISMA_URL",
+  "SUPABASE_DATABASE_URL",
+  "SUPABASE_DB_URL",
+);
+
+const hasDatabaseUrl = isValidEnvString(resolvedEnvDatabaseUrl);
 
 function normalizeDatabaseUrl(rawUrl) {
   if (!rawUrl) {
@@ -85,13 +103,13 @@ function normalizeDatabaseUrl(rawUrl) {
 }
 
 const dbConfig = {
-  database: process.env.DB_NAME,
-  username: process.env.DB_USER,
-  password: process.env.DB_PASS,
+  database: firstValidEnv("DB_NAME", "PGDATABASE", "POSTGRES_DATABASE"),
+  username: firstValidEnv("DB_USER", "PGUSER", "POSTGRES_USER"),
+  password: firstValidEnv("DB_PASS", "PGPASSWORD", "POSTGRES_PASSWORD"),
   host: isDevelopment
-    ? (isValidEnvString(process.env.DB_HOST) ? process.env.DB_HOST : "localhost")
-    : (isValidEnvString(process.env.DB_HOST) ? process.env.DB_HOST : undefined),
-  port: process.env.DB_PORT || 3306,
+    ? (firstValidEnv("DB_HOST", "PGHOST", "POSTGRES_HOST") || "localhost")
+    : firstValidEnv("DB_HOST", "PGHOST", "POSTGRES_HOST"),
+  port: firstValidEnv("DB_PORT", "PGPORT", "POSTGRES_PORT") || 3306,
   dialect: process.env.DB_DIALECT || (hasDatabaseUrl ? "postgres" : "mysql"),
   logging: isDevelopment ? console.log : false,
   timezone: "-03:00",
@@ -128,7 +146,7 @@ const sharedOptions = {
 };
 
 const resolvedDatabaseUrl = hasDatabaseUrl
-  ? normalizeDatabaseUrl(process.env.DATABASE_URL)
+  ? normalizeDatabaseUrl(resolvedEnvDatabaseUrl)
   : null;
 
 const sequelize = hasDatabaseUrl

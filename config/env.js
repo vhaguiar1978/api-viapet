@@ -3,6 +3,16 @@ import path from "path";
 import { fileURLToPath } from "url";
 import dns from "dns";
 
+function firstValidEnv(...keys) {
+  for (const key of keys) {
+    const value = process.env[key];
+    if (Boolean(value) && value !== "undefined" && value !== "null") {
+      return value;
+    }
+  }
+  return undefined;
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -22,14 +32,22 @@ try {
   console.warn("Nao foi possivel ajustar DNS para ipv4first:", error.message);
 }
 
+const resolvedDatabaseUrl = firstValidEnv(
+  "DATABASE_URL",
+  "POSTGRES_URL",
+  "POSTGRES_PRISMA_URL",
+  "SUPABASE_DATABASE_URL",
+  "SUPABASE_DB_URL",
+);
+
 console.log(`Ambiente: ${process.env.NODE_ENV || "production"}`);
 console.log(`Arquivo de configuracao: ${envFile}`);
 
-if (process.env.DATABASE_URL) {
+if (resolvedDatabaseUrl) {
   console.log("Banco de dados configurado via DATABASE_URL");
 } else {
   console.log(
-    `Banco de dados: ${process.env.DB_HOST}:${process.env.DB_PORT}/${process.env.DB_NAME}`
+    `Banco de dados: ${firstValidEnv("DB_HOST", "PGHOST", "POSTGRES_HOST")}:${firstValidEnv("DB_PORT", "PGPORT", "POSTGRES_PORT")}/${firstValidEnv("DB_NAME", "PGDATABASE", "POSTGRES_DATABASE")}`
   );
 }
 
