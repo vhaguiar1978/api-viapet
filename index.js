@@ -323,12 +323,48 @@ async function ensureWhatsappHubSchema() {
   }
 }
 
+async function ensureCrmConversationsSchema() {
+  const queryInterface = sequelize.getQueryInterface();
+
+  async function ensureColumn(tableName, tableSchema, columnName, definition) {
+    if (tableSchema[columnName]) return;
+    await queryInterface.addColumn(tableName, columnName, definition);
+    console.log(`Coluna ${columnName} adicionada em ${tableName}`);
+  }
+
+  try {
+    const conversationsTable = await queryInterface.describeTable("crm_conversations");
+    await ensureColumn("crm_conversations", conversationsTable, "companyId", {
+      type: DataTypes.UUID,
+      allowNull: true,
+    });
+    await ensureColumn("crm_conversations", conversationsTable, "stage", {
+      type: DataTypes.STRING,
+      allowNull: false,
+      defaultValue: "prospectar",
+    });
+  } catch (error) {
+    console.error("Nao foi possivel validar o schema de crm_conversations:", error);
+  }
+
+  try {
+    const conversationMessagesTable = await queryInterface.describeTable("crm_conversation_messages");
+    await ensureColumn("crm_conversation_messages", conversationMessagesTable, "companyId", {
+      type: DataTypes.UUID,
+      allowNull: true,
+    });
+  } catch (error) {
+    console.error("Nao foi possivel validar o schema de crm_conversation_messages:", error);
+  }
+}
+
 sequelize
   .sync()
   .then(async () => {
     await ensureUsersSchema();
     await ensureAppointmentSchema();
     await ensureWhatsappHubSchema();
+    await ensureCrmConversationsSchema();
     console.log("Conectado ao banco de dados");
   })
   .catch((erro) => {
