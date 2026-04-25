@@ -13,6 +13,10 @@ const CrmConversation = sequelize.define(
       type: DataTypes.UUID,
       allowNull: false,
     },
+    companyId: {
+      type: DataTypes.UUID,
+      allowNull: true,
+    },
     customerId: {
       type: DataTypes.UUID,
       allowNull: true,
@@ -34,6 +38,11 @@ const CrmConversation = sequelize.define(
       type: DataTypes.STRING,
       allowNull: false,
       defaultValue: "pending",
+    },
+    stage: {
+      type: DataTypes.STRING,
+      allowNull: false,
+      defaultValue: "prospectar",
     },
     source: {
       type: DataTypes.STRING,

@@ -17,6 +17,10 @@ const CrmConversationMessage = sequelize.define(
       type: DataTypes.UUID,
       allowNull: false,
     },
+    companyId: {
+      type: DataTypes.UUID,
+      allowNull: true,
+    },
     customerId: {
       type: DataTypes.UUID,
       allowNull: true,

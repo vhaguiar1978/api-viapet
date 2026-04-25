@@ -29,7 +29,15 @@ const WhatsappMessage = sequelize.define(
       type: DataTypes.UUID,
       allowNull: true,
     },
+    phone: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
     metaMessageId: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    externalMessageId: {
       type: DataTypes.STRING,
       allowNull: true,
     },
@@ -38,10 +46,19 @@ const WhatsappMessage = sequelize.define(
       allowNull: false,
       defaultValue: "inbound",
     },
+    origin: {
+      type: DataTypes.STRING,
+      allowNull: false,
+      defaultValue: "api",
+    },
     messageType: {
       type: DataTypes.STRING,
       allowNull: false,
       defaultValue: "text",
+    },
+    templateName: {
+      type: DataTypes.STRING,
+      allowNull: true,
     },
     body: {
       type: DataTypes.TEXT,
@@ -59,6 +76,10 @@ const WhatsappMessage = sequelize.define(
       type: DataTypes.STRING,
       allowNull: false,
       defaultValue: "received",
+    },
+    errorMessage: {
+      type: DataTypes.TEXT,
+      allowNull: true,
     },
     rawPayload: {
       type: DataTypes.JSON,

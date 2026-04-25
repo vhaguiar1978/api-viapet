@@ -27,6 +27,15 @@ const WhatsappWebhookLog = sequelize.define(
       allowNull: false,
       defaultValue: "unknown",
     },
+    logType: {
+      type: DataTypes.STRING,
+      allowNull: false,
+      defaultValue: "event",
+    },
+    description: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    },
     processed: {
       type: DataTypes.BOOLEAN,
       allowNull: false,

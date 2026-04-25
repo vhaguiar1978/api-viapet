@@ -17,7 +17,20 @@ const WhatsappConnection = sequelize.define(
       type: DataTypes.UUID,
       allowNull: true,
     },
+    integrationMode: {
+      type: DataTypes.STRING,
+      allowNull: false,
+      defaultValue: "simple",
+    },
+    businessId: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
     wabaId: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    businessName: {
       type: DataTypes.STRING,
       allowNull: true,
     },
@@ -50,6 +63,10 @@ const WhatsappConnection = sequelize.define(
       type: DataTypes.STRING,
       allowNull: false,
       defaultValue: "disconnected",
+    },
+    connectedAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
     },
     lastEventAt: {
       type: DataTypes.DATE,

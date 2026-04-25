@@ -17,6 +17,7 @@ function getGlobalFallback() {
       process.env.WHATSAPP_ACCESS_TOKEN ||
       process.env.WHATSAPP_TOKEN ||
       "",
+    businessId: process.env.META_BUSINESS_ID || "",
     phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID || "",
     wabaId: process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || "",
     verifyToken: defaultVerifyToken(),
@@ -38,8 +39,11 @@ export async function getOrCreateConnection(companyId) {
     connection = await WhatsappConnection.create({
       companyId,
       usersId: companyId,
+      integrationMode: String(legacy.integrationMode || "simple").trim() || "simple",
+      businessId: legacy.businessId || fallback.businessId || "",
       phoneNumberId: legacy.phoneNumberId || fallback.phoneNumberId || "",
       wabaId: legacy.businessAccountId || fallback.wabaId || "",
+      businessName: legacy.businessName || "",
       verifyToken: legacy.verifyToken || fallback.verifyToken,
       businessPhone:
         legacy.businessPhone ||
@@ -47,7 +51,8 @@ export async function getOrCreateConnection(companyId) {
         legacy.accountSettings?.supportWhatsapp ||
         "",
       webhookVerified: Boolean(legacy.webhookVerified),
-      status: legacy.phoneNumberId ? "connected" : "disconnected",
+      status: legacy.phoneNumberId ? "connected" : "ready",
+      connectedAt: legacy.oauthConnectedAt || null,
       accessTokenEncrypted: token ? encryptToken(token) : "",
       accessTokenLast4: maskToken(token),
       metadata: {},
@@ -125,8 +130,20 @@ export async function upsertConnectionForCompany(companyId, payload = {}) {
   const verifyToken = String(payload.verifyToken || current.verifyToken || defaultVerifyToken()).trim();
   await current.update({
     usersId: companyId,
+    integrationMode:
+      payload.integrationMode !== undefined
+        ? String(payload.integrationMode || "simple").trim() || "simple"
+        : current.integrationMode,
+    businessId:
+      payload.businessId !== undefined
+        ? String(payload.businessId || "").trim()
+        : current.businessId,
     wabaId:
       payload.wabaId !== undefined ? String(payload.wabaId || "").trim() : current.wabaId,
+    businessName:
+      payload.businessName !== undefined
+        ? String(payload.businessName || "").trim()
+        : current.businessName,
     phoneNumberId:
       payload.phoneNumberId !== undefined
         ? String(payload.phoneNumberId || "").trim()
@@ -150,8 +167,10 @@ export async function upsertConnectionForCompany(companyId, payload = {}) {
         : current.webhookVerified,
     status:
       payload.status !== undefined
-        ? String(payload.status || "disconnected")
+        ? String(payload.status || "ready")
         : current.status,
+    connectedAt:
+      payload.connectedAt !== undefined ? payload.connectedAt : current.connectedAt,
     lastEventAt:
       payload.lastEventAt !== undefined ? payload.lastEventAt : current.lastEventAt,
     lastError:
@@ -167,6 +186,9 @@ export async function upsertConnectionForCompany(companyId, payload = {}) {
     settings.whatsappConnection = {
       ...(settings.whatsappConnection || {}),
       provider: "WhatsApp Cloud API",
+      integrationMode: current.integrationMode || payload.integrationMode || "simple",
+      businessId: current.businessId || payload.businessId || "",
+      businessName: current.businessName || payload.businessName || "",
       phoneNumberId: current.phoneNumberId,
       businessAccountId: current.wabaId,
       verifyToken,
@@ -180,6 +202,7 @@ export async function upsertConnectionForCompany(companyId, payload = {}) {
         : {}),
       webhookVerified: Boolean(current.webhookVerified),
       status: current.status,
+      oauthConnectedAt: current.connectedAt || payload.connectedAt || null,
       lastWebhookAt: payload.lastEventAt || current.lastEventAt || null,
       tokenInvalid: false,
       tokenErrorMessage: "",
@@ -198,6 +221,7 @@ export async function disconnectConnection(companyId) {
     accessToken: "",
     status: "disconnected",
     webhookVerified: false,
+    connectedAt: null,
     lastError: null,
     metadata: {},
   });

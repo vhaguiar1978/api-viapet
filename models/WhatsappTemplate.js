@@ -21,6 +21,10 @@ const WhatsappTemplate = sequelize.define(
       type: DataTypes.STRING,
       allowNull: false,
     },
+    title: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
     language: {
       type: DataTypes.STRING,
       allowNull: false,
@@ -34,6 +38,30 @@ const WhatsappTemplate = sequelize.define(
       type: DataTypes.STRING,
       allowNull: false,
       defaultValue: "active",
+    },
+    body: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    },
+    variables: {
+      type: DataTypes.JSON,
+      allowNull: false,
+      defaultValue: [],
+    },
+    active: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: true,
+    },
+    isSystem: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
+    },
+    sortOrder: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      defaultValue: 0,
     },
     components: {
       type: DataTypes.JSON,

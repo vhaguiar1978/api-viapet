@@ -10,6 +10,7 @@ export async function findOrCreateConversation({
   pet = null,
   contactName = "",
   stage = "prospectar",
+  source = "whatsapp-cloud-api",
 }) {
   const normalizedPhone = normalizePhone(phone);
   let conversation = null;
@@ -48,7 +49,7 @@ export async function findOrCreateConversation({
       petId: pet?.id || null,
       phone: normalizedPhone,
       channel: "whatsapp",
-      source: "whatsapp-cloud-api",
+      source,
       status: "pending",
       stage,
       title,
@@ -74,6 +75,7 @@ export async function findOrCreateConversation({
       petName: pet?.name || conversation.petName,
       phone: normalizedPhone || conversation.phone,
       stage: conversation.stage || stage,
+      source: conversation.source || source,
     });
   }
 

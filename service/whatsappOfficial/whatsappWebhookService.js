@@ -162,6 +162,8 @@ export async function processWebhookPayload(payload = {}) {
     await WhatsappWebhookLog.create({
       payloadJson: payload || {},
       eventType: "empty",
+      logType: "webhook",
+      description: "Webhook recebido sem eventos processaveis.",
       processed: true,
     });
     return { events: 0 };
@@ -172,6 +174,8 @@ export async function processWebhookPayload(payload = {}) {
     const webhookLog = await WhatsappWebhookLog.create({
       payloadJson: event.payload || {},
       eventType: event.eventType || "unknown",
+      logType: "webhook",
+      description: `Evento ${event.eventType || "unknown"} recebido da Meta.`,
       processed: false,
     });
 
@@ -224,8 +228,10 @@ export async function processWebhookPayload(payload = {}) {
           conversationId: conversation.id,
           customerId: customer?.id || null,
           petId: pet?.id || null,
+          phone: event.from,
           metaMessageId: event.messageId,
           direction: "inbound",
+          origin: "api",
           messageType: event.messageType,
           body: event.body,
           mediaUrl: event.mediaUrl,
