@@ -214,11 +214,121 @@ async function ensureUsersSchema() {
   }
 }
 
+async function ensureWhatsappHubSchema() {
+  const queryInterface = sequelize.getQueryInterface();
+
+  async function ensureColumn(tableName, tableSchema, columnName, definition) {
+    if (tableSchema[columnName]) return;
+    await queryInterface.addColumn(tableName, columnName, definition);
+    console.log(`Coluna ${columnName} adicionada em ${tableName}`);
+  }
+
+  try {
+    const connectionsTable = await queryInterface.describeTable("whatsapp_connections");
+    await ensureColumn("whatsapp_connections", connectionsTable, "integrationMode", {
+      type: DataTypes.STRING,
+      allowNull: false,
+      defaultValue: "simple",
+    });
+    await ensureColumn("whatsapp_connections", connectionsTable, "businessId", {
+      type: DataTypes.STRING,
+      allowNull: true,
+    });
+    await ensureColumn("whatsapp_connections", connectionsTable, "businessName", {
+      type: DataTypes.STRING,
+      allowNull: true,
+    });
+    await ensureColumn("whatsapp_connections", connectionsTable, "connectedAt", {
+      type: DataTypes.DATE,
+      allowNull: true,
+    });
+  } catch (error) {
+    console.error("Nao foi possivel validar o schema de whatsapp_connections:", error);
+  }
+
+  try {
+    const messagesTable = await queryInterface.describeTable("whatsapp_messages");
+    await ensureColumn("whatsapp_messages", messagesTable, "phone", {
+      type: DataTypes.STRING,
+      allowNull: true,
+    });
+    await ensureColumn("whatsapp_messages", messagesTable, "origin", {
+      type: DataTypes.STRING,
+      allowNull: false,
+      defaultValue: "api",
+    });
+    await ensureColumn("whatsapp_messages", messagesTable, "externalMessageId", {
+      type: DataTypes.STRING,
+      allowNull: true,
+    });
+    await ensureColumn("whatsapp_messages", messagesTable, "templateName", {
+      type: DataTypes.STRING,
+      allowNull: true,
+    });
+    await ensureColumn("whatsapp_messages", messagesTable, "errorMessage", {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    });
+  } catch (error) {
+    console.error("Nao foi possivel validar o schema de whatsapp_messages:", error);
+  }
+
+  try {
+    const templatesTable = await queryInterface.describeTable("whatsapp_templates");
+    await ensureColumn("whatsapp_templates", templatesTable, "title", {
+      type: DataTypes.STRING,
+      allowNull: true,
+    });
+    await ensureColumn("whatsapp_templates", templatesTable, "body", {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    });
+    await ensureColumn("whatsapp_templates", templatesTable, "variables", {
+      type: DataTypes.JSON,
+      allowNull: false,
+      defaultValue: [],
+    });
+    await ensureColumn("whatsapp_templates", templatesTable, "active", {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: true,
+    });
+    await ensureColumn("whatsapp_templates", templatesTable, "isSystem", {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
+    });
+    await ensureColumn("whatsapp_templates", templatesTable, "sortOrder", {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      defaultValue: 0,
+    });
+  } catch (error) {
+    console.error("Nao foi possivel validar o schema de whatsapp_templates:", error);
+  }
+
+  try {
+    const webhookLogsTable = await queryInterface.describeTable("whatsapp_webhook_logs");
+    await ensureColumn("whatsapp_webhook_logs", webhookLogsTable, "logType", {
+      type: DataTypes.STRING,
+      allowNull: false,
+      defaultValue: "event",
+    });
+    await ensureColumn("whatsapp_webhook_logs", webhookLogsTable, "description", {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    });
+  } catch (error) {
+    console.error("Nao foi possivel validar o schema de whatsapp_webhook_logs:", error);
+  }
+}
+
 sequelize
   .sync()
   .then(async () => {
     await ensureUsersSchema();
     await ensureAppointmentSchema();
+    await ensureWhatsappHubSchema();
     console.log("Conectado ao banco de dados");
   })
   .catch((erro) => {
