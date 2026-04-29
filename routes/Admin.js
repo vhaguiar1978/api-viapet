@@ -119,6 +119,26 @@ function readPasswordResetState(user) {
   }
 }
 
+function startOfToday() {
+  const date = new Date();
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+
+function startOfWeek() {
+  const date = startOfToday();
+  const day = date.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  date.setDate(date.getDate() + diff);
+  return date;
+}
+
+function startOfMonth() {
+  const date = startOfToday();
+  date.setDate(1);
+  return date;
+}
+
 async function getOrCreateBillingSettings() {
   let settings = await BillingSettings.findOne({
     order: [["createdAt", "DESC"]],
@@ -354,6 +374,7 @@ router.get("/admin/clients", adminMiddleware, async (req, res) => {
         "plan",
         "expirationDate",
         "lastAccess",
+        "createdAt",
         "recoveryPassToken",
         "timeRecoveryPass",
       ],
@@ -412,6 +433,7 @@ router.get("/admin/clients", adminMiddleware, async (req, res) => {
             totalRevenue: totalRevenue,
           },
           settings: clientData.settings || {},
+          createdAt: client.createdAt,
           lastAccess: client.lastAccess,
           phone: client.phone,
           status: client.status,
@@ -749,6 +771,184 @@ router.get("/admin/billing/overview", adminMiddleware, async (req, res) => {
   } catch (error) {
     return res.status(500).json({
       message: "Erro ao carregar visao de cobranca",
+      error: error.message,
+    });
+  }
+});
+
+router.get("/admin/dashboard-summary", adminMiddleware, async (req, res) => {
+  try {
+    const settings = await getOrCreateBillingSettings();
+    const [users, approvedPayments, crmAiSubscriptions] = await Promise.all([
+      Users.findAll({
+        where: { role: "proprietario" },
+        attributes: ["id", "name", "email", "plan", "status", "expirationDate", "createdAt"],
+        order: [["createdAt", "DESC"]],
+      }),
+      PaymentHistory.findAll({
+        where: {
+          status: {
+            [Op.in]: ["approved", "authorized"],
+          },
+        },
+        attributes: ["id", "user_id", "amount", "created_at", "date_approved", "payment_method"],
+        order: [["created_at", "DESC"]],
+      }),
+      CrmAiSubscription.findAll({
+        attributes: [
+          "id",
+          "user_id",
+          "status",
+          "payment_status",
+          "amount",
+          "created_at",
+          "activated_at",
+          "next_billing_date",
+        ],
+        order: [["created_at", "DESC"]],
+      }),
+    ]);
+
+    const today = startOfToday();
+    const week = startOfWeek();
+    const month = startOfMonth();
+
+    const registrations = {
+      today: users.filter((item) => item.createdAt && new Date(item.createdAt) >= today).length,
+      week: users.filter((item) => item.createdAt && new Date(item.createdAt) >= week).length,
+      month: users.filter((item) => item.createdAt && new Date(item.createdAt) >= month).length,
+    };
+
+    const mainPaymentsWeek = approvedPayments.filter((item) => new Date(item.date_approved || item.created_at) >= week);
+    const mainPaymentsMonth = approvedPayments.filter((item) => new Date(item.date_approved || item.created_at) >= month);
+
+    const latestCrmAiByUser = new Map();
+    crmAiSubscriptions.forEach((subscription) => {
+      if (!latestCrmAiByUser.has(subscription.user_id)) {
+        latestCrmAiByUser.set(subscription.user_id, subscription);
+      }
+    });
+
+    const paidCrmAiSubscriptions = crmAiSubscriptions.filter((subscription) => {
+      const paymentStatus = String(subscription.payment_status || "").toLowerCase();
+      const status = String(subscription.status || "").toLowerCase();
+      const createdAt = new Date(subscription.created_at);
+      const amount = Number(subscription.amount || 0);
+      if (!Number.isFinite(amount) || amount <= 0) return false;
+      if (["manual_free", "manual_trial", "manual_blocked"].includes(paymentStatus)) return false;
+      return ["active", "pending", "approved"].includes(status) || paymentStatus.includes("paid") || paymentStatus === "approved";
+    });
+
+    const crmAiWeek = paidCrmAiSubscriptions.filter((item) => new Date(item.created_at) >= week);
+    const crmAiMonth = paidCrmAiSubscriptions.filter((item) => new Date(item.created_at) >= month);
+
+    const crmAiRows = await Promise.all(
+      users.map(async (user) => {
+        const latestSubscription = latestCrmAiByUser.get(user.id) || null;
+        const lastMessage = await CrmWhatsappMessage.findOne({
+          where: { usersId: user.id },
+          attributes: ["createdAt", "direction"],
+          order: [["createdAt", "DESC"]],
+        });
+        const messageCount = await CrmWhatsappMessage.count({ where: { usersId: user.id } });
+        return {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          createdAt: user.createdAt,
+          crmAiStatus: latestSubscription?.status || "inactive",
+          crmAiPaymentStatus: latestSubscription?.payment_status || null,
+          crmAiAmount: Number(latestSubscription?.amount || 0),
+          crmAiPurchasedAt: latestSubscription?.created_at || null,
+          crmAiActivatedAt: latestSubscription?.activated_at || null,
+          crmAiNextBillingDate: latestSubscription?.next_billing_date || null,
+          crmAiLastMessageAt: lastMessage?.createdAt || null,
+          crmAiMessageCount: messageCount,
+        };
+      }),
+    );
+
+    const crmAiActiveCount = crmAiRows.filter((item) => item.crmAiStatus === "active").length;
+    const crmAiBlockedCount = crmAiRows.filter((item) => ["cancelled", "expired", "suspended"].includes(item.crmAiStatus)).length;
+    const crmAiExpiringCount = crmAiRows.filter((item) => {
+      if (!item.crmAiNextBillingDate || item.crmAiStatus !== "active") return false;
+      const diff = new Date(item.crmAiNextBillingDate).getTime() - Date.now();
+      const days = Math.ceil(diff / (24 * 60 * 60 * 1000));
+      return days >= 0 && days <= 7;
+    }).length;
+    const crmAiInUseCount = crmAiRows.filter((item) => item.crmAiMessageCount > 0).length;
+
+    const billingOverview = await Promise.all(
+      users.map(async (user) => {
+        const subscription = await Subscription.findOne({
+          where: { user_id: user.id },
+          order: [["created_at", "DESC"]],
+        });
+        const profile = getBillingProfile(user, subscription, settings);
+        return {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          stage: profile.stage,
+          nextChargeAmount: Number(profile.nextChargeAmount || 0),
+          daysUntilExpiry: profile.daysUntilExpiry,
+          overdue: profile.overdue,
+          reminderDue: profile.reminderDue,
+        };
+      }),
+    );
+
+    return res.json({
+      message: "Resumo administrativo carregado com sucesso",
+      data: {
+        registrations,
+        clients: {
+          total: users.length,
+          active: users.filter((item) => Boolean(item.plan)).length,
+          blocked: users.filter((item) => !item.plan).length,
+        },
+        payments: {
+          weekCount: mainPaymentsWeek.length,
+          weekAmount: mainPaymentsWeek.reduce((total, item) => total + Number(item.amount || 0), 0),
+          monthCount: mainPaymentsMonth.length,
+          monthAmount: mainPaymentsMonth.reduce((total, item) => total + Number(item.amount || 0), 0),
+        },
+        crmAi: {
+          activeCount: crmAiActiveCount,
+          blockedCount: crmAiBlockedCount,
+          expiringCount: crmAiExpiringCount,
+          inUseCount: crmAiInUseCount,
+          weekCount: crmAiWeek.length,
+          weekAmount: crmAiWeek.reduce((total, item) => total + Number(item.amount || 0), 0),
+          monthCount: crmAiMonth.length,
+          monthAmount: crmAiMonth.reduce((total, item) => total + Number(item.amount || 0), 0),
+        },
+        recentClients: users.slice(0, 8).map((item) => ({
+          id: item.id,
+          name: item.name,
+          email: item.email,
+          createdAt: item.createdAt,
+        })),
+        billingWatchlist: billingOverview
+          .filter((item) => item.overdue || item.reminderDue)
+          .sort((left, right) => {
+            if (left.overdue !== right.overdue) return left.overdue ? -1 : 1;
+            return Number(left.daysUntilExpiry || 999) - Number(right.daysUntilExpiry || 999);
+          })
+          .slice(0, 8),
+        crmAiRoster: crmAiRows
+          .sort((left, right) => {
+            const leftActive = left.crmAiStatus === "active" ? 1 : 0;
+            const rightActive = right.crmAiStatus === "active" ? 1 : 0;
+            if (rightActive !== leftActive) return rightActive - leftActive;
+            return String(left.name || "").localeCompare(String(right.name || ""), "pt-BR");
+          }),
+      },
+    });
+  } catch (error) {
+    console.error("Erro ao carregar resumo administrativo:", error);
+    return res.status(500).json({
+      message: "Erro ao carregar resumo administrativo",
       error: error.message,
     });
   }
@@ -1569,6 +1769,12 @@ router.get("/admin/crm-ai/subscriptions", adminMiddleware, async (req, res) => {
           where: { user_id: user.id },
           order: [["created_at", "DESC"]],
         });
+        const lastMessage = await CrmWhatsappMessage.findOne({
+          where: { usersId: user.id },
+          attributes: ["createdAt"],
+          order: [["createdAt", "DESC"]],
+        });
+        const messageCount = await CrmWhatsappMessage.count({ where: { usersId: user.id } });
 
         return {
           userId: user.id,
@@ -1584,6 +1790,10 @@ router.get("/admin/crm-ai/subscriptions", adminMiddleware, async (req, res) => {
                 next_billing_date: subscription.next_billing_date,
                 cancelled_at: subscription.cancelled_at,
                 notes: subscription.notes,
+                created_at: subscription.created_at,
+                updated_at: subscription.updated_at,
+                last_message_at: lastMessage?.createdAt || null,
+                message_count: messageCount,
               }
             : null,
         };
@@ -1707,6 +1917,65 @@ router.post("/admin/crm-ai/:id/grant-free", adminMiddleware, async (req, res) =>
     console.error("Erro ao liberar acesso gratuito da IA CRM:", error);
     return res.status(500).json({
       message: "Erro ao liberar acesso gratuito da IA CRM",
+      error: error.message,
+    });
+  }
+});
+
+router.post("/admin/crm-ai/:id/activate-paid", adminMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { days = 30, amount = 49.9, notes = "" } = req.body || {};
+    const user = await Users.findByPk(id);
+
+    if (!user) {
+      return res.status(404).json({
+        message: "Cliente nao encontrado",
+      });
+    }
+
+    const now = new Date();
+    const nextBillingDate = new Date();
+    nextBillingDate.setDate(nextBillingDate.getDate() + Number(days || 30));
+
+    let subscription = await CrmAiSubscription.findOne({
+      where: { user_id: id },
+      order: [["created_at", "DESC"]],
+    });
+
+    const mergedNotes = notes || `IA CRM liberada manualmente por ${Number(days || 30)} dias`;
+
+    if (!subscription) {
+      subscription = await CrmAiSubscription.create({
+        user_id: id,
+        status: "active",
+        payment_status: "manual_paid",
+        amount: Number(amount || 49.9),
+        currency: "BRL",
+        activated_at: now,
+        next_billing_date: nextBillingDate,
+        notes: mergedNotes,
+      });
+    } else {
+      await subscription.update({
+        status: "active",
+        payment_status: "manual_paid",
+        amount: Number(amount || 49.9),
+        activated_at: now,
+        next_billing_date: nextBillingDate,
+        cancelled_at: null,
+        notes: mergedNotes,
+      });
+    }
+
+    return res.json({
+      message: "IA CRM liberada como paga com sucesso",
+      data: subscription,
+    });
+  } catch (error) {
+    console.error("Erro ao liberar IA CRM paga:", error);
+    return res.status(500).json({
+      message: "Erro ao liberar IA CRM paga",
       error: error.message,
     });
   }
