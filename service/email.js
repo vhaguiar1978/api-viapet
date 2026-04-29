@@ -16,11 +16,25 @@ class EmailService {
       return "https://app.viapet.app";
     }
 
-    if (/^https?:\/\/viapet\.app\/?$/i.test(rawUrl)) {
+    const normalizedRawUrl = /^https?:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`;
+
+    let parsedUrl = null;
+    try {
+      parsedUrl = new URL(normalizedRawUrl);
+    } catch (_error) {
+      return normalizedRawUrl.replace(/\/+$/, "");
+    }
+
+    const hostname = String(parsedUrl.hostname || "").toLowerCase();
+    if (
+      hostname === "viapet.app" ||
+      hostname === "www.viapet.app" ||
+      hostname === "api.viapet.app"
+    ) {
       return "https://app.viapet.app";
     }
 
-    return rawUrl.replace(/\/+$/, "");
+    return parsedUrl.toString().replace(/\/+$/, "");
   }
 
   buildPartnerLandingLink() {
@@ -160,9 +174,12 @@ class EmailService {
             <p>Recebemos uma solicitação para redefinir sua senha.</p>
             <p>Para criar uma nova senha, clique no link abaixo:</p>
             <p>
-              <a href="${resetLink}" style="display: inline-block; padding: 10px 20px; background-color: #007bff; color: white; text-decoration: none; border-radius: 5px;">
+              <a href="${resetLink}" target="_blank" rel="noopener noreferrer" style="display: inline-block; padding: 10px 20px; background-color: #007bff; color: white; text-decoration: none; border-radius: 5px;">
                 Redefinir Senha
               </a>
+            </p>
+            <p style="font-size: 13px; color: #666; word-break: break-all;">
+              Se o botao nao abrir, copie e cole este link no navegador: ${resetLink}
             </p>
             <p>Este link é válido por 1 hora.</p>
             <p>Se você não solicitou a redefinição de senha, ignore este email.</p>
