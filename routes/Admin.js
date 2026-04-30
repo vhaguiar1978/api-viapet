@@ -46,6 +46,27 @@ async function getOrCreateAdminSettings() {
   await Admin.sequelize.query(
     'ALTER TABLE "admin" ADD COLUMN IF NOT EXISTS "siteConsultantWhatsapp" VARCHAR(255) DEFAULT \'\'',
   );
+  await Admin.sequelize.query(
+    'ALTER TABLE "admin" ADD COLUMN IF NOT EXISTS "emailSystemEnabled" BOOLEAN DEFAULT TRUE',
+  );
+  await Admin.sequelize.query(
+    'ALTER TABLE "admin" ADD COLUMN IF NOT EXISTS "emailPasswordResetEnabled" BOOLEAN DEFAULT TRUE',
+  );
+  await Admin.sequelize.query(
+    'ALTER TABLE "admin" ADD COLUMN IF NOT EXISTS "emailWelcomeEnabled" BOOLEAN DEFAULT TRUE',
+  );
+  await Admin.sequelize.query(
+    'ALTER TABLE "admin" ADD COLUMN IF NOT EXISTS "emailLoginAlertEnabled" BOOLEAN DEFAULT TRUE',
+  );
+  await Admin.sequelize.query(
+    'ALTER TABLE "admin" ADD COLUMN IF NOT EXISTS "emailEmployeeWelcomeEnabled" BOOLEAN DEFAULT TRUE',
+  );
+  await Admin.sequelize.query(
+    'ALTER TABLE "admin" ADD COLUMN IF NOT EXISTS "emailPlanReminderEnabled" BOOLEAN DEFAULT TRUE',
+  );
+  await Admin.sequelize.query(
+    'ALTER TABLE "admin" ADD COLUMN IF NOT EXISTS "emailCampaignEnabled" BOOLEAN DEFAULT TRUE',
+  );
 
   let settings = await Admin.findOne();
 
@@ -379,6 +400,13 @@ router.post("/settings/admin", adminMiddleware, async (req, res) => {
       facebook,
       instagram,
       youtube,
+      emailSystemEnabled,
+      emailPasswordResetEnabled,
+      emailWelcomeEnabled,
+      emailLoginAlertEnabled,
+      emailEmployeeWelcomeEnabled,
+      emailPlanReminderEnabled,
+      emailCampaignEnabled,
     } = req.body;
     let settings = await getOrCreateAdminSettings();
 
@@ -395,6 +423,13 @@ router.post("/settings/admin", adminMiddleware, async (req, res) => {
     if (facebook !== undefined) settings.facebook = facebook;
     if (instagram !== undefined) settings.instagram = instagram;
     if (youtube !== undefined) settings.youtube = youtube;
+    if (emailSystemEnabled !== undefined) settings.emailSystemEnabled = Boolean(emailSystemEnabled);
+    if (emailPasswordResetEnabled !== undefined) settings.emailPasswordResetEnabled = Boolean(emailPasswordResetEnabled);
+    if (emailWelcomeEnabled !== undefined) settings.emailWelcomeEnabled = Boolean(emailWelcomeEnabled);
+    if (emailLoginAlertEnabled !== undefined) settings.emailLoginAlertEnabled = Boolean(emailLoginAlertEnabled);
+    if (emailEmployeeWelcomeEnabled !== undefined) settings.emailEmployeeWelcomeEnabled = Boolean(emailEmployeeWelcomeEnabled);
+    if (emailPlanReminderEnabled !== undefined) settings.emailPlanReminderEnabled = Boolean(emailPlanReminderEnabled);
+    if (emailCampaignEnabled !== undefined) settings.emailCampaignEnabled = Boolean(emailCampaignEnabled);
 
     await settings.save();
 

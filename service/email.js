@@ -151,6 +151,36 @@ class EmailService {
     return mailSettings;
   }
 
+  async getEmailControlSettings() {
+    const settings = await Admin.findOne();
+    return {
+      emailSystemEnabled: settings?.emailSystemEnabled !== false,
+      emailPasswordResetEnabled: settings?.emailPasswordResetEnabled !== false,
+      emailWelcomeEnabled: settings?.emailWelcomeEnabled !== false,
+      emailLoginAlertEnabled: settings?.emailLoginAlertEnabled !== false,
+      emailEmployeeWelcomeEnabled: settings?.emailEmployeeWelcomeEnabled !== false,
+      emailPlanReminderEnabled: settings?.emailPlanReminderEnabled !== false,
+      emailCampaignEnabled: settings?.emailCampaignEnabled !== false,
+    };
+  }
+
+  async canSendEmail(kind, { throwWhenDisabled = false } = {}) {
+    const controls = await this.getEmailControlSettings();
+    const kindMap = {
+      password_reset: controls.emailPasswordResetEnabled,
+      welcome: controls.emailWelcomeEnabled,
+      login_alert: controls.emailLoginAlertEnabled,
+      employee_welcome: controls.emailEmployeeWelcomeEnabled,
+      plan_reminder: controls.emailPlanReminderEnabled,
+      campaign: controls.emailCampaignEnabled,
+    };
+    const enabled = controls.emailSystemEnabled !== false && kindMap[kind] !== false;
+    if (!enabled && throwWhenDisabled) {
+      throw new Error("Esse tipo de e-mail está desativado na central administrativa.");
+    }
+    return enabled;
+  }
+
   async ensurePasswordResetTransporter() {
     const settings = await this.getMailSettings();
 
@@ -228,6 +258,7 @@ class EmailService {
 
   async sendPasswordResetEmail(recipientEmail, token) {
     try {
+      await this.canSendEmail("password_reset", { throwWhenDisabled: true });
       const settings = await this.ensurePasswordResetTransporter();
       const resetLink = this.buildPasswordResetLink(token);
 
@@ -287,6 +318,10 @@ class EmailService {
     // Executa o envio de forma assíncrona para não travar o servidor
     this.sendEmailSafely(async () => {
       try {
+        if (!(await this.canSendEmail("welcome"))) {
+          return null;
+        }
+
         if (!this.transporter) {
           await this.initializeTransporter();
         }
@@ -344,6 +379,10 @@ class EmailService {
 
   async sendLoginNotificationEmail(recipientEmail, name) {
     try {
+      if (!(await this.canSendEmail("login_alert"))) {
+        return null;
+      }
+
       if (!this.transporter) {
         await this.initializeTransporter();
       }
@@ -382,6 +421,10 @@ class EmailService {
     // Executa o envio de forma assíncrona para não travar o servidor
     this.sendEmailSafely(async () => {
       try {
+        if (!(await this.canSendEmail("employee_welcome"))) {
+          return null;
+        }
+
         if (!this.transporter) {
           await this.initializeTransporter();
         }
@@ -431,6 +474,10 @@ class EmailService {
     // Executa o envio de forma assíncrona para não travar o servidor
     this.sendEmailSafely(async () => {
       try {
+        if (!(await this.canSendEmail("login_alert"))) {
+          return null;
+        }
+
         if (!this.transporter) {
           await this.initializeTransporter();
         }
@@ -476,6 +523,10 @@ class EmailService {
 
   async sendPlanExpirationEmail(user) {
     try {
+      if (!(await this.canSendEmail("plan_reminder"))) {
+        return null;
+      }
+
       if (!this.transporter) {
         await this.initializeTransporter();
       }
@@ -672,6 +723,8 @@ class EmailService {
   }
 
   async sendEmailCampaignNow(campaignInput) {
+    await this.canSendEmail("campaign", { throwWhenDisabled: true });
+
     const campaign =
       typeof campaignInput === "string"
         ? await EmailCampaign.findByPk(campaignInput)
@@ -709,6 +762,10 @@ class EmailService {
 
   async processScheduledCampaigns() {
     try {
+      if (!(await this.canSendEmail("campaign"))) {
+        return;
+      }
+
       const now = new Date();
       const campaigns = await EmailCampaign.findAll({
         where: {
