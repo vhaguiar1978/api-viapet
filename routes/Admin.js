@@ -38,6 +38,21 @@ import { createSubscriptionPreference } from "../service/mercadopago.js";
 import emailService from "../service/email.js";
 import { ensureDefaultMedicalCatalog } from "../service/defaultMedicalCatalog.js";
 const router = express.Router();
+const SYSTEM_GENERATED_USER_EMAIL_PATTERN = "indefinido.%@sistema.com";
+
+function buildRealEmployeeWhere(extraWhere = {}) {
+  return {
+    [Op.and]: [
+      extraWhere,
+      { role: "funcionario" },
+      {
+        email: {
+          [Op.notLike]: SYSTEM_GENERATED_USER_EMAIL_PATTERN,
+        },
+      },
+    ],
+  };
+}
 
 async function getOrCreateAdminSettings() {
   await Admin.sequelize.query(
@@ -756,7 +771,8 @@ router.get("/admin/clients", adminMiddleware, async (req, res) => {
         {
           model: Users,
           as: "employees",
-          attributes: ["id", "name", "email", "status"],
+          attributes: ["id", "name", "email", "status", "createdAt", "lastAccess"],
+          where: buildRealEmployeeWhere(),
           required: false,
         },
         {
@@ -858,7 +874,8 @@ router.get("/admin/clients/:id/details", adminMiddleware, async (req, res) => {
         {
           model: Users,
           as: "employees",
-          where: { role: "funcionario" },
+          where: buildRealEmployeeWhere(),
+          attributes: ["id", "name", "email", "status", "createdAt", "lastAccess"],
           required: false,
         },
         {
@@ -960,6 +977,26 @@ router.get("/admin/clients/:id/details", adminMiddleware, async (req, res) => {
         sales: recentSales,
         logins: recentLogins,
       },
+      userAccess: [
+        {
+          id: client.id,
+          name: client.name,
+          email: client.email,
+          role: "proprietario",
+          status: client.status,
+          createdAt: client.createdAt,
+          lastAccess: client.lastAccess,
+        },
+        ...((client.employees || []).map((employee) => ({
+          id: employee.id,
+          name: employee.name,
+          email: employee.email,
+          role: employee.role || "funcionario",
+          status: employee.status,
+          createdAt: employee.createdAt,
+          lastAccess: employee.lastAccess,
+        }))),
+      ],
       billing: {
         subscription: subscription || null,
         paymentHistory: paymentHistory || [],
@@ -1572,17 +1609,6 @@ router.post("/admin/clients", adminMiddleware, async (req, res) => {
       { where: { id: newUser.id } },
     );
 
-    // Criar funcionário "Indefinido" para o estabelecimento
-    await Users.create({
-      name: "Indefinido",
-      email: `indefinido.${newUser.id}@sistema.com`,
-      password: hashedPassword,
-      role: "funcionario",
-      status: true,
-      establishment: newUser.id,
-      recoveryPassToken: firstAccess.token,
-      timeRecoveryPass: firstAccess.expiresAt,
-    });
     await ensureDefaultMedicalCatalog(newUser.id);
 
     // Criar configurações do estabelecimento com o mesmo ID do usuário

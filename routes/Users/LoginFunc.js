@@ -2,10 +2,12 @@ import express from "express";
 import bcrypt from "bcryptjs";
 import validator from "validator";
 import jwt from "jsonwebtoken";
+import net from "node:net";
 import "dotenv/config";
 import Users from "../../models/Users.js";
 import EmailService from "../../service/email.js";
 import { readFirstAccessState } from "./Login.js";
+import LoginHistory from "../../models/LoginHistory.js";
 
 const router = express.Router();
 
@@ -26,6 +28,52 @@ function buildAuthToken(user) {
   );
 }
 
+function normalizeIpCandidate(value) {
+  if (!value || typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.toLowerCase() === "undefined" || trimmed.toLowerCase() === "null") {
+    return null;
+  }
+  const normalized = trimmed.startsWith("::ffff:") ? trimmed.replace("::ffff:", "") : trimmed;
+  return net.isIP(normalized) ? normalized : null;
+}
+
+function resolveClientIp(req) {
+  const xff = req?.headers?.["x-forwarded-for"];
+  if (typeof xff === "string" && xff.trim()) {
+    const first = xff.split(",")[0];
+    const parsed = normalizeIpCandidate(first);
+    if (parsed) return parsed;
+  }
+
+  const socketIp = normalizeIpCandidate(req?.socket?.remoteAddress);
+  if (socketIp) return socketIp;
+
+  const connectionIp = normalizeIpCandidate(req?.connection?.remoteAddress);
+  if (connectionIp) return connectionIp;
+
+  return null;
+}
+
+async function registerLoginHistory(userId, req, status = "success") {
+  if (!userId) {
+    return;
+  }
+  try {
+    const clientIp = resolveClientIp(req) || "0.0.0.0";
+    await LoginHistory.create({
+      userId,
+      ip: clientIp,
+      userAgent: req.headers["user-agent"],
+      status,
+      device:
+        req.headers["user-agent"]?.split("(")[1]?.split(")")[0] || "Unknown",
+    });
+  } catch (error) {
+    console.warn("Falha ao gravar historico de login do funcionario:", error.message);
+  }
+}
+
 router.post("/loginfunc", async (req, res) => {
   const { email, password } = req.body;
   if (!email) {
@@ -43,6 +91,7 @@ router.post("/loginfunc", async (req, res) => {
     });
 
     if (!user) {
+      await registerLoginHistory(null, req, "failed");
       return res.status(404).json({ message: "Usuario inexistente" });
     }
 
@@ -76,6 +125,7 @@ router.post("/loginfunc", async (req, res) => {
     }
 
     if (!password) {
+      await registerLoginHistory(user.id, req, "failed");
       return res.status(401).json({
         message: "Informe a senha para entrar no sistema.",
       });
@@ -83,6 +133,7 @@ router.post("/loginfunc", async (req, res) => {
 
     const passwordValid = await bcrypt.compare(password, user.password);
     if (!passwordValid) {
+      await registerLoginHistory(user.id, req, "failed");
       return res.status(401).json({ message: "Senha incorreta" });
     }
 
@@ -100,6 +151,12 @@ router.post("/loginfunc", async (req, res) => {
     }
 
     const token = buildAuthToken(user);
+    await registerLoginHistory(user.id, req, "success");
+    try {
+      await user.update({ lastAccess: new Date() });
+    } catch {
+      // coluna pode nao existir em instancias antigas
+    }
 
     try {
       await EmailService.sendEmployeeLoginNotificationEmail(
