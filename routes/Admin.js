@@ -32,8 +32,16 @@ import CashClosure from "../models/CashClosure.js";
 import jwt from "jsonwebtoken";
 import BillingSettings from "../models/BillingSettings.js";
 import ClientAccessControl from "../models/ClientAccessControl.js";
+import CrmAiActionLog from "../models/CrmAiActionLog.js";
+import CrmConversation from "../models/CrmConversation.js";
+import CrmConversationMessage from "../models/CrmConversationMessage.js";
 import EmailCampaign from "../models/EmailCampaign.js";
 import EmailCampaignLog from "../models/EmailCampaignLog.js";
+import PersonalFinance from "../models/personal_finances.js";
+import WhatsappConnection from "../models/WhatsappConnection.js";
+import WhatsappMessage from "../models/WhatsappMessage.js";
+import WhatsappTemplate from "../models/WhatsappTemplate.js";
+import WhatsappWebhookLog from "../models/WhatsappWebhookLog.js";
 import { createSubscriptionPreference } from "../service/mercadopago.js";
 import emailService from "../service/email.js";
 import { ensureDefaultMedicalCatalog } from "../service/defaultMedicalCatalog.js";
@@ -1813,8 +1821,49 @@ router.delete("/admin/clients/:id", adminMiddleware, async (req, res) => {
         SaleItem.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
         PurchaseItems.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
         CashClosure.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
+        ClientAccessControl.destroy({ where: { user_id: { [Op.in]: relatedUserIds } }, transaction }),
+        CrmAiActionLog.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
+        CrmConversationMessage.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
+        CrmConversation.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
+        PersonalFinance.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }).catch(() => null),
         FinancialRecords.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
         CrmWhatsappMessage.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
+        WhatsappConnection.destroy({
+          where: {
+            [Op.or]: [
+              { usersId: { [Op.in]: relatedUserIds } },
+              { companyId: { [Op.in]: relatedUserIds } },
+            ],
+          },
+          transaction,
+        }),
+        WhatsappMessage.destroy({
+          where: {
+            [Op.or]: [
+              { usersId: { [Op.in]: relatedUserIds } },
+              { companyId: { [Op.in]: relatedUserIds } },
+            ],
+          },
+          transaction,
+        }),
+        WhatsappTemplate.destroy({
+          where: {
+            [Op.or]: [
+              { usersId: { [Op.in]: relatedUserIds } },
+              { companyId: { [Op.in]: relatedUserIds } },
+            ],
+          },
+          transaction,
+        }),
+        WhatsappWebhookLog.destroy({
+          where: {
+            [Op.or]: [
+              { usersId: { [Op.in]: relatedUserIds } },
+              { companyId: { [Op.in]: relatedUserIds } },
+            ],
+          },
+          transaction,
+        }),
         PaymentHistory.destroy({ where: { user_id: { [Op.in]: relatedUserIds } }, transaction }),
         CrmAiSubscription.destroy({ where: { user_id: { [Op.in]: relatedUserIds } }, transaction }),
         Subscription.destroy({ where: { user_id: { [Op.in]: relatedUserIds } }, transaction }),
