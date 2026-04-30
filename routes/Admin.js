@@ -31,6 +31,9 @@ import FinancialRecords from "../models/FinancialRecords.js";
 import CashClosure from "../models/CashClosure.js";
 import jwt from "jsonwebtoken";
 import BillingSettings from "../models/BillingSettings.js";
+import ClientAccessControl from "../models/ClientAccessControl.js";
+import EmailCampaign from "../models/EmailCampaign.js";
+import EmailCampaignLog from "../models/EmailCampaignLog.js";
 import { createSubscriptionPreference } from "../service/mercadopago.js";
 import emailService from "../service/email.js";
 import { ensureDefaultMedicalCatalog } from "../service/defaultMedicalCatalog.js";
@@ -56,6 +59,55 @@ async function getOrCreateAdminSettings() {
 function generateTemporaryPassword() {
   const random = Math.random().toString(36).slice(-4).toUpperCase();
   return `ViaPet@${random}`;
+}
+
+const DEFAULT_CLIENT_ACCESS_FEATURES = [
+  { id: "agenda", label: "Agenda" },
+  { id: "cadastros", label: "Cadastros" },
+  { id: "financeiro", label: "Financeiro" },
+  { id: "crm", label: "CRM e Chat" },
+  { id: "crm-ai", label: "IA do CRM" },
+  { id: "whatsapp", label: "WhatsApp CRM" },
+  { id: "clientes", label: "Clientes e tutores" },
+  { id: "pets", label: "Pets e pacientes" },
+  { id: "pacotes", label: "Pacotinhos" },
+  { id: "exames", label: "Exames" },
+  { id: "fila", label: "Fila" },
+  { id: "internacao", label: "Internacao" },
+  { id: "mensagens", label: "Mensagens" },
+  { id: "venda", label: "Venda PDV" },
+  { id: "viacentral", label: "ViaCentral" },
+  { id: "configuracoes", label: "Configuracoes" },
+];
+
+function normalizeClientAccessRecord(accessControl) {
+  const enabledFeatures = Array.isArray(accessControl?.features)
+    ? accessControl.features.map((item) => String(item || "").trim()).filter(Boolean)
+    : DEFAULT_CLIENT_ACCESS_FEATURES.map((item) => item.id);
+
+  return {
+    status: accessControl?.status || "active",
+    features: enabledFeatures,
+    featureCatalog: DEFAULT_CLIENT_ACCESS_FEATURES,
+    accessStartsAt: accessControl?.access_starts_at || null,
+    accessEndsAt: accessControl?.access_ends_at || null,
+    unlimitedAccess: Boolean(accessControl?.unlimited_access),
+    notes: accessControl?.notes || "",
+  };
+}
+
+async function getOrCreateClientAccessControl(userId) {
+  const [accessControl] = await ClientAccessControl.findOrCreate({
+    where: { user_id: userId },
+    defaults: {
+      user_id: userId,
+      status: "active",
+      features: DEFAULT_CLIENT_ACCESS_FEATURES.map((item) => item.id),
+      unlimited_access: false,
+    },
+  });
+
+  return accessControl;
 }
 
 function buildFirstAccessToken(user) {
@@ -358,6 +410,293 @@ router.post("/settings/admin", adminMiddleware, async (req, res) => {
   }
 });
 
+router.post("/settings/admin/test-email", adminMiddleware, async (req, res) => {
+  try {
+    const recipientEmail = String(req.body?.recipientEmail || "").trim();
+    if (!recipientEmail || !validator.isEmail(recipientEmail)) {
+      return res.status(400).json({
+        message: "Informe um e-mail valido para o teste.",
+      });
+    }
+
+    await emailService.sendAdminTestEmail(recipientEmail);
+
+    return res.status(200).json({
+      message: "E-mail de teste enviado com sucesso.",
+    });
+  } catch (error) {
+    console.error("Erro ao enviar e-mail de teste SMTP:", error);
+    return res.status(500).json({
+      message: "Erro ao enviar o e-mail de teste.",
+      error: error.message,
+    });
+  }
+});
+
+router.get("/admin/access-feature-catalog", adminMiddleware, async (_req, res) => {
+  return res.status(200).json({
+    message: "Catalogo de acessos carregado com sucesso",
+    data: DEFAULT_CLIENT_ACCESS_FEATURES,
+  });
+});
+
+router.put("/admin/clients/:id/access-control", adminMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      status = "active",
+      features = [],
+      accessStartsAt = null,
+      accessEndsAt = null,
+      unlimitedAccess = false,
+      notes = "",
+    } = req.body || {};
+
+    const user = await Users.findOne({
+      where: { id, role: "proprietario" },
+      attributes: ["id", "name", "email"],
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        message: "Cliente nao encontrado",
+      });
+    }
+
+    const validFeatureIds = new Set(DEFAULT_CLIENT_ACCESS_FEATURES.map((item) => item.id));
+    const normalizedFeatures = Array.isArray(features)
+      ? features.map((item) => String(item || "").trim()).filter((item) => validFeatureIds.has(item))
+      : [];
+
+    const accessControl = await getOrCreateClientAccessControl(id);
+    await accessControl.update({
+      status: String(status || "active").toLowerCase() === "blocked" ? "blocked" : "active",
+      features: normalizedFeatures.length
+        ? normalizedFeatures
+        : DEFAULT_CLIENT_ACCESS_FEATURES.map((item) => item.id),
+      access_starts_at: accessStartsAt ? new Date(accessStartsAt) : null,
+      access_ends_at:
+        !unlimitedAccess && accessEndsAt ? new Date(accessEndsAt) : null,
+      unlimited_access: Boolean(unlimitedAccess),
+      notes: notes || "",
+    });
+
+    return res.status(200).json({
+      message: "Controle de acesso salvo com sucesso",
+      data: normalizeClientAccessRecord(accessControl),
+    });
+  } catch (error) {
+    console.error("Erro ao salvar controle de acesso:", error);
+    return res.status(500).json({
+      message: "Erro ao salvar controle de acesso",
+      error: error.message,
+    });
+  }
+});
+
+router.get("/admin/email-campaigns", adminMiddleware, async (_req, res) => {
+  try {
+    const campaigns = await EmailCampaign.findAll({
+      order: [["updated_at", "DESC"]],
+    });
+    const logs = await EmailCampaignLog.findAll({
+      limit: 80,
+      order: [["created_at", "DESC"]],
+    });
+
+    return res.status(200).json({
+      message: "Campanhas de e-mail carregadas com sucesso",
+      data: {
+        campaigns: campaigns.map((campaign) => campaign.toJSON()),
+        logs: logs.map((log) => log.toJSON()),
+      },
+    });
+  } catch (error) {
+    console.error("Erro ao carregar campanhas de e-mail:", error);
+    return res.status(500).json({
+      message: "Erro ao carregar campanhas de e-mail",
+      error: error.message,
+    });
+  }
+});
+
+router.post("/admin/email-campaigns", adminMiddleware, async (req, res) => {
+  try {
+    const {
+      name,
+      subject,
+      previewText = "",
+      contentHtml = "",
+      contentText = "",
+      targetMode = "all",
+      selectedClientIds = [],
+      automaticEnabled = false,
+      scheduleType = "weekly",
+      sendDaysOfWeek = [],
+      sendTime = "09:00",
+      frequencyDays = 7,
+      status = "draft",
+    } = req.body || {};
+
+    if (!String(name || "").trim() || !String(subject || "").trim()) {
+      return res.status(400).json({
+        message: "Informe nome e assunto para a campanha.",
+      });
+    }
+
+    const campaign = await EmailCampaign.create({
+      name: String(name || "").trim(),
+      subject: String(subject || "").trim(),
+      previewText: String(previewText || ""),
+      contentHtml: String(contentHtml || ""),
+      contentText: String(contentText || ""),
+      targetMode: String(targetMode || "all").toLowerCase() === "selected" ? "selected" : "all",
+      selectedClientIds: Array.isArray(selectedClientIds) ? selectedClientIds : [],
+      automaticEnabled: Boolean(automaticEnabled),
+      scheduleType: String(scheduleType || "weekly").toLowerCase() === "interval" ? "interval" : "weekly",
+      sendDaysOfWeek: Array.isArray(sendDaysOfWeek) ? sendDaysOfWeek : [],
+      sendTime: String(sendTime || "09:00"),
+      frequencyDays: Math.max(1, Number(frequencyDays || 7)),
+      status: ["draft", "active", "paused"].includes(String(status || "").toLowerCase())
+        ? String(status).toLowerCase()
+        : "draft",
+      createdByUserId: req.user?.id || null,
+    });
+
+    const nextRunAt = emailService.computeNextCampaignRun(campaign, new Date());
+    await campaign.update({
+      nextRunAt,
+    });
+
+    return res.status(201).json({
+      message: "Campanha criada com sucesso",
+      data: campaign,
+    });
+  } catch (error) {
+    console.error("Erro ao criar campanha de e-mail:", error);
+    return res.status(500).json({
+      message: "Erro ao criar campanha de e-mail",
+      error: error.message,
+    });
+  }
+});
+
+router.put("/admin/email-campaigns/:id", adminMiddleware, async (req, res) => {
+  try {
+    const campaign = await EmailCampaign.findByPk(req.params.id);
+    if (!campaign) {
+      return res.status(404).json({
+        message: "Campanha nao encontrada",
+      });
+    }
+
+    const payload = req.body || {};
+    await campaign.update({
+      name: payload.name !== undefined ? String(payload.name || "").trim() : campaign.name,
+      subject: payload.subject !== undefined ? String(payload.subject || "").trim() : campaign.subject,
+      previewText: payload.previewText !== undefined ? String(payload.previewText || "") : campaign.previewText,
+      contentHtml: payload.contentHtml !== undefined ? String(payload.contentHtml || "") : campaign.contentHtml,
+      contentText: payload.contentText !== undefined ? String(payload.contentText || "") : campaign.contentText,
+      targetMode:
+        payload.targetMode !== undefined
+          ? String(payload.targetMode || "all").toLowerCase() === "selected"
+            ? "selected"
+            : "all"
+          : campaign.targetMode,
+      selectedClientIds:
+        payload.selectedClientIds !== undefined
+          ? Array.isArray(payload.selectedClientIds)
+            ? payload.selectedClientIds
+            : []
+          : campaign.selectedClientIds,
+      automaticEnabled:
+        payload.automaticEnabled !== undefined
+          ? Boolean(payload.automaticEnabled)
+          : campaign.automaticEnabled,
+      scheduleType:
+        payload.scheduleType !== undefined
+          ? String(payload.scheduleType || "weekly").toLowerCase() === "interval"
+            ? "interval"
+            : "weekly"
+          : campaign.scheduleType,
+      sendDaysOfWeek:
+        payload.sendDaysOfWeek !== undefined
+          ? Array.isArray(payload.sendDaysOfWeek)
+            ? payload.sendDaysOfWeek
+            : []
+          : campaign.sendDaysOfWeek,
+      sendTime: payload.sendTime !== undefined ? String(payload.sendTime || "09:00") : campaign.sendTime,
+      frequencyDays:
+        payload.frequencyDays !== undefined
+          ? Math.max(1, Number(payload.frequencyDays || 7))
+          : campaign.frequencyDays,
+      status:
+        payload.status !== undefined
+          ? ["draft", "active", "paused"].includes(String(payload.status || "").toLowerCase())
+            ? String(payload.status).toLowerCase()
+            : campaign.status
+          : campaign.status,
+    });
+
+    await campaign.update({
+      nextRunAt: emailService.computeNextCampaignRun(campaign, new Date()),
+    });
+
+    return res.status(200).json({
+      message: "Campanha atualizada com sucesso",
+      data: campaign,
+    });
+  } catch (error) {
+    console.error("Erro ao atualizar campanha de e-mail:", error);
+    return res.status(500).json({
+      message: "Erro ao atualizar campanha de e-mail",
+      error: error.message,
+    });
+  }
+});
+
+router.delete("/admin/email-campaigns/:id", adminMiddleware, async (req, res) => {
+  try {
+    const campaign = await EmailCampaign.findByPk(req.params.id);
+    if (!campaign) {
+      return res.status(404).json({
+        message: "Campanha nao encontrada",
+      });
+    }
+
+    await EmailCampaignLog.destroy({
+      where: { campaignId: campaign.id },
+    });
+    await campaign.destroy();
+
+    return res.status(200).json({
+      message: "Campanha removida com sucesso",
+    });
+  } catch (error) {
+    console.error("Erro ao remover campanha de e-mail:", error);
+    return res.status(500).json({
+      message: "Erro ao remover campanha de e-mail",
+      error: error.message,
+    });
+  }
+});
+
+router.post("/admin/email-campaigns/:id/send-now", adminMiddleware, async (req, res) => {
+  try {
+    const result = await emailService.sendEmailCampaignNow(req.params.id);
+    return res.status(200).json({
+      message: `Campanha enviada. ${result.sentCount} enviados e ${result.failedCount} falharam.`,
+      data: result,
+    });
+  } catch (error) {
+    console.error("Erro ao disparar campanha de e-mail:", error);
+    return res.status(500).json({
+      message: "Erro ao disparar campanha de e-mail",
+      error: error.message,
+    });
+  }
+});
+
 // Rota para listar todos os clientes do ViaPet
 router.get("/admin/clients", adminMiddleware, async (req, res) => {
   try {
@@ -400,10 +739,11 @@ router.get("/admin/clients", adminMiddleware, async (req, res) => {
         const clientData = client.toJSON();
 
         // Buscar estatísticas adicionais
-        const [appointments, sales, customers] = await Promise.all([
+        const [appointments, sales, customers, accessControl] = await Promise.all([
           Appointments.count({ where: { usersId: client.id } }),
           Sales.count({ where: { usersId: client.id } }),
           Customers.count({ where: { usersId: client.id } }),
+          getOrCreateClientAccessControl(client.id),
         ]);
 
         const [productsCount, servicesCount] = await Promise.all([
@@ -420,6 +760,7 @@ router.get("/admin/clients", adminMiddleware, async (req, res) => {
         // Adicionar estatísticas ao objeto do cliente
         return {
           ...clientData,
+          accessControl: normalizeClientAccessRecord(accessControl),
           passwordResetActive: readPasswordResetState(client).active,
           passwordResetRequestedAt: readPasswordResetState(client).requestedAt,
           passwordResetExpiresAt: readPasswordResetState(client).expiresAt,
@@ -512,6 +853,7 @@ router.get("/admin/clients/:id/details", adminMiddleware, async (req, res) => {
       paymentHistory,
       productsCount,
       servicesCount,
+      accessControl,
     ] = await Promise.all([
       Appointments.count({ where: { usersId: id } }),
       Sales.count({ where: { usersId: id } }),
@@ -542,6 +884,7 @@ router.get("/admin/clients/:id/details", adminMiddleware, async (req, res) => {
       }),
       Products.count({ where: { usersId: id } }),
       Services.count({ where: { establishment: id } }),
+      getOrCreateClientAccessControl(id),
     ]);
 
     // Calcular faturamento total e mensal
@@ -586,6 +929,7 @@ router.get("/admin/clients/:id/details", adminMiddleware, async (req, res) => {
         subscription: subscription || null,
         paymentHistory: paymentHistory || [],
       },
+      accessControl: normalizeClientAccessRecord(accessControl),
     };
 
     res.json({
