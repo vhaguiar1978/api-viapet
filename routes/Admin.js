@@ -47,6 +47,12 @@ import emailService from "../service/email.js";
 import { ensureDefaultMedicalCatalog } from "../service/defaultMedicalCatalog.js";
 const router = express.Router();
 const SYSTEM_GENERATED_USER_EMAIL_PATTERN = "indefinido.%@sistema.com";
+const UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function isUuid(value) {
+  return UUID_REGEX.test(String(value || "").trim());
+}
 
 function buildRealEmployeeWhere(extraWhere = {}) {
   return {
@@ -1818,100 +1824,119 @@ router.delete("/admin/clients/:id", adminMiddleware, async (req, res) => {
       .map((item) => String(item.id || ""))
       .filter((employeeId) => employeeId && employeeId !== String(id));
     const relatedUserIds = [String(id), ...employeeIds];
+    const relatedUuidUserIds = relatedUserIds.filter((item) => isUuid(item));
     const transaction = await Users.sequelize.transaction();
 
     try {
-      await Promise.all([
-        AppointmentStatusHistory.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
-        AppointmentPayment.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
-        AppointmentItem.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
-        SaleItem.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
-        PurchaseItems.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
-        CashClosure.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
-        ClientAccessControl.destroy({ where: { user_id: { [Op.in]: relatedUserIds } }, transaction }),
-        CrmAiActionLog.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
-        CrmConversationMessage.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
-        CrmConversation.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
-        PersonalFinance.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }).catch(() => null),
-        FinancialRecords.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
-        CrmWhatsappMessage.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
-        WhatsappConnection.destroy({
-          where: {
-            [Op.or]: [
-              { usersId: { [Op.in]: relatedUserIds } },
-              { companyId: { [Op.in]: relatedUserIds } },
-            ],
-          },
-          transaction,
-        }),
-        WhatsappMessage.destroy({
-          where: {
-            [Op.or]: [
-              { usersId: { [Op.in]: relatedUserIds } },
-              { companyId: { [Op.in]: relatedUserIds } },
-            ],
-          },
-          transaction,
-        }),
-        WhatsappTemplate.destroy({
-          where: {
-            [Op.or]: [
-              { usersId: { [Op.in]: relatedUserIds } },
-              { companyId: { [Op.in]: relatedUserIds } },
-            ],
-          },
-          transaction,
-        }),
-        WhatsappWebhookLog.destroy({
-          where: {
-            [Op.or]: [
-              { usersId: { [Op.in]: relatedUserIds } },
-              { companyId: { [Op.in]: relatedUserIds } },
-            ],
-          },
-          transaction,
-        }),
-        PaymentHistory.destroy({ where: { user_id: { [Op.in]: relatedUserIds } }, transaction }),
-        CrmAiSubscription.destroy({ where: { user_id: { [Op.in]: relatedUserIds } }, transaction }),
-        Subscription.destroy({ where: { user_id: { [Op.in]: relatedUserIds } }, transaction }),
-        LoginHistory.destroy({ where: { userId: { [Op.in]: relatedUserIds } }, transaction }),
-        Finances.destroy({
-          where: {
-            [Op.or]: [
-              { usersId: { [Op.in]: relatedUserIds } },
-              { createdBy: { [Op.in]: relatedUserIds } },
-            ],
-          },
-          transaction,
-        }),
-        Appointments.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
-        Sales.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
-        Purchases.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
-        Pets.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
-        Customers.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
-        Drivers.destroy({
-          where: {
-            [Op.or]: [
-              { usersId: { [Op.in]: relatedUserIds } },
-              { establishment: id },
-            ],
-          },
-          transaction,
-        }),
-        VaccinePlan.destroy({
-          where: {
-            [Op.or]: [
-              { usersId: { [Op.in]: relatedUserIds } },
-              { establishment: id },
-            ],
-          },
-          transaction,
-        }),
-        ServiceCategories.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
-        Products.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
-        Services.destroy({ where: { establishment: id }, transaction }),
-        Settings.destroy({ where: { usersId: { [Op.in]: relatedUserIds } }, transaction }),
-      ]);
+      const safeDestroy = async (label, model, where, optional = false) => {
+        try {
+          await model.destroy({ where, transaction });
+        } catch (destroyError) {
+          if (optional) return;
+          throw new Error(`${label}: ${destroyError.message}`);
+        }
+      };
+
+      await safeDestroy(
+        "AppointmentStatusHistory",
+        AppointmentStatusHistory,
+        { usersId: { [Op.in]: relatedUserIds } },
+      );
+      await safeDestroy("AppointmentPayment", AppointmentPayment, { usersId: { [Op.in]: relatedUserIds } });
+      await safeDestroy("AppointmentItem", AppointmentItem, { usersId: { [Op.in]: relatedUserIds } });
+      await safeDestroy("SaleItem", SaleItem, { usersId: { [Op.in]: relatedUserIds } });
+      await safeDestroy("PurchaseItems", PurchaseItems, { usersId: { [Op.in]: relatedUserIds } });
+      await safeDestroy("CashClosure", CashClosure, { usersId: { [Op.in]: relatedUserIds } });
+      await safeDestroy("ClientAccessControl", ClientAccessControl, { user_id: { [Op.in]: relatedUuidUserIds } });
+      await safeDestroy("CrmAiActionLog", CrmAiActionLog, { usersId: { [Op.in]: relatedUserIds } });
+      await safeDestroy("CrmConversationMessage", CrmConversationMessage, { usersId: { [Op.in]: relatedUserIds } });
+      await safeDestroy("CrmConversation", CrmConversation, { usersId: { [Op.in]: relatedUserIds } });
+      await safeDestroy("PersonalFinance", PersonalFinance, { usersId: { [Op.in]: relatedUserIds } }, true);
+      await safeDestroy("FinancialRecords", FinancialRecords, { usersId: { [Op.in]: relatedUserIds } });
+      await safeDestroy("CrmWhatsappMessage", CrmWhatsappMessage, { usersId: { [Op.in]: relatedUserIds } });
+      await safeDestroy(
+        "WhatsappConnection",
+        WhatsappConnection,
+        {
+          [Op.or]: [
+            { usersId: { [Op.in]: relatedUserIds } },
+            { companyId: { [Op.in]: relatedUserIds } },
+          ],
+        },
+      );
+      await safeDestroy(
+        "WhatsappMessage",
+        WhatsappMessage,
+        {
+          [Op.or]: [
+            { usersId: { [Op.in]: relatedUserIds } },
+            { companyId: { [Op.in]: relatedUserIds } },
+          ],
+        },
+      );
+      await safeDestroy(
+        "WhatsappTemplate",
+        WhatsappTemplate,
+        {
+          [Op.or]: [
+            { usersId: { [Op.in]: relatedUserIds } },
+            { companyId: { [Op.in]: relatedUserIds } },
+          ],
+        },
+      );
+      await safeDestroy(
+        "WhatsappWebhookLog",
+        WhatsappWebhookLog,
+        {
+          [Op.or]: [
+            { usersId: { [Op.in]: relatedUserIds } },
+            { companyId: { [Op.in]: relatedUserIds } },
+          ],
+        },
+      );
+      await safeDestroy("PaymentHistory", PaymentHistory, { user_id: { [Op.in]: relatedUuidUserIds } });
+      await safeDestroy("CrmAiSubscription", CrmAiSubscription, { user_id: { [Op.in]: relatedUuidUserIds } });
+      await safeDestroy("Subscription", Subscription, { user_id: { [Op.in]: relatedUuidUserIds } });
+      await safeDestroy("LoginHistory", LoginHistory, { userId: { [Op.in]: relatedUserIds } });
+      await safeDestroy(
+        "Finances",
+        Finances,
+        {
+          [Op.or]: [
+            { usersId: { [Op.in]: relatedUserIds } },
+            { createdBy: { [Op.in]: relatedUserIds } },
+          ],
+        },
+      );
+      await safeDestroy("Appointments", Appointments, { usersId: { [Op.in]: relatedUserIds } });
+      await safeDestroy("Sales", Sales, { usersId: { [Op.in]: relatedUserIds } });
+      await safeDestroy("Purchases", Purchases, { usersId: { [Op.in]: relatedUserIds } });
+      await safeDestroy("Pets", Pets, { usersId: { [Op.in]: relatedUserIds } });
+      await safeDestroy("Customers", Customers, { usersId: { [Op.in]: relatedUserIds } });
+      await safeDestroy(
+        "Drivers",
+        Drivers,
+        {
+          [Op.or]: [
+            { usersId: { [Op.in]: relatedUserIds } },
+            { establishment: id },
+          ],
+        },
+      );
+      await safeDestroy(
+        "VaccinePlan",
+        VaccinePlan,
+        {
+          [Op.or]: [
+            { usersId: { [Op.in]: relatedUserIds } },
+            { establishment: id },
+          ],
+        },
+      );
+      await safeDestroy("ServiceCategories", ServiceCategories, { usersId: { [Op.in]: relatedUserIds } });
+      await safeDestroy("Products", Products, { usersId: { [Op.in]: relatedUserIds } });
+      await safeDestroy("Services", Services, { establishment: id });
+      await safeDestroy("Settings", Settings, { usersId: { [Op.in]: relatedUserIds } });
 
       if (employeeIds.length) {
         await Users.destroy({
