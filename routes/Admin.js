@@ -1789,6 +1789,7 @@ router.post("/admin/clients/:id/reset-first-access", adminMiddleware, async (req
 router.delete("/admin/clients/:id", adminMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
+    const currentAdminId = String(req.user?.id || "");
     const user = await Users.findByPk(id);
 
     if (!user) {
@@ -1797,9 +1798,15 @@ router.delete("/admin/clients/:id", adminMiddleware, async (req, res) => {
       });
     }
 
-    if (user.role !== "proprietario") {
+    if (String(user.id) === currentAdminId) {
       return res.status(400).json({
-        message: "Somente contas proprietarias podem ser excluidas por esta central.",
+        message: "Nao e permitido excluir o proprio usuario administrador logado.",
+      });
+    }
+
+    if (String(user.role || "").toLowerCase() === "admin") {
+      return res.status(400).json({
+        message: "Nao e permitido excluir contas administrativas por esta rota.",
       });
     }
 
@@ -1932,8 +1939,8 @@ router.delete("/admin/clients/:id", adminMiddleware, async (req, res) => {
   }
 });
 
-// Rota para excluir cliente
-router.delete("/admin/clients/:id", adminMiddleware, async (req, res) => {
+// Rota legada (desativada) para excluir cliente
+router.delete("/admin/clients/:id/legacy-delete-disabled", adminMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
     const user = await Users.findByPk(id);
