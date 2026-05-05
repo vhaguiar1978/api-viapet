@@ -9,6 +9,7 @@ import Services from "../models/Services.js";
 import Sales from "../models/Sales.js";
 import SaleItem from "../models/SaleItem.js";
 import Product from "../models/Products.js";
+import AppointmentPayment from "../models/AppointmentPayment.js";
 const router = express.Router();
 
 router.get("/customers/search", auth, async (req, res) => {
@@ -141,6 +142,65 @@ router.delete("/customers/batch", auth, async (req, res) => {
     });
   }
 });
+// Sumário de dívidas por cliente — uma única query em vez de N*M requisições
+router.get("/customers/debt-summary", auth, async (req, res) => {
+  try {
+    const usersId = req.user.establishment;
+
+    const [pendingPayments, pendingSales, pets] = await Promise.all([
+      AppointmentPayment.findAll({
+        where: { usersId, status: "pendente" },
+        attributes: ["appointmentId", "grossAmount", "dueDate"],
+        include: [{
+          model: Appointment,
+          attributes: ["customerId", "date"],
+          where: { usersId },
+          required: true,
+        }],
+      }),
+      Sales.findAll({
+        where: { usersId, status: "pendente" },
+        attributes: ["custumerId", "total", "createdAt"],
+      }),
+      Pets.findAll({
+        where: { usersId },
+        attributes: ["custumerId", "name"],
+      }),
+    ]);
+
+    const summaryMap = {};
+
+    for (const payment of pendingPayments) {
+      const customerId = String(payment.Appointment?.customerId || "");
+      if (!customerId) continue;
+      if (!summaryMap[customerId]) summaryMap[customerId] = { amount: 0, latestPurchaseDate: "", petNames: [] };
+      summaryMap[customerId].amount += Number(payment.grossAmount || 0);
+      const d = payment.dueDate || payment.Appointment?.date || "";
+      if (d && d > (summaryMap[customerId].latestPurchaseDate || "")) summaryMap[customerId].latestPurchaseDate = d;
+    }
+
+    for (const sale of pendingSales) {
+      const customerId = String(sale.custumerId || "");
+      if (!customerId) continue;
+      if (!summaryMap[customerId]) summaryMap[customerId] = { amount: 0, latestPurchaseDate: "", petNames: [] };
+      summaryMap[customerId].amount += Number(sale.total || 0);
+      const d = sale.createdAt || "";
+      if (d && d > (summaryMap[customerId].latestPurchaseDate || "")) summaryMap[customerId].latestPurchaseDate = d;
+    }
+
+    for (const pet of pets) {
+      const customerId = String(pet.custumerId || "");
+      if (!customerId || !summaryMap[customerId] || !pet.name) continue;
+      if (!summaryMap[customerId].petNames.includes(pet.name)) summaryMap[customerId].petNames.push(pet.name);
+    }
+
+    return res.status(200).json({ message: "Sumário calculado com sucesso", data: summaryMap });
+  } catch (error) {
+    console.error("Erro ao calcular sumário de dívidas:", error);
+    return res.status(500).json({ message: "Erro ao calcular sumário de dívidas", error: error.message });
+  }
+});
+
 // Rota para adicionar um novo cliente
 router.post("/customers", auth, async (req, res) => {
   try {
