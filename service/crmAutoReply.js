@@ -268,6 +268,7 @@ function buildSystemPrompt({ settings, aiControl, services, products = [], custo
   const closing = String(settings?.closingTime || "18:00:00").slice(0, 5);
   const identifyAsAi = Boolean(aiControl?.identifyAsAi);
   const customInstructions = String(aiControl?.instructions || "").trim();
+  const assistantName = String(aiControl?.assistantName || "ViaPet IA").trim();
   const escalation = (aiControl?.escalationKeywords || [])
     .filter(Boolean)
     .join(", ");
@@ -275,7 +276,7 @@ function buildSystemPrompt({ settings, aiControl, services, products = [], custo
   const canCreateAppointment = Boolean(caps.createAppointment);
   const canUpdateAppointment = Boolean(caps.updateAppointment);
   const canCancelAppointment = Boolean(caps.cancelAppointment);
-  const canQuoteServices = caps.quoteServices !== false; // default true
+  const canQuoteServices = caps.quoteServices !== false;
   const canQuoteProducts = caps.quoteProducts !== false;
   const canListPets = caps.listCustomerPets !== false;
   const canListHistory = caps.listCustomerHistory !== false;
@@ -284,9 +285,25 @@ function buildSystemPrompt({ settings, aiControl, services, products = [], custo
   const todayIso = new Date().toISOString().slice(0, 10);
   const tomorrowIso = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
 
-  // Lista de servicos com IDs (uso INTERNO da IA, nao mostrar pro cliente)
-  // Limite generoso (40) — a IA recebe lista filtrada por relevancia.
-  const servicesList = services
+  // Filtra servicos para mostrar APENAS os relacionados a banho/tosa/hidratacao
+  // (especialidade da IA). Servicos clinicos/vacinas vao ficar fora — a IA
+  // encaminha pra atendente humana quando o cliente pedir.
+  const SPECIALTY_KEYWORDS = [
+    "banho", "tosa", "hidrat", "estetica", "estética",
+    "spa", "perfume", "unha", "dente", "limpeza", "higienic", "higiênic",
+    "pacotinho", "pacote", "transporte", "leva e traz", "buscar",
+  ];
+  const isSpecialtyService = (s) => {
+    const n = normalizeSearchable(s.name || "");
+    return SPECIALTY_KEYWORDS.some((kw) => n.includes(kw));
+  };
+  const specialtyServices = services.filter(isSpecialtyService);
+  const otherServices = services.filter((s) => !isSpecialtyService(s));
+
+  // Lista de servicos da ESPECIALIDADE (banho/tosa/hidratacao) com IDs.
+  // A IA SO atende esses. Os outros (clinica/vacinas) sao listados em separado
+  // SO para a IA saber que existem — mas ela NAO agenda, encaminha pra humano.
+  const servicesList = specialtyServices
     .slice(0, 40)
     .map((s) => {
       const price = s.price != null && Number(s.price) > 0
@@ -294,6 +311,12 @@ function buildSystemPrompt({ settings, aiControl, services, products = [], custo
         : "";
       return `- ID:${s.id} | ${s.name}${price}`;
     })
+    .join("\n");
+
+  // Servicos fora da especialidade (so para informar que existem, sem ID)
+  const nonSpecialtyList = otherServices
+    .slice(0, 15)
+    .map((s) => `- ${s.name}`)
     .join("\n");
 
   // Lista de produtos relevantes (so se a mensagem mencionar algo)
@@ -347,29 +370,35 @@ function buildSystemPrompt({ settings, aiControl, services, products = [], custo
     canSendCatalog ? "enviar catalogo de servicos" : null,
   ].filter(Boolean).join(", ");
 
-  return `Voce e o atendente virtual do ${storeName}, um pet shop. Atende clientes pelo WhatsApp.
+  return `Voce e ${assistantName}, atendente especialista em BANHO E TOSA do ${storeName}. Atende clientes pelo WhatsApp.
+
+🎯 SUA ESPECIALIDADE (UNICA):
+Banho, tosa higienica, hidratacao, pacotinhos, estetica, perfumaria, corte de unha, limpeza de dentes, leva-e-traz.
+
+🚫 O QUE NAO E SUA ESPECIALIDADE (encaminhar pra humano):
+- Tosa geral / tosa completa / tosa bebe (precisa avaliar o pet)
+- Consulta veterinaria, exame, vacina, cirurgia, internacao
+- Duvida medica de saude do pet
+- Reclamacoes, urgencias
 
 PERSONA E TOM:
-- Simpatica, calorosa, profissional. Atende como humano experiente de pet shop, nao como robo.
-- ${identifyAsAi ? "Pode dizer que e uma IA se perguntada diretamente." : "NAO se identifique como IA. Atue como uma atendente humana."}
-- Linguagem informal brasileira: "oi", "claro", "show", "fechado", "beleza", "sem problema".
-- Frases curtas (1 a 3). Objetiva. Evita encher o cliente de informacao desnecessaria.
+- Voce eh ${assistantName} — ${identifyAsAi ? "uma assistente da loja (pode dizer que e IA se perguntada)" : "atende como atendente humana experiente. NAO diga que eh uma IA."}
+- Apresenta-se como "${assistantName}" na primeira mensagem da conversa.
+- Calorosa, simpatica, profissional. Tom informal brasileiro.
+- Frases curtas e diretas (1 a 3). Sem encher o cliente de blablabla.
 - Emojis com moderacao 🐾 😊 ❤️
 - Hoje e ${today} (${todayIso}).
 
-⛔ NUNCA MOSTRE IDs PARA O CLIENTE.
-   IDs (UUIDs como "e07fd9eb-...") sao SO PARA VOCE preencher na action.
-   Para o cliente, fale apenas pelo NOME (ex: "Banho", "Tosa", "Pluto").
+⛔ NUNCA MOSTRE IDs PARA O CLIENTE (UUIDs sao SO INTERNOS).
 
 INFORMACOES DO ESTABELECIMENTO:
 - Nome: ${storeName}
 - Horario: ${opening} as ${closing}, segunda a sabado
 
-VOCE PODE: ${capabilitiesList || "responder mensagens"}.
+SERVICOS QUE VOCE PODE AGENDAR (sua especialidade):
+${servicesList || "- (lista vazia)"}
 
-SERVICOS E PRECOS DISPONIVEIS:
-${servicesList || "- (lista vazia — pergunte servicos pra o tutor)"}
-
+${nonSpecialtyList ? `SERVICOS QUE A LOJA TEM MAS VOCE NAO AGENDA (encaminha pra atendente humano):\n${nonSpecialtyList}\n` : ""}
 ${productsList ? `PRODUTOS NA LOJA:\n${productsList}\n` : ""}
 
 CONTEXTO DO CLIENTE ATUAL:
@@ -380,13 +409,19 @@ ${upcomingList ? `\nAgendamentos futuros deste cliente:\n${upcomingList}` : ""}
 ${pets && pets.length > 1 ? `🐾 Este cliente tem ${pets.length} pets. ANTES de agendar/remarcar, identifique qual pet pelo NOME (pergunte se nao for claro).` : ""}
 ${pets && pets.length === 1 ? `Cliente tem 1 pet (${pets[0].name}). Pode usar direto, sem perguntar qual.` : ""}
 
+${customInstructions ? `═══════════════════════════════════════════════════════════════
+⭐ REGRAS ESPECIAIS DO DONO DA LOJA (PRIORIDADE MAXIMA — SIGA SEMPRE) ⭐
+═══════════════════════════════════════════════════════════════
+${customInstructions}
+═══════════════════════════════════════════════════════════════
+` : ""}
+
 O QUE NAO FAZER:
 - Inventar precos ou servicos fora da lista.
-- Discutir assuntos fora de pet shop.
-- Dar diagnostico ou tratamento veterinario serio (encaminha pra atendente humano).
-- Em caso destas palavras: ${escalation || "urgente, reclamacao, emergencia"} → escalar pra humano.
-
-${customInstructions ? `INSTRUCOES ESPECIAIS DO DONO:\n${customInstructions}\n` : ""}
+- Tentar atender consulta veterinaria, vacina, exame ou cirurgia.
+- Dar diagnostico ou conselho veterinario.
+- Em caso de palavras como: ${escalation || "urgente, reclamacao, emergencia"} → escalar pra atendente humano.
+- Se o cliente pedir servico que NAO seja banho/tosa/hidratacao/estetica → diga que vai chamar a atendente humana.
 
 ⚠️ FORMATO DE RESPOSTA OBRIGATORIO ⚠️
 SEMPRE responda em JSON valido:
