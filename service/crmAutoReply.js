@@ -323,6 +323,47 @@ function buildSystemPrompt({ settings, aiControl, services, products = [], custo
   const todayIso = new Date().toISOString().slice(0, 10);
   const tomorrowIso = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
 
+  // Playbook: pares de Q/A que o dono salvou no painel pra ensinar a IA
+  // como responder em situacoes especificas. Vira "few-shot" no prompt.
+  const playbook = Array.isArray(aiControl?.playbookMessages)
+    ? aiControl.playbookMessages.filter((m) => m && m.text && m.role)
+    : [];
+  const playbookSection = playbook.length > 0
+    ? "\n📚 PLAYBOOK DO DONO (exemplos de como responder em situacoes especificas):\n" +
+      playbook
+        .slice(-15)
+        .map((m, i) => {
+          const who = m.role === "assistant" ? "VOCE responde" : "Cliente diz";
+          return `[${i + 1}] ${who}: ${String(m.text).slice(0, 300)}`;
+        })
+        .join("\n")
+    : "";
+
+  // Regras de scheduling extras
+  const sched = aiControl?.scheduling || {};
+  const allowedDaysList = Array.isArray(sched.allowedDays) && sched.allowedDays.length > 0
+    ? sched.allowedDays.map((d) => {
+        const map = { sunday: "domingo", monday: "segunda", tuesday: "terca", wednesday: "quarta", thursday: "quinta", friday: "sexta", saturday: "sabado" };
+        return map[d] || d;
+      }).join(", ")
+    : null;
+  const allowedCategoriesList = Array.isArray(sched.allowedServiceCategories) && sched.allowedServiceCategories.length > 0
+    ? sched.allowedServiceCategories.join(", ")
+    : null;
+  const minLead = Number(sched.minimumLeadMinutes || 0);
+  const maxDaily = Number(sched.maxDailyAppointments || 0);
+
+  const schedulingRulesSection =
+    (allowedDaysList || allowedCategoriesList || minLead > 0 || maxDaily > 0)
+      ? "\n📅 REGRAS DE AGENDAMENTO (validadas no servidor — se voce ignorar, o sistema vai recusar):\n" +
+        [
+          allowedDaysList ? `- Dias permitidos: ${allowedDaysList}.` : null,
+          allowedCategoriesList ? `- Categorias permitidas: ${allowedCategoriesList}.` : null,
+          minLead > 0 ? `- Minimo de antecedencia: ${minLead} minutos. Nao agende mais cedo que isso.` : null,
+          maxDaily > 0 ? `- Maximo ${maxDaily} agendamentos por dia (se chegou no limite, ofereca outro dia).` : null,
+        ].filter(Boolean).join("\n")
+      : "";
+
   // Filtra servicos para mostrar APENAS os relacionados a banho/tosa/hidratacao
   // (especialidade da IA). Servicos clinicos/vacinas vao ficar fora — a IA
   // encaminha pra atendente humana quando o cliente pedir.
@@ -453,7 +494,7 @@ ${customInstructions ? `══════════════════�
 ═══════════════════════════════════════════════════════════════
 ${customInstructions}
 ═══════════════════════════════════════════════════════════════
-` : ""}
+` : ""}${playbookSection}${schedulingRulesSection}
 
 O QUE NAO FAZER (NUNCA):
 - Inventar precos ou servicos fora da lista.
@@ -712,6 +753,108 @@ async function executeAiAction({ action, usersId, conversation, customer, pet, p
       return { executed: false, reason: "no_service_id" };
     }
 
+    // ─── VALIDACOES DE SCHEDULING (regras do painel) ────────────────────
+    const sched = aiControl?.scheduling || {};
+
+    // 1) Validar dia da semana permitido
+    const allowedDays = Array.isArray(sched.allowedDays) ? sched.allowedDays : null;
+    if (allowedDays && allowedDays.length > 0) {
+      const dayOfWeek = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"][
+        new Date(`${date}T12:00:00`).getDay()
+      ];
+      if (!allowedDays.includes(dayOfWeek)) {
+        const dayPt = { sunday: "domingo", monday: "segunda", tuesday: "terca", wednesday: "quarta", thursday: "quinta", friday: "sexta", saturday: "sabado" }[dayOfWeek];
+        console.log(`[CrmAutoReply] Agendamento recusado: dia ${dayPt} nao permitido. Permitidos: ${allowedDays.join(",")}`);
+        return {
+          executed: false,
+          reason: "day_not_allowed",
+          message: `Nao agendamos em ${dayPt}. Dias disponiveis: ${allowedDays.map((d) => ({ sunday: "dom", monday: "seg", tuesday: "ter", wednesday: "qua", thursday: "qui", friday: "sex", saturday: "sab" }[d] || d)).join(", ")}.`,
+        };
+      }
+    }
+
+    // 2) Validar tempo minimo de antecedencia
+    const minLead = Number(sched.minimumLeadMinutes || 0);
+    if (minLead > 0) {
+      const requestedAt = new Date(`${date}T${time.slice(0, 5)}:00`);
+      const now = new Date();
+      const diffMin = (requestedAt - now) / 60000;
+      if (diffMin < minLead) {
+        console.log(`[CrmAutoReply] Agendamento recusado: ${diffMin.toFixed(0)}min antes (minimo ${minLead}min)`);
+        return {
+          executed: false,
+          reason: "lead_time_too_short",
+          message: `Preciso de pelo menos ${minLead} minutos de antecedencia. Quer escolher outro horario?`,
+        };
+      }
+    }
+
+    // 3) Validar horario dentro da janela permitida
+    const allowedStart = String(sched.allowedTimeStart || "").trim();
+    const allowedEnd = String(sched.allowedTimeEnd || "").trim();
+    if (allowedStart && allowedEnd) {
+      const reqTime = time.slice(0, 5);
+      if (reqTime < allowedStart || reqTime > allowedEnd) {
+        console.log(`[CrmAutoReply] Agendamento recusado: ${reqTime} fora da janela ${allowedStart}-${allowedEnd}`);
+        return {
+          executed: false,
+          reason: "time_out_of_window",
+          message: `Atendemos das ${allowedStart} as ${allowedEnd}. Quer escolher um horario nessa faixa?`,
+        };
+      }
+    }
+
+    // 4) Validar maximo de agendamentos por dia
+    const maxDaily = Number(sched.maxDailyAppointments || 0);
+    if (maxDaily > 0) {
+      try {
+        const { default: Appointment } = await import("../models/Appointment.js");
+        const dayCount = await Appointment.count({
+          where: {
+            usersId,
+            date,
+            status: { [Op.notIn]: ["Cancelado", "cancelado"] },
+          },
+        });
+        if (dayCount >= maxDaily) {
+          console.log(`[CrmAutoReply] Agendamento recusado: dia cheio (${dayCount}/${maxDaily})`);
+          return {
+            executed: false,
+            reason: "day_at_capacity",
+            message: `Esse dia ja esta cheio (${dayCount} agendamentos). Posso ver outro dia pra voce?`,
+          };
+        }
+      } catch (_) {
+        // Se falhar a query, deixa criar
+      }
+    }
+
+    // 5) Validar categoria de servico permitida
+    const allowedCategories = Array.isArray(sched.allowedServiceCategories) ? sched.allowedServiceCategories : null;
+    if (allowedCategories && allowedCategories.length > 0) {
+      try {
+        const { default: ServicesModel } = await import("../models/Services.js");
+        const svc = await ServicesModel.findOne({
+          where: { id: serviceId, establishment: usersId },
+          attributes: ["id", "name", "category"],
+        });
+        if (svc) {
+          const cat = String(svc.category || "").toLowerCase();
+          const allowedLower = allowedCategories.map((c) => String(c).toLowerCase());
+          if (cat && !allowedLower.some((a) => cat.includes(a) || a.includes(cat))) {
+            console.log(`[CrmAutoReply] Agendamento recusado: categoria "${svc.category}" nao permitida`);
+            return {
+              executed: false,
+              reason: "category_not_allowed",
+              message: `Esse servico nao esta na minha lista. Vou pedir pra atendente humana entrar em contato.`,
+            };
+          }
+        }
+      } catch (_) {
+        // Se falhar a query, deixa criar
+      }
+    }
+
     try {
       const { default: Appointment } = await import("../models/Appointment.js");
       const { v4: uuidv4 } = await import("uuid");
@@ -747,13 +890,52 @@ async function executeAiAction({ action, usersId, conversation, customer, pet, p
     if (!/^\d{4}-\d{2}-\d{2}$/.test(newDate)) return { executed: false, reason: "invalid_date", details: newDate };
     if (!/^\d{2}:\d{2}/.test(newTime)) return { executed: false, reason: "invalid_time", details: newTime };
 
+    // Aplica mesmas validacoes de scheduling do create_appointment
+    const sched = aiControl?.scheduling || {};
+    const allowedDays = Array.isArray(sched.allowedDays) ? sched.allowedDays : null;
+    if (allowedDays && allowedDays.length > 0) {
+      const dayOfWeek = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"][
+        new Date(`${newDate}T12:00:00`).getDay()
+      ];
+      if (!allowedDays.includes(dayOfWeek)) {
+        const dayPt = { sunday: "domingo", monday: "segunda", tuesday: "terca", wednesday: "quarta", thursday: "quinta", friday: "sexta", saturday: "sabado" }[dayOfWeek];
+        return {
+          executed: false,
+          reason: "day_not_allowed",
+          message: `Nao atendemos em ${dayPt}. Quer escolher outro dia?`,
+        };
+      }
+    }
+    const allowedStart = String(sched.allowedTimeStart || "").trim();
+    const allowedEnd = String(sched.allowedTimeEnd || "").trim();
+    if (allowedStart && allowedEnd) {
+      const reqTime = newTime.slice(0, 5);
+      if (reqTime < allowedStart || reqTime > allowedEnd) {
+        return {
+          executed: false,
+          reason: "time_out_of_window",
+          message: `Atendemos das ${allowedStart} as ${allowedEnd}. Escolhe um horario nessa faixa?`,
+        };
+      }
+    }
+
     try {
       const { default: Appointment } = await import("../models/Appointment.js");
       const found = await Appointment.findOne({ where: { id: appointmentId, usersId } });
-      if (!found) return { executed: false, reason: "appointment_not_found" };
+      if (!found) {
+        return {
+          executed: false,
+          reason: "appointment_not_found",
+          message: "Nao achei esse agendamento. Pode confirmar a data e o pet?",
+        };
+      }
       // Seguranca: so deixa remarcar agendamentos do customer atual
       if (customer?.id && String(found.customerId) !== String(customer.id)) {
-        return { executed: false, reason: "appointment_belongs_to_other_customer" };
+        return {
+          executed: false,
+          reason: "appointment_belongs_to_other_customer",
+          message: "Esse agendamento nao consta vinculado a voce. Vou pedir pra atendente humana verificar.",
+        };
       }
       await found.update({
         date: newDate,
@@ -778,9 +960,19 @@ async function executeAiAction({ action, usersId, conversation, customer, pet, p
     try {
       const { default: Appointment } = await import("../models/Appointment.js");
       const found = await Appointment.findOne({ where: { id: appointmentId, usersId } });
-      if (!found) return { executed: false, reason: "appointment_not_found" };
+      if (!found) {
+        return {
+          executed: false,
+          reason: "appointment_not_found",
+          message: "Nao achei esse agendamento pra cancelar. Pode confirmar a data e o pet?",
+        };
+      }
       if (customer?.id && String(found.customerId) !== String(customer.id)) {
-        return { executed: false, reason: "appointment_belongs_to_other_customer" };
+        return {
+          executed: false,
+          reason: "appointment_belongs_to_other_customer",
+          message: "Esse agendamento nao consta vinculado a voce. Vou pedir pra atendente humana verificar.",
+        };
       }
       const reason = String(action.reason || "Cliente cancelou via WhatsApp").slice(0, 200);
       await found.update({
@@ -1032,11 +1224,16 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
           aiControl: check.aiControl,
         });
         console.log(`[CrmAutoReply] Action: ${JSON.stringify(executedAction)}`);
-        // Se a acao foi executada, complementa o reply com confirmacao
+        // Se a acao foi executada, mantem o reply (a IA ja confirmou no texto)
         if (executedAction.executed) {
-          reply = reply + ` ✅ Agendamento criado: ${parsed.action.date} ${parsed.action.time}.`;
+          // Sucesso — nao adiciona nada, a IA ja respondeu confirmando
+        } else if (executedAction.message) {
+          // Validacao falhou com motivo amigavel — SOBRESCREVE o reply
+          // (a IA pode ter dito "Pronto, agendado!" mas o servidor recusou)
+          reply = executedAction.message;
+          console.log(`[CrmAutoReply] Reply sobrescrito por validacao: ${executedAction.reason}`);
         } else if (executedAction.reason === "capability_disabled") {
-          reply = reply + ` (⚠ Voce ainda precisa habilitar 'Agendar atendimento' no controle da IA.)`;
+          reply = reply + ` (⚠ Voce ainda precisa habilitar essa acao no controle da IA.)`;
         }
       }
     } catch (groqErr) {
