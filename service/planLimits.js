@@ -1,5 +1,6 @@
 import { Op } from "sequelize";
 import Subscription from "../models/Subscription.js";
+import CrmAiSubscription from "../models/CrmAiSubscription.js";
 import CrmConversationMessage from "../models/CrmConversationMessage.js";
 
 // Catalogo central de planos. Mantenha sincronizado com a UI (planLimits.js do frontend).
@@ -89,11 +90,43 @@ export async function checkLimit(userId, limitKey) {
   }
 
   if (limitKey === "aiEnabled") {
-    return { allowed: Boolean(plan.aiEnabled), used: 0, limit: 1, remaining: plan.aiEnabled ? 1 : 0, planKey };
+    // Plano geral cobre? Se sim, libera direto.
+    if (plan.aiEnabled) {
+      return { allowed: true, used: 0, limit: 1, remaining: 1, planKey };
+    }
+    // Caso contrario, checa liberacao manual via CrmAiSubscription (admin liberou
+    // gratis/trial/pago manual). Isso evita o caso "admin liberou mas /control bloqueia".
+    const aiSub = await CrmAiSubscription.findOne({
+      where: { user_id: userId, status: "active" },
+      order: [["created_at", "DESC"]],
+    });
+    if (aiSub) {
+      const expiry = aiSub.next_billing_date ? new Date(aiSub.next_billing_date) : null;
+      const expired = expiry && expiry < new Date();
+      if (!expired) {
+        return { allowed: true, used: 0, limit: 1, remaining: 1, planKey, source: "crmAiSubscription" };
+      }
+    }
+    return { allowed: false, used: 0, limit: 1, remaining: 0, planKey };
   }
 
   if (limitKey === "automationsEnabled") {
-    return { allowed: Boolean(plan.automationsEnabled), used: 0, limit: 1, remaining: plan.automationsEnabled ? 1 : 0, planKey };
+    if (plan.automationsEnabled) {
+      return { allowed: true, used: 0, limit: 1, remaining: 1, planKey };
+    }
+    // Mesma logica: se a IA foi liberada manualmente, automacoes seguem junto.
+    const aiSub = await CrmAiSubscription.findOne({
+      where: { user_id: userId, status: "active" },
+      order: [["created_at", "DESC"]],
+    });
+    if (aiSub) {
+      const expiry = aiSub.next_billing_date ? new Date(aiSub.next_billing_date) : null;
+      const expired = expiry && expiry < new Date();
+      if (!expired) {
+        return { allowed: true, used: 0, limit: 1, remaining: 1, planKey, source: "crmAiSubscription" };
+      }
+    }
+    return { allowed: false, used: 0, limit: 1, remaining: 0, planKey };
   }
 
   return { allowed: true, used: 0, limit: Infinity, remaining: Infinity, planKey };
@@ -103,6 +136,25 @@ export async function checkLimit(userId, limitKey) {
 export async function getPlanStatus(userId) {
   const { plan, planKey, subscription } = await getUserPlan(userId);
   const messagesUsed = await countOutboundMessagesThisMonth(userId);
+
+  // Verifica se ha CrmAiSubscription manual ativa (admin liberou IA)
+  let crmAiManualActive = false;
+  try {
+    const aiSub = await CrmAiSubscription.findOne({
+      where: { user_id: userId, status: "active" },
+      order: [["created_at", "DESC"]],
+    });
+    if (aiSub) {
+      const expiry = aiSub.next_billing_date ? new Date(aiSub.next_billing_date) : null;
+      const expired = expiry && expiry < new Date();
+      crmAiManualActive = !expired;
+    }
+  } catch {
+    // segue sem o complemento manual
+  }
+
+  const aiEnabled = Boolean(plan.aiEnabled || crmAiManualActive);
+  const automationsEnabled = Boolean(plan.automationsEnabled || crmAiManualActive);
 
   return {
     planKey,
@@ -125,9 +177,11 @@ export async function getPlanStatus(userId) {
         : 0,
     },
     features: {
-      aiEnabled: plan.aiEnabled,
-      automationsEnabled: plan.automationsEnabled,
+      aiEnabled,
+      automationsEnabled,
       attendants: plan.attendants,
+      // bandeira para a UI saber que a liberacao veio do admin (manual)
+      manualOverride: crmAiManualActive && !plan.aiEnabled,
     },
   };
 }
