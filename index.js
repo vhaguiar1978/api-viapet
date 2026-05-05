@@ -38,6 +38,11 @@ import crmWhatsappRouter from "./routes/crmWhatsapp.js";
 import crmWhatsappOauthRouter from "./routes/crmWhatsappOauth.js";
 import crmConversationsRouter from "./routes/crmConversations.js";
 import crmBaileysRouter from "./routes/crmBaileys.js";
+import crmAutomationsRouter from "./routes/crmAutomations.js";
+import crmPlanStatusRouter from "./routes/crmPlanStatus.js";
+import { runAutomationsForAllUsers } from "./service/crmAutomations.js";
+import BaileysService from "./service/baileys.js";
+import cron from "node-cron";
 import whatsappOfficialRouter from "./routes/whatsappOfficial.js";
 import whatsappHubRouter from "./routes/whatsappHub.js";
 import FilterRouter from "./routes/filter.routes.js";
@@ -153,6 +158,8 @@ app.use(crmWhatsappRouter);
 app.use(crmWhatsappOauthRouter);
 app.use(crmConversationsRouter);
 app.use(crmBaileysRouter);
+app.use(crmAutomationsRouter);
+app.use(crmPlanStatusRouter);
 app.use(FilterRouter);
 app.use("/services", serviceRoutes);
 app.use(appointmentComandaRouter);
@@ -183,8 +190,35 @@ async function ensureAppointmentSchema() {
       });
       console.log("Coluna packageGroupId adicionada em Appointments");
     }
+
+    if (!appointmentTable.automationsSent) {
+      await queryInterface.addColumn("appointments", "automationsSent", {
+        type: DataTypes.JSON,
+        allowNull: false,
+        defaultValue: [],
+        comment: "Registro das automacoes de WhatsApp ja disparadas para este agendamento",
+      });
+      console.log("Coluna automationsSent adicionada em Appointments");
+    }
   } catch (error) {
     console.error("Nao foi possivel validar o schema de Appointments:", error);
+  }
+}
+
+async function ensureSettingsAutomationsSchema() {
+  const queryInterface = sequelize.getQueryInterface();
+  try {
+    const settingsTable = await queryInterface.describeTable("settings");
+    if (!settingsTable.crmAutomations) {
+      await queryInterface.addColumn("settings", "crmAutomations", {
+        type: DataTypes.JSON,
+        allowNull: false,
+        defaultValue: {},
+      });
+      console.log("Coluna crmAutomations adicionada em Settings");
+    }
+  } catch (error) {
+    console.error("Nao foi possivel validar o schema de Settings (crmAutomations):", error);
   }
 }
 
@@ -358,6 +392,33 @@ async function ensureCrmConversationsSchema() {
   }
 }
 
+async function reinitBaileysSessions() {
+  // Apos restart, reabre as conexoes Baileys de quem ja tinha sessao salva.
+  // Sem isso, os usuarios continuam recebendo "connected" no DB mas o socket
+  // nao esta ativo na memoria — e mensagens entrantes sao perdidas.
+  try {
+    const { default: Settings } = await import("./models/Settings.js");
+    const all = await Settings.findAll({ attributes: ["usersId", "whatsappConnection"], limit: 500 });
+    const candidates = all.filter((s) => {
+      const cfg = s?.whatsappConnection?.baileys;
+      return cfg && (cfg.connectionStatus === "connected" || cfg.authState?.creds);
+    });
+    if (candidates.length === 0) return;
+    console.log(`🔄 Reabrindo ${candidates.length} sessao(oes) Baileys salvas...`);
+    for (const settings of candidates) {
+      try {
+        const inst = BaileysService.getInstance(settings.usersId, "default");
+        await inst.initialize();
+        console.log(`  ✓ Baileys reinicializado para user ${settings.usersId}`);
+      } catch (err) {
+        console.warn(`  ✗ Falhou para user ${settings.usersId}:`, err?.message);
+      }
+    }
+  } catch (err) {
+    console.error("Erro no auto-reinit do Baileys:", err?.message);
+  }
+}
+
 sequelize
   .sync()
   .then(async () => {
@@ -365,7 +426,10 @@ sequelize
     await ensureAppointmentSchema();
     await ensureWhatsappHubSchema();
     await ensureCrmConversationsSchema();
+    await ensureSettingsAutomationsSchema();
     console.log("Conectado ao banco de dados");
+    // Reabre sessoes Baileys em background (nao bloqueia startup)
+    reinitBaileysSessions();
   })
   .catch((erro) => {
     console.error("Houve um erro: ", erro);
@@ -379,6 +443,21 @@ app.listen(PORT, () => {
   console.log("📡 Rotas de subscription corrigidas - RESTART");
   console.log("🔗 Ambiente: ", process.env.NODE_ENV);
   console.log("🔗 API_URL: ", process.env.API_URL);
+
+  // Cron de automacoes CRM — roda a cada 5 minutos
+  if (process.env.DISABLE_CRM_AUTOMATIONS_CRON !== "true") {
+    cron.schedule("*/5 * * * *", async () => {
+      try {
+        const result = await runAutomationsForAllUsers();
+        if (result.totalUsers > 0) {
+          console.log(`🤖 Automacoes CRM rodadas para ${result.totalUsers} usuarios`);
+        }
+      } catch (error) {
+        console.error("❌ Erro no cron de automacoes:", error.message);
+      }
+    });
+    console.log("🤖 Cron de automacoes CRM ativado (a cada 5 min)");
+  }
 
   // Keep-alive: ping próprio a cada 14 minutos para evitar hibernação no Render
   if (process.env.NODE_ENV === "production" && process.env.API_URL) {

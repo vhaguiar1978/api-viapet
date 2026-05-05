@@ -4,6 +4,7 @@ import BaileysService from "../service/baileys.js";
 import Settings from "../models/Settings.js";
 import CrmConversation from "../models/CrmConversation.js";
 import CrmConversationMessage from "../models/CrmConversationMessage.js";
+import { enforcePlanLimit } from "../service/planLimits.js";
 import { v4 as uuidv4 } from "uuid";
 
 const router = express.Router();
@@ -257,7 +258,7 @@ router.post("/crm-baileys/reset", authenticate, async (req, res) => {
 });
 
 // Send message via Baileys
-router.post("/crm-baileys/send", authenticate, async (req, res) => {
+router.post("/crm-baileys/send", authenticate, enforcePlanLimit("messagesPerMonth"), async (req, res) => {
   try {
     const { userId } = await resolveSettingsOwner(req);
     const { phone, text, conversationId } = req.body;

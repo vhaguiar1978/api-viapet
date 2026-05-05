@@ -65,6 +65,10 @@ const Settings = sequelize.define(
       type: DataTypes.JSON,
       defaultValue: {},
     },
+    crmAutomations: {
+      type: DataTypes.JSON,
+      defaultValue: {},
+    },
     workingDays: {
       type: DataTypes.JSON,
       defaultValue: {

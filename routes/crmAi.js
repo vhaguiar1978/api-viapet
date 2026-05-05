@@ -15,6 +15,7 @@ import CrmAiActionLog from "../models/CrmAiActionLog.js";
 import CrmAiSubscription from "../models/CrmAiSubscription.js";
 import sequelize from "../database/config.js";
 import { createSubscriptionPreference, processWebhookEvent, validateWebhookSignature } from "../service/mercadopago.js";
+import { checkLimit } from "../service/planLimits.js";
 
 const router = express.Router();
 const CRM_AI_PRICE = Number(process.env.CRM_AI_PRICE || 49.9);
@@ -242,6 +243,8 @@ function sanitizeControlSettings(value) {
       source.autoExecuteEnabled,
       DEFAULT_CONTROL.autoExecuteEnabled,
     ),
+    identifyAsAi: normalizeBoolean(source.identifyAsAi, false),
+    groqApiKey: String(source.groqApiKey || "").trim(),
     assistantName: String(
       source.assistantName || DEFAULT_CONTROL.assistantName,
     ).trim(),
@@ -1388,6 +1391,18 @@ router.post("/control", auth, owner, async (req, res) => {
     const usersId = getEstablishmentId(req);
     const { settings, whatsappConnection } = await getOrCreateControlSettings(usersId);
     const control = sanitizeControlSettings(req.body || {});
+
+    // Bloqueia ativacao da IA se o plano nao permite
+    if (control.enabled) {
+      const aiCheck = await checkLimit(usersId, "aiEnabled");
+      if (!aiCheck.allowed) {
+        return res.status(402).json({
+          success: false,
+          error: "O plano atual nao inclui IA. Faca upgrade para usar este recurso.",
+          planKey: aiCheck.planKey,
+        });
+      }
+    }
 
     settings.whatsappConnection = {
       ...whatsappConnection,

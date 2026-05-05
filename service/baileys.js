@@ -5,6 +5,7 @@ import makeWASocket, {
   initAuthCreds,
   BufferJSON,
   Browsers,
+  fetchLatestBaileysVersion,
 } from "baileys";
 import qrcode from "qrcode";
 import Settings from "../models/Settings.js";
@@ -183,9 +184,21 @@ class BaileysService {
       this.authState = state;
       this.saveCreds = saveCreds;
 
+      // Busca a versao mais recente do WhatsApp Web — evita erro 405 quando
+      // a versao hardcoded do Baileys fica obsoleta perante o servidor da Meta.
+      let waVersion;
+      try {
+        const latest = await fetchLatestBaileysVersion();
+        waVersion = latest?.version;
+        console.log(`[Baileys] Using WA Web version ${waVersion?.join(".") || "unknown"} (latest=${latest?.isLatest})`);
+      } catch (err) {
+        console.warn(`[Baileys] Falha ao buscar versao mais recente, usando default:`, err?.message);
+      }
+
       this.connectionAttempts += 1;
       this.sock = makeWASocket({
         auth: state,
+        ...(waVersion ? { version: waVersion } : {}),
         printQRInTerminal: false,
         browser: this.resolveBrowserProfile(),
         connectTimeoutMs: 20000,
@@ -278,11 +291,20 @@ class BaileysService {
           await this.updateSettingsInDb();
         }
       } else if (statusCode === DisconnectReason.restartRequired) {
-        // WA asked for restart, do it immediately
+        // WA pediu restart (acontece logo apos escanear o QR, code 515).
+        // Espera o saveCreds da sessao recem-pareada terminar antes de reiniciar,
+        // senao reabre com auth state antigo e cai em loop.
         console.log(`[Baileys] Restart required for user ${this.userId}`);
         this.connectionStatus = "connecting";
         this.isInitializing = false;
-        setTimeout(() => this.initialize(), 1000);
+        try {
+          if (typeof this.saveCreds === "function") {
+            await this.saveCreds();
+          }
+        } catch (saveErr) {
+          console.warn(`[Baileys] saveCreds antes do restart falhou:`, saveErr?.message);
+        }
+        setTimeout(() => this.initialize(), 3000);
       } else {
         this.retryCount += 1;
         if (this.retryCount < this.maxRetries) {
@@ -303,8 +325,14 @@ class BaileysService {
       this.qrCode = null;
       this.retryCount = 0;
       const phoneNumber = this.sock.user?.id?.replace(/:.*@.*/, "");
-      console.log(`[Baileys] Connected! User ${this.userId}, phone: ${phoneNumber}`);
-      await this.updateSettingsInDb({ connectedPhone: phoneNumber });
+      const displayName = this.sock.user?.name || this.sock.user?.verifiedName || null;
+      const connectedAt = new Date().toISOString();
+      console.log(`[Baileys] Connected! User ${this.userId}, phone: ${phoneNumber}, name: ${displayName}`);
+      await this.updateSettingsInDb({
+        connectedPhone: phoneNumber,
+        displayName,
+        connectedAt,
+      });
     }
 
     // Always sync status to DB
@@ -312,11 +340,46 @@ class BaileysService {
   }
 
   async handleMessagesUpsert({ messages, type }) {
-    if (type !== "notify") return;
+    console.log(`[Baileys IN] user=${this.userId} type=${type} count=${messages?.length || 0}`);
+    if (type !== "notify" && type !== "append") {
+      console.log(`[Baileys IN] ignorado (type=${type})`);
+      return;
+    }
+
+    // Anti-duplicacao: cache de IDs de mensagem ja processados (memoria, expira em 5min)
+    if (!this._processedIds) this._processedIds = new Map();
+    const now = Date.now();
+    // Limpa IDs antigos
+    for (const [k, t] of this._processedIds.entries()) {
+      if (now - t > 5 * 60 * 1000) this._processedIds.delete(k);
+    }
 
     for (const msg of messages) {
-      if (msg.key.fromMe) continue;
-      if (isJidBroadcast(msg.key.remoteJid)) continue;
+      const jid = msg?.key?.remoteJid;
+      const msgId = msg?.key?.id;
+      console.log(`[Baileys IN] msg jid=${jid} fromMe=${msg?.key?.fromMe} hasBody=${!!(msg?.message?.conversation || msg?.message?.extendedTextMessage?.text)}`);
+
+      if (msg.key.fromMe) {
+        console.log(`[Baileys IN] ignorado (fromMe) jid=${jid}`);
+        continue;
+      }
+      if (isJidBroadcast(jid)) {
+        console.log(`[Baileys IN] ignorado (broadcast) jid=${jid}`);
+        continue;
+      }
+      // IGNORA GRUPOS — evita spam e banimento
+      if (typeof jid === "string" && jid.endsWith("@g.us")) {
+        console.log(`[Baileys IN] ignorado (grupo) jid=${jid}`);
+        continue;
+      }
+      // Anti-duplicacao
+      if (msgId && this._processedIds.has(msgId)) {
+        console.log(`[Baileys IN] ignorado (duplicado) id=${msgId}`);
+        continue;
+      }
+      if (msgId) this._processedIds.set(msgId, now);
+
+      console.log(`[Baileys IN] processando jid=${jid}`);
       await this.processInboundMessage(msg);
     }
   }
@@ -328,27 +391,64 @@ class BaileysService {
   async processInboundMessage(msg) {
     try {
       const fromJid = msg.key.remoteJid;
-      const phone = fromJid.replace("@s.whatsapp.net", "").replace("@g.us", "");
+      // Baileys 7.x: contatos novos vem como "@lid" (Linked ID interno).
+      // Tenta extrair o numero real via senderPn/participantPn, senao usa o lid mesmo.
+      let phone = "";
+      if (typeof fromJid === "string" && fromJid.endsWith("@lid")) {
+        const realPn = String(msg.key.senderPn || msg.key.participantPn || "").replace(/@.*$/, "");
+        if (realPn) {
+          phone = realPn;
+          console.log(`[Baileys IN] @lid resolvido para ${phone}`);
+        } else {
+          phone = fromJid.replace("@lid", "");
+          console.warn(`[Baileys IN] @lid sem numero real, usando lid: ${phone}`);
+        }
+      } else {
+        phone = String(fromJid || "").replace("@s.whatsapp.net", "").replace("@g.us", "");
+      }
+
+      const pushName = String(msg.pushName || "").trim();
       const messageBody =
         msg.message?.conversation ||
         msg.message?.extendedTextMessage?.text ||
         "";
 
       if (!messageBody) return;
+      if (!phone) {
+        console.warn(`[Baileys IN] mensagem ignorada (sem phone) jid=${fromJid}`);
+        return;
+      }
 
-      // Find or create customer
+      // Find or create customer.
+      // Tentamos nessa ordem: phone exato → pushName (case-insensitive) → cria novo.
+      // Match por pushName ajuda quando o WhatsApp manda @lid e nao temos o telefone real.
       let customer = await Custumers.findOne({
         where: { phone, usersId: this.userId },
         attributes: ["id", "name"],
       });
+
+      if (!customer && pushName) {
+        const { Op } = await import("sequelize");
+        customer = await Custumers.findOne({
+          where: {
+            usersId: this.userId,
+            name: { [Op.iLike]: pushName },
+          },
+          attributes: ["id", "name"],
+        });
+        if (customer) {
+          console.log(`[Baileys IN] cliente associado por nome: ${customer.id} (${customer.name})`);
+        }
+      }
 
       if (!customer) {
         customer = await Custumers.create({
           id: uuidv4(),
           usersId: this.userId,
           phone,
-          name: phone,
+          name: pushName || phone,
         });
+        console.log(`[Baileys IN] cliente criado: ${customer.id} (${customer.name})`);
       }
 
       // Find or create conversation
@@ -373,12 +473,19 @@ class BaileysService {
           lastMessagePreview: messageBody.substring(0, 100),
           lastMessageAt: new Date(),
           lastInboundAt: new Date(),
+          metadata: { baileysJid: fromJid },
         });
       } else {
         conversation.lastMessagePreview = messageBody.substring(0, 100);
         conversation.lastMessageAt = new Date();
         conversation.lastInboundAt = new Date();
         conversation.unreadCount = (conversation.unreadCount || 0) + 1;
+        // Garante o JID atualizado (importante para envio @lid)
+        const meta = conversation.metadata || {};
+        if (meta.baileysJid !== fromJid) {
+          conversation.metadata = { ...meta, baileysJid: fromJid };
+          conversation.changed("metadata", true);
+        }
         await conversation.save();
       }
 
@@ -399,12 +506,71 @@ class BaileysService {
       });
 
       console.log(`[Baileys] Inbound from ${phone}: ${messageBody.substring(0, 50)}`);
+
+      // Auto-reply via IA (se habilitada + subscription ativa)
+      // PORÉM: se a conversa foi FECHADA pelo atendente, IA NÃO responde
+      // até alguém reabrir (status = pending/attending). Respeita o "Fechar".
+      if (conversation.status === "closed") {
+        console.log(`[Baileys IA] Auto-reply pulado (conversa fechada manualmente)`);
+      } else try {
+        // Busca TODOS os pets desse cliente (pode ter mais de um)
+        let customerPets = [];
+        try {
+          const { default: PetsModel } = await import("../models/Pets.js");
+          customerPets = await PetsModel.findAll({
+            where: { usersId: this.userId, custumerId: customer.id },
+            attributes: ["id", "name", "species", "breed", "sex", "birthdate"],
+            limit: 10,
+          });
+        } catch (_) {}
+
+        const { generateAutoReply } = await import("./crmAutoReply.js");
+        const result = await generateAutoReply({
+          usersId: this.userId,
+          conversation,
+          customer,
+          pet: customerPets[0] || null,
+          pets: customerPets,
+          body: messageBody,
+        });
+        if (result.replied && result.reply) {
+          console.log(`[Baileys IA] Respondendo automaticamente: ${result.reply.substring(0, 60)}`);
+          // Espera 2-4s antes de enviar (mais natural + evita rate limit)
+          await new Promise((r) => setTimeout(r, 2000 + Math.floor(Math.random() * 2000)));
+          const sendResult = await this.sendMessage(fromJid, result.reply);
+          // Salva mensagem outbound
+          await CrmConversationMessage.create({
+            id: uuidv4(),
+            conversationId: conversation.id,
+            usersId: this.userId,
+            customerId: customer.id,
+            direction: "outbound",
+            channel: "baileys",
+            messageType: "text",
+            body: result.reply,
+            providerMessageId: sendResult?.key?.id || `baileys_ai_${Date.now()}`,
+            status: "sent",
+            sentAt: new Date(),
+            payload: { source: "auto_reply" },
+          });
+          // Atualiza conversa
+          await conversation.update({
+            lastMessagePreview: result.reply.substring(0, 100),
+            lastMessageAt: new Date(),
+            lastOutboundAt: new Date(),
+          });
+        } else if (result.reason) {
+          console.log(`[Baileys IA] Auto-reply pulado (${result.reason})`);
+        }
+      } catch (aiErr) {
+        console.warn("[Baileys IA] Erro no auto-reply:", aiErr?.message);
+      }
     } catch (error) {
       console.error("[Baileys] Error processing inbound message:", error);
     }
   }
 
-  async sendMessage(phone, text, options = {}) {
+  async sendMessage(phoneOrJid, text, options = {}) {
     if (this.connectionStatus !== "connected") {
       throw new Error(
         `Não conectado ao WhatsApp (status: ${this.connectionStatus})`
@@ -417,8 +583,31 @@ class BaileysService {
       const delay = this.getRandomDelay(1500, 4000);
       await new Promise((resolve) => setTimeout(resolve, delay));
 
-      const formattedPhone = this.formatPhoneNumber(phone);
-      const result = await this.sock.sendMessage(formattedPhone, {
+      // Resolucao do destino:
+      // 1) Se ja vier com @ (ex: 133...@lid ou 5511...@s.whatsapp.net), usa direto.
+      // 2) Se for muito longo (15+ digitos), assume LID e monta @lid.
+      //    OBS: protege contra "55" prefixado erroneamente em cima do LID.
+      // 3) Se for phone BR normal, formata @s.whatsapp.net.
+      const raw = String(phoneOrJid || "");
+      let target;
+      if (raw.includes("@")) {
+        target = raw;
+      } else {
+        let digits = raw.replace(/\D/g, "");
+        // Detecta "55" + LID (15+ digitos) e remove o "55" indevido.
+        if (digits.length >= 17 && digits.startsWith("55")) {
+          const withoutBr = digits.slice(2);
+          if (withoutBr.length >= 15) digits = withoutBr;
+        }
+        if (digits.length >= 15) {
+          target = `${digits}@lid`;
+        } else {
+          target = this.formatPhoneNumber(digits);
+        }
+      }
+      console.log(`[Baileys SEND] target=${target} text="${String(text).slice(0, 40)}"`);
+      console.log(`[Baileys SEND] target=${target} text="${String(text).slice(0, 40)}"`);
+      const result = await this.sock.sendMessage(target, {
         text,
         ...options,
       });
@@ -607,7 +796,7 @@ class BaileysService {
       this.retryCount = 0;
       this.isInitializing = false;
       await this.clearAuthStateInDb();
-      await this.updateSettingsInDb();
+      await this.updateSettingsInDb({ connectedAt: null, displayName: null, connectedPhone: null });
       return { success: true };
     } catch (error) {
       console.error("[Baileys] Error disconnecting:", error);
@@ -644,10 +833,21 @@ class BaileysService {
   }
 
   async getStatus() {
+    let connectedAt = null;
+    let displayName = null;
+    try {
+      const settings = await Settings.findOne({ where: { usersId: this.userId } });
+      const baileysCfg = settings?.whatsappConnection?.baileys || {};
+      connectedAt = baileysCfg.connectedAt || null;
+      displayName = baileysCfg.displayName || null;
+    } catch (_) {}
+
     return {
       status: this.connectionStatus,
       qrCode: this.qrCode,
       connectedPhone: this.sock?.user?.id?.replace(/:.*@.*/, ""),
+      displayName: this.sock?.user?.name || this.sock?.user?.verifiedName || displayName,
+      connectedAt,
       lastError: this.lastError,
       connectionAttempts: this.connectionAttempts,
       health: {

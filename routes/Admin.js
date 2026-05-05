@@ -1810,12 +1810,6 @@ router.delete("/admin/clients/:id", adminMiddleware, async (req, res) => {
       });
     }
 
-    if (String(user.role || "").toLowerCase() === "admin") {
-      return res.status(400).json({
-        message: "Nao e permitido excluir contas administrativas por esta rota.",
-      });
-    }
-
     const employeeUsers = await Users.findAll({
       where: { establishment: id },
       attributes: ["id"],
@@ -1826,10 +1820,30 @@ router.delete("/admin/clients/:id", adminMiddleware, async (req, res) => {
     const relatedUserIds = [String(id), ...employeeIds];
     const relatedUuidUserIds = relatedUserIds.filter((item) => isUuid(item));
     const transaction = await Users.sequelize.transaction();
+    const queryInterface = Users.sequelize.getQueryInterface();
+    const rawTables = await queryInterface.showAllTables();
+    const existingTables = new Set(
+      rawTables.map((entry) => {
+        if (typeof entry === "string") return entry.toLowerCase();
+        if (entry?.tableName) return String(entry.tableName).toLowerCase();
+        return String(entry || "").toLowerCase();
+      }),
+    );
 
     try {
+      const resolveTableName = (model) => {
+        const tableRef = model?.getTableName?.() ?? model?.tableName;
+        if (typeof tableRef === "string") return tableRef.toLowerCase();
+        if (tableRef?.tableName) return String(tableRef.tableName).toLowerCase();
+        return "";
+      };
+
       const safeDestroy = async (label, model, where, optional = false) => {
         try {
+          const tableName = resolveTableName(model);
+          if (tableName && !existingTables.has(tableName)) {
+            return;
+          }
           await model.destroy({ where, transaction });
         } catch (destroyError) {
           if (optional) return;

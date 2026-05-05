@@ -141,6 +141,12 @@ const Appointment = sequelize.define(
       type: DataTypes.STRING,
       allowNull: true,
     },
+    automationsSent: {
+      type: DataTypes.JSON,
+      allowNull: false,
+      defaultValue: [],
+      comment: "Registro das automacoes de WhatsApp ja disparadas para este agendamento",
+    },
   },
   {
     timestamps: true,

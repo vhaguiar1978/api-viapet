@@ -10,6 +10,8 @@ import Users from "../models/Users.js";
 import CrmWhatsappMessage from "../models/CrmWhatsappMessage.js";
 import CrmConversation from "../models/CrmConversation.js";
 import CrmConversationMessage from "../models/CrmConversationMessage.js";
+import { enforcePlanLimit } from "../service/planLimits.js";
+import BaileysService from "../service/baileys.js";
 
 const router = express.Router();
 
@@ -472,7 +474,9 @@ router.get("/crm-conversations", authenticate, async (req, res) => {
       where.phone = normalizePhone(req.query.phone);
     }
 
-    const [rows, all, pending, attending, closed] = await Promise.all([
+    const tagFilter = req.query.tag ? String(req.query.tag).trim().toLowerCase() : null;
+
+    const [rawRows, all, pending, attending, closed] = await Promise.all([
       CrmConversation.findAll({
         where,
         include: buildConversationInclude(),
@@ -488,6 +492,14 @@ router.get("/crm-conversations", authenticate, async (req, res) => {
       CrmConversation.count({ where: { ...baseWhere, status: "attending" } }),
       CrmConversation.count({ where: { ...baseWhere, status: "closed" } }),
     ]);
+
+    // Filtro por tag (aplicado em memória — tags ficam em metadata.tags JSON)
+    const rows = tagFilter
+      ? rawRows.filter((row) => {
+          const tags = Array.isArray(row.metadata?.tags) ? row.metadata.tags : [];
+          return tags.map((t) => String(t).toLowerCase()).includes(tagFilter);
+        })
+      : rawRows;
 
     return res.status(200).json({
       message: "Conversas carregadas com sucesso",
@@ -694,6 +706,82 @@ router.patch("/crm-conversations/:conversationId", authenticate, async (req, res
   }
 });
 
+// Aplica/remove uma tag em uma conversa
+router.post("/crm-conversations/:conversationId/tags", authenticate, async (req, res) => {
+  try {
+    const usersId = getEstablishmentId(req);
+    const conversation = await CrmConversation.findOne({
+      where: { id: req.params.conversationId, usersId },
+    });
+
+    if (!conversation) {
+      return res.status(404).json({ message: "Conversa nao encontrada" });
+    }
+
+    const tag = String(req.body?.tag || "").trim().toLowerCase();
+    const action = String(req.body?.action || "add").trim().toLowerCase();
+
+    if (!tag) {
+      return res.status(400).json({ message: "Tag obrigatoria" });
+    }
+
+    const currentMeta = conversation.metadata || {};
+    const currentTags = Array.isArray(currentMeta.tags) ? currentMeta.tags.map((t) => String(t).toLowerCase()) : [];
+
+    let nextTags;
+    if (action === "remove") {
+      nextTags = currentTags.filter((t) => t !== tag);
+    } else {
+      nextTags = currentTags.includes(tag) ? currentTags : [...currentTags, tag];
+    }
+
+    await conversation.update({
+      metadata: { ...currentMeta, tags: nextTags },
+    });
+
+    return res.status(200).json({
+      message: action === "remove" ? "Tag removida" : "Tag aplicada",
+      data: { tags: nextTags },
+    });
+  } catch (error) {
+    console.error("Erro ao atualizar tags:", error);
+    return res.status(500).json({ message: "Erro ao atualizar tags", error: error.message });
+  }
+});
+
+// Retoma/pausa a IA em uma conversa especifica (apos escalacao para humano)
+router.post("/crm-conversations/:conversationId/ai-resume", authenticate, async (req, res) => {
+  try {
+    const usersId = getEstablishmentId(req);
+    const conversation = await CrmConversation.findOne({
+      where: { id: req.params.conversationId, usersId },
+    });
+    if (!conversation) {
+      return res.status(404).json({ message: "Conversa nao encontrada" });
+    }
+    const action = String(req.body?.action || "resume").toLowerCase();
+    const meta = conversation.metadata || {};
+    const next = { ...meta };
+    if (action === "pause") {
+      next.aiPaused = true;
+      next.aiPausedAt = new Date().toISOString();
+    } else {
+      next.aiPaused = false;
+      delete next.aiPausedAt;
+      delete next.escalationReason;
+      delete next.escalationMessage;
+    }
+    await conversation.update({ metadata: next });
+    return res.status(200).json({
+      message: action === "pause" ? "IA pausada" : "IA retomada",
+      data: { aiPaused: Boolean(next.aiPaused) },
+    });
+  } catch (error) {
+    console.error("Erro ao alternar IA:", error);
+    return res.status(500).json({ message: "Erro ao alternar IA", error: error.message });
+  }
+});
+
 router.post("/crm-conversations/:conversationId/read", authenticate, async (req, res) => {
   try {
     const usersId = getEstablishmentId(req);
@@ -783,10 +871,11 @@ router.get("/crm-conversations/:conversationId/messages", authenticate, async (r
           required: false,
         },
       ],
+      // Ordem cronologica unificada: usa createdAt (sempre presente),
+      // intercala corretamente inbound/outbound conforme acontecem.
       order: [
-        ["receivedAt", "ASC"],
-        ["sentAt", "ASC"],
         ["createdAt", "ASC"],
+        ["id", "ASC"],
       ],
       limit: Math.min(Math.max(Number(req.query.limit || 200), 1), 500),
     });
@@ -843,7 +932,7 @@ router.post(
   },
 );
 
-router.post("/crm-conversations/:conversationId/messages", authenticate, async (req, res) => {
+router.post("/crm-conversations/:conversationId/messages", authenticate, enforcePlanLimit("messagesPerMonth"), async (req, res) => {
   try {
     const usersId = getEstablishmentId(req);
     const conversation = await CrmConversation.findOne({
@@ -892,10 +981,13 @@ router.post("/crm-conversations/:conversationId/messages", authenticate, async (
     let errorMessage = null;
     const now = new Date();
 
+    const channelLower = String(conversation.channel || "whatsapp").toLowerCase();
+    const isWhatsappLikeChannel = channelLower === "whatsapp" || channelLower === "baileys";
+
     if (
       normalizedDirection === "outbound" &&
       sendNow &&
-      String(conversation.channel || "whatsapp").toLowerCase() === "whatsapp"
+      isWhatsappLikeChannel
     ) {
       const settings = await Settings.findOne({
         where: {
@@ -909,17 +1001,53 @@ router.post("/crm-conversations/:conversationId/messages", authenticate, async (
       const token = config.accessToken || process.env.WHATSAPP_TOKEN || "";
         const destinationPhone = normalizePhone(conversation.phone);
 
-      if (!phoneNumberId || !token) {
-        return res.status(400).json({
-          message: "WhatsApp Cloud API ainda nao esta configurado para o novo modulo",
-        });
-      }
-
       if (!destinationPhone) {
         return res.status(400).json({
           message: "A conversa nao possui telefone valido para envio",
         });
       }
+
+      // Estrategia: Baileys tem prioridade absoluta quando conectado.
+      // Se conectou via QR, e isso que o usuario escolheu usar.
+      // Cloud API so e usado se Baileys nao esta conectado.
+      const cloudApiConfigured = Boolean(phoneNumberId && token);
+
+      let baileysConnected = false;
+      let baileysInstance = null;
+      try {
+        baileysInstance = BaileysService.getInstance(usersId, "default");
+        baileysConnected = await baileysInstance.isConnected();
+      } catch (_) {
+        baileysConnected = false;
+      }
+
+      console.log(`[CRM Send] user=${usersId} channel=${channelLower} baileys=${baileysConnected} cloudApi=${cloudApiConfigured}`);
+      const shouldUseBaileys = baileysConnected;
+
+      if (shouldUseBaileys) {
+        try {
+          // Prefere o JID original do contato (ex: @lid do Baileys 7.x).
+          // Fallback: monta @s.whatsapp.net pelo telefone normalizado.
+          const baileysJid = conversation?.metadata?.baileysJid;
+          const target = baileysJid || destinationPhone;
+          const result = await baileysInstance.sendMessage(target, normalizedBody || "");
+          providerMessageId = result?.key?.id || `baileys_${Date.now()}`;
+        } catch (baileysError) {
+          console.error("Erro ao enviar via Baileys:", baileysError);
+          if (String(baileysError.message || "").includes("Rate limit")) {
+            return res.status(429).json({
+              message: "Limite de envio por hora atingido. Aguarde alguns minutos.",
+            });
+          }
+          return res.status(500).json({
+            message: baileysError.message || "Nao foi possivel enviar a mensagem pelo WhatsApp",
+          });
+        }
+      } else if (!cloudApiConfigured && !baileysConnected) {
+        return res.status(400).json({
+          message: "WhatsApp nao esta conectado. Conecte via QR Code para enviar mensagens.",
+        });
+      } else {
 
         try {
         const whatsappPayload = buildWhatsappMessagePayload({
@@ -984,6 +1112,7 @@ router.post("/crm-conversations/:conversationId/messages", authenticate, async (
           message: getMetaErrorMessage(sendError) || "Nao foi possivel enviar a mensagem pelo WhatsApp",
           error: sendError.message,
         });
+      }
       }
     }
 
