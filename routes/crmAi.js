@@ -30,34 +30,43 @@ const VALID_WEEK_DAYS = [
 ];
 const VALID_AGENDA_TYPES = ["estetica", "clinica", "internacao"];
 
+// IMPORTANTE: o default eh "tudo liberado". Quando o usuario habilita a IA,
+// todas as capacidades ja vem ativas. Ele DESMARCA o que nao quer dentro do
+// painel — nao precisa habilitar uma a uma.
 const DEFAULT_CONTROL = {
-  enabled: false,
-  autoReplyEnabled: false,
-  autoExecuteEnabled: false,
+  enabled: false, // continua false: o user precisa ativar a IA explicitamente
+  autoReplyEnabled: true, // ja vem ligado, espera o user marcar enabled
+  autoExecuteEnabled: true,
   assistantName: "ViaPet IA",
-  provider: "OpenAI",
+  provider: "Groq",
   instructions:
-    "Responder com educacao, confirmar dados importantes antes de agir e encaminhar para humano em caso de risco, reclamacao ou duvida sensivel.",
+    "Atende clientes do pet shop com simpatia e profissionalismo. Pode agendar, remarcar, cancelar, cotar servicos e produtos, cadastrar clientes e pets novos. Confirma dados importantes antes de criar agendamento. Encaminha pra humano em caso de emergencia veterinaria, reclamacao ou pedido explicito de atendente.",
   playbookMessages: [],
-  escalationKeywords: ["urgente", "reclamacao", "cancelar", "dor", "emergencia"],
+  escalationKeywords: ["urgente", "reclamacao", "dor forte", "emergencia"],
   capabilities: {
+    // Tudo liberado — usuario desmarca o que nao quer
     replyToMessages: true,
-    createCustomer: false,
-    createPet: false,
-    createAppointment: false,
-    updateAppointment: false,
-    cancelAppointment: false,
-    viewFinancial: false,
+    createCustomer: true,
+    createPet: true,
+    createAppointment: true,
+    updateAppointment: true,
+    cancelAppointment: true,
+    quoteServices: true,
+    quoteProducts: true,
+    listCustomerPets: true,
+    listCustomerHistory: true,
+    sendCatalog: true,
+    viewFinancial: false, // unico que nao defaults true (sensivel)
   },
   scheduling: {
-    requireHumanApproval: true,
-    requireTutorConfirmation: true,
-    allowNewCustomer: false,
-    allowNewPet: false,
+    requireHumanApproval: false, // antes era true: bloqueava tudo
+    requireTutorConfirmation: true, // mantem: IA pergunta antes de criar
+    allowNewCustomer: true,
+    allowNewPet: true,
     allowOffGridTimes: true,
     minimumLeadMinutes: 30,
     slotMinutes: 10,
-    maxDailyAppointments: 12,
+    maxDailyAppointments: 30,
     allowedAgendaTypes: ["estetica", "clinica", "internacao"],
     allowedServiceCategories: [
       "Banho",
@@ -75,7 +84,7 @@ const DEFAULT_CONTROL = {
     allowedTimeStart: "08:00",
     allowedTimeEnd: "18:00",
     notes:
-      "A IA so deve agendar quando houver servico permitido, horario dentro da janela definida e confirmacao do tutor.",
+      "A IA pode agendar livremente quando houver servico claro, data, hora e pet identificado. Confirma com o tutor antes de salvar.",
   },
 };
 
@@ -281,6 +290,26 @@ function sanitizeControlSettings(value) {
       cancelAppointment: normalizeBoolean(
         capabilities.cancelAppointment,
         DEFAULT_CONTROL.capabilities.cancelAppointment,
+      ),
+      quoteServices: normalizeBoolean(
+        capabilities.quoteServices,
+        DEFAULT_CONTROL.capabilities.quoteServices,
+      ),
+      quoteProducts: normalizeBoolean(
+        capabilities.quoteProducts,
+        DEFAULT_CONTROL.capabilities.quoteProducts,
+      ),
+      listCustomerPets: normalizeBoolean(
+        capabilities.listCustomerPets,
+        DEFAULT_CONTROL.capabilities.listCustomerPets,
+      ),
+      listCustomerHistory: normalizeBoolean(
+        capabilities.listCustomerHistory,
+        DEFAULT_CONTROL.capabilities.listCustomerHistory,
+      ),
+      sendCatalog: normalizeBoolean(
+        capabilities.sendCatalog,
+        DEFAULT_CONTROL.capabilities.sendCatalog,
       ),
       viewFinancial: normalizeBoolean(
         capabilities.viewFinancial,

@@ -1,3 +1,4 @@
+import { Op } from "sequelize";
 import Settings from "../models/Settings.js";
 import Services from "../models/Services.js";
 import Products from "../models/Products.js";
@@ -261,7 +262,7 @@ function buildReply({ question, services, settings, customer, pet, history, iden
 
 // ─── Integracao Groq (IA real, gratuita) ─────────────────────────────────
 
-function buildSystemPrompt({ settings, aiControl, services, products = [], customer, pet, pets = [] }) {
+function buildSystemPrompt({ settings, aiControl, services, products = [], customer, pet, pets = [], upcomingAppointments = [] }) {
   const storeName = settings?.storeName || "o pet shop";
   const opening = String(settings?.openingTime || "08:00:00").slice(0, 5);
   const closing = String(settings?.closingTime || "18:00:00").slice(0, 5);
@@ -270,8 +271,18 @@ function buildSystemPrompt({ settings, aiControl, services, products = [], custo
   const escalation = (aiControl?.escalationKeywords || [])
     .filter(Boolean)
     .join(", ");
-  const canCreateAppointment = Boolean(aiControl?.capabilities?.createAppointment);
+  const caps = aiControl?.capabilities || {};
+  const canCreateAppointment = Boolean(caps.createAppointment);
+  const canUpdateAppointment = Boolean(caps.updateAppointment);
+  const canCancelAppointment = Boolean(caps.cancelAppointment);
+  const canQuoteServices = caps.quoteServices !== false; // default true
+  const canQuoteProducts = caps.quoteProducts !== false;
+  const canListPets = caps.listCustomerPets !== false;
+  const canListHistory = caps.listCustomerHistory !== false;
+  const canSendCatalog = caps.sendCatalog !== false;
   const today = new Date().toLocaleDateString("pt-BR");
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const tomorrowIso = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
 
   // Lista de servicos com IDs (uso INTERNO da IA, nao mostrar pro cliente)
   // Limite generoso (40) — a IA recebe lista filtrada por relevancia.
@@ -316,106 +327,145 @@ function buildSystemPrompt({ settings, aiControl, services, products = [], custo
         ? `Pet: ${pet.name} (id: ${pet.id})${pet.species ? ` (${pet.species}${pet.breed ? `, ${pet.breed}` : ""})` : ""}`
         : "Cliente NAO TEM pets cadastrados ainda — pergunte o nome do pet antes de agendar");
 
+  // Lista de agendamentos futuros do cliente (para a IA poder remarcar/cancelar)
+  const upcomingList = (upcomingAppointments && upcomingAppointments.length > 0)
+    ? upcomingAppointments.slice(0, 5).map((a) => {
+        const dateStr = a.date ? new Date(a.date).toISOString().slice(0, 10) : "";
+        return `  - ID:${a.id} | ${dateStr} ${String(a.time || "").slice(0, 5)} | ${a.serviceName || a.service?.name || "servico"} (${a.status || "Agendado"})`;
+      }).join("\n")
+    : null;
+
+  // Lista das capacidades ATIVAS pra a IA saber o que pode/nao pode oferecer
+  const capabilitiesList = [
+    canCreateAppointment ? "criar agendamentos" : null,
+    canUpdateAppointment ? "remarcar agendamentos" : null,
+    canCancelAppointment ? "cancelar agendamentos" : null,
+    canQuoteServices ? "cotar servicos" : null,
+    canQuoteProducts ? "cotar produtos" : null,
+    canListPets ? "listar pets do cliente" : null,
+    canListHistory ? "consultar historico de atendimentos" : null,
+    canSendCatalog ? "enviar catalogo de servicos" : null,
+  ].filter(Boolean).join(", ");
+
   return `Voce e o atendente virtual do ${storeName}, um pet shop. Atende clientes pelo WhatsApp.
 
-REGRAS DE ATENDIMENTO:
-- Seja simpatica, calorosa e profissional. Fale como um humano de pet shop, nao como um robo.
-- ${identifyAsAi ? "Pode dizer que e uma IA quando perguntada." : "NAO se identifique como IA. Aja como uma atendente humana."}
-- Use linguagem informal brasileira (oi, beleza, show, claro, sem problema).
-- Mensagens curtas e objetivas (1-3 frases).
-- Pode usar emojis com moderacao 🐾 😊
-- Hoje e ${today}.
+PERSONA E TOM:
+- Simpatica, calorosa, profissional. Atende como humano experiente de pet shop, nao como robo.
+- ${identifyAsAi ? "Pode dizer que e uma IA se perguntada diretamente." : "NAO se identifique como IA. Atue como uma atendente humana."}
+- Linguagem informal brasileira: "oi", "claro", "show", "fechado", "beleza", "sem problema".
+- Frases curtas (1 a 3). Objetiva. Evita encher o cliente de informacao desnecessaria.
+- Emojis com moderacao 🐾 😊 ❤️
+- Hoje e ${today} (${todayIso}).
 
-⛔ NUNCA MENCIONE OS IDs DOS SERVICOS, CLIENTES OU PETS PARA O CLIENTE.
-   Os IDs (formatos como "e07fd9eb-...") sao USO INTERNO seu — APENAS para preencher action.serviceId.
-   Para o cliente final, sempre fale APENAS o NOME do servico (ex: "Banho", "Tosa", "Banho e Tosa").
-   Se voce nao tem certeza qual servico o cliente quer, PERGUNTE pelo NOME, nunca pelo ID.
+⛔ NUNCA MOSTRE IDs PARA O CLIENTE.
+   IDs (UUIDs como "e07fd9eb-...") sao SO PARA VOCE preencher na action.
+   Para o cliente, fale apenas pelo NOME (ex: "Banho", "Tosa", "Pluto").
 
 INFORMACOES DO ESTABELECIMENTO:
 - Nome: ${storeName}
 - Horario: ${opening} as ${closing}, segunda a sabado
 
-SERVICOS E PRECOS (lista filtrada por relevancia):
-${servicesList || "- Banho e tosa conforme o porte"}
+VOCE PODE: ${capabilitiesList || "responder mensagens"}.
 
-${productsList ? `PRODUTOS RELEVANTES NA LOJA (consulte preco e estoque):\n${productsList}\n` : ""}
+SERVICOS E PRECOS DISPONIVEIS:
+${servicesList || "- (lista vazia — pergunte servicos pra o tutor)"}
+
+${productsList ? `PRODUTOS NA LOJA:\n${productsList}\n` : ""}
 
 CONTEXTO DO CLIENTE ATUAL:
 - ${customerInfo}
 ${petInfo}
+${upcomingList ? `\nAgendamentos futuros deste cliente:\n${upcomingList}` : ""}
 
-${pets && pets.length > 1 ? `🐾 ATENCAO: Este cliente tem ${pets.length} pets cadastrados! Antes de agendar, PERGUNTE qual pet (pelo nome). Use o nome do pet que o cliente mencionar para escolher o petId correto da lista.` : ""}
-${pets && pets.length === 1 ? `Cliente tem apenas 1 pet (${pets[0].name}). Pode usar direto, sem perguntar.` : ""}
+${pets && pets.length > 1 ? `🐾 Este cliente tem ${pets.length} pets. ANTES de agendar/remarcar, identifique qual pet pelo NOME (pergunte se nao for claro).` : ""}
+${pets && pets.length === 1 ? `Cliente tem 1 pet (${pets[0].name}). Pode usar direto, sem perguntar qual.` : ""}
 
-O QUE VOCE NAO DEVE FAZER:
-- Inventar precos ou servicos que nao estao na lista acima
-- Discutir assuntos fora de pet shop
-- Dar conselho veterinario serio
-- Mencionar palavras: ${escalation || "urgente, reclamacao, emergencia"} → escalar pra humano
+O QUE NAO FAZER:
+- Inventar precos ou servicos fora da lista.
+- Discutir assuntos fora de pet shop.
+- Dar diagnostico ou tratamento veterinario serio (encaminha pra atendente humano).
+- Em caso destas palavras: ${escalation || "urgente, reclamacao, emergencia"} → escalar pra humano.
 
 ${customInstructions ? `INSTRUCOES ESPECIAIS DO DONO:\n${customInstructions}\n` : ""}
 
-${canCreateAppointment ? `IMPORTANTE: VOCE PODE CRIAR AGENDAMENTOS DE VERDADE.
-Quando o cliente confirmar um agendamento (com servico + data + hora claros), inclua a action no JSON.
-Exemplos de cliente CONFIRMANDO: "pode agendar", "confirma sim", "ok pode marcar", "fechado", "tá bom".
-
-REGRAS PARA CRIAR AGENDAMENTO (CRITICAS):
-1. serviceId DEVE ser o ID EXATO do servico que o cliente pediu, da lista acima.
-   - Se cliente disse "banho" → procure na lista o servico com nome "Banho" e copie o ID.
-   - Se cliente disse "tosa" → procure "Tosa".
-   - Se cliente nao especificou, PERGUNTE qual servico antes de criar.
-2. date DEVE estar no formato YYYY-MM-DD. Hoje = ${new Date().toISOString().slice(0,10)}.
-   - "amanha" = ${new Date(Date.now() + 86400000).toISOString().slice(0,10)}
-3. time DEVE estar em HH:MM (24h). "16h" = "16:00", "9h da manha" = "09:00".
-4. NUNCA invente IDs. Use SOMENTE os IDs que aparecem na lista de servicos acima.
-5. Se nao tiver servico claro na lista, NAO crie a action — pergunte.
-` : ""}
-
 ⚠️ FORMATO DE RESPOSTA OBRIGATORIO ⚠️
-Voce DEVE responder SEMPRE em JSON valido com a estrutura:
-{ "reply": "texto", "action": null OU objeto }
+SEMPRE responda em JSON valido:
+{ "reply": "texto pro cliente", "action": null OU objeto }
 
-NUNCA responda com texto solto. SEMPRE JSON.
+NUNCA texto solto. NUNCA markdown. SEMPRE JSON puro.
 
-EXEMPLOS:
+═══════════════════════════════════════════════════════════════
+TIPOS DE ACTION DISPONIVEIS
+═══════════════════════════════════════════════════════════════
 
-1) Cliente pergunta horario → action: null
-Cliente: "Que horas vocês abrem?"
-Resposta: {"reply": "A gente abre das 08h às 18h, segunda a sábado. Quer que eu agende?", "action": null}
+${canCreateAppointment ? `▸ create_appointment — quando o cliente CONFIRMA um agendamento novo.
+Campos: { type, serviceId, date (YYYY-MM-DD), time (HH:MM), petId OU petName }
+- Use petId se o pet ESTA na lista cadastrada acima.
+- Use petName (string) se o cliente disse um nome de pet NAO cadastrado (sera criado).
+- Datas: hoje=${todayIso}, amanha=${tomorrowIso}.
+- O cliente PRECISA ter confirmado: "pode", "confirma", "ok", "fechado", "ta bom", "agenda", "marca", "sim".
 
-2) Cliente quer agendar mas nao confirmou ainda → action: null
-Cliente: "quero marcar um banho amanhã as 10h"
-Resposta: {"reply": "Beleza! Banho amanhã às 10h. Confirmo o agendamento?", "action": null}
+` : ""}${canUpdateAppointment ? `▸ reschedule_appointment — quando o cliente quer REMARCAR um agendamento existente.
+Campos: { type, appointmentId, newDate (YYYY-MM-DD), newTime (HH:MM) }
+- appointmentId DEVE ser de UM dos agendamentos futuros listados acima.
+- So crie a action depois do cliente confirmar a nova data/hora.
 
-3) Cliente CONFIRMA → action com create_appointment
-Cliente: "pode confirmar sim"
-Resposta: {"reply": "Pronto! Agendamento confirmado para amanhã às 10h.", "action": {"type": "create_appointment", "serviceId": "9e594d8e-c4f8-4a6d-9f9d-c13b283b6b30", "petId": "9660a3ed-e565-42cb-aaac-810c5f0c3bee", "date": "2026-05-06", "time": "10:00"}}
+` : ""}${canCancelAppointment ? `▸ cancel_appointment — quando o cliente quer CANCELAR.
+Campos: { type, appointmentId, reason (opcional) }
+- appointmentId DEVE ser de UM dos agendamentos futuros listados.
+- Confirme com o cliente antes de cancelar.
 
-4) Cliente confirma TUDO em uma mensagem so → action ja com tudo
-Cliente: "agenda banho do bili pra amanha 14h, pode confirmar"
-Resposta: {"reply": "Pronto! Banho do Bili amanhã às 14h confirmado!", "action": {"type": "create_appointment", "serviceId": "9e594d8e-...", "petId": "9660a3ed-...", "date": "2026-05-06", "time": "14:00"}}
+` : ""}═══════════════════════════════════════════════════════════════
+EXEMPLOS DE RESPOSTAS
+═══════════════════════════════════════════════════════════════
 
-REGRAS PRA GERAR action.create_appointment:
-- Tem que ter serviceId DA LISTA acima (nao invente)
-- date no formato YYYY-MM-DD
-- time no formato HH:MM
-- O cliente PRECISA ter confirmado (palavras: "pode", "confirma", "ok", "fechado", "ta bom", "agenda", "marca", "sim quero")
-- Se faltar QUALQUER dado: action: null e PERGUNTE o que falta
+[1] Pergunta de horario:
+Cliente: "Que horas vcs abrem?"
+{"reply": "A gente abre das ${opening} às ${closing}, de segunda a sábado. Quer agendar algo?", "action": null}
 
-REGRAS PARA o pet (use UM dos dois campos):
-- Se o pet ESTA na lista cadastrada → use "petId": "<id-da-lista>"
-- Se o pet NAO esta na lista (cliente disse outro nome) → use "petName": "<nome>" (NAO use petId)
-- Cliente tem 0 pets cadastrados e nao disse nome → PERGUNTE primeiro
-- Cliente tem 1 pet cadastrado e nao disse nome → use o petId desse pet
-- Cliente tem 2+ pets cadastrados e nao disse qual → PERGUNTE qual
+[2] Cotar servico:
+Cliente: "quanto fica banho do meu cachorro?"
+{"reply": "O banho fica R$ XX (a depender do porte). Você quer agendar pra qual dia?", "action": null}
 
-Exemplo (pet novo nao cadastrado):
-Cliente: "agenda banho da Princesa amanha 14h pode confirmar"
-Resposta: {"reply": "Pronto! Banho da Princesa amanhã às 14h confirmado!", "action": {"type": "create_appointment", "serviceId": "9e594d8e-...", "petName": "Princesa", "date": "2026-05-06", "time": "14:00"}}
+[3] Cliente quer agendar, ainda nao confirmou:
+Cliente: "queria marcar banho amanha às 10h"
+{"reply": "Show! Banho amanhã às 10h. Posso confirmar?", "action": null}
 
-TODA resposta DEVE ser JSON puro. Sem texto fora do JSON. Sem markdown.
+[4] Cliente confirma → criar agendamento:
+Cliente: "pode confirmar"
+{"reply": "Pronto! Banho confirmado pra amanhã às 10h. Vou estar te esperando! 🐾", "action": {"type": "create_appointment", "serviceId": "<UUID_DA_LISTA>", "petId": "<UUID_DO_PET>", "date": "${tomorrowIso}", "time": "10:00"}}
 
-Agora responda a proxima mensagem do cliente.`;
+[5] Cliente quer remarcar:
+Cliente: "preciso passar o agendamento de amanha pra sexta as 15h"
+${canUpdateAppointment ? `{"reply": "Tranquilo! Posso remarcar pra sexta às 15h. Confirma?", "action": null}
+(depois que cliente confirmar:)
+{"reply": "Remarcado pra sexta às 15h. Te espero!", "action": {"type": "reschedule_appointment", "appointmentId": "<UUID_DO_AGENDAMENTO>", "newDate": "<YYYY-MM-DD>", "newTime": "15:00"}}` : `{"reply": "Vou pedir pra atendente confirmar a remarcacao. Pode aguardar?", "action": null}`}
+
+[6] Cliente quer cancelar:
+Cliente: "preciso cancelar o banho de amanha"
+${canCancelAppointment ? `{"reply": "Sem problema! Posso cancelar o banho de amanhã. Confirma?", "action": null}
+(apos cliente confirmar:)
+{"reply": "Cancelado. Quando precisar, eh so chamar! 🐾", "action": {"type": "cancel_appointment", "appointmentId": "<UUID>", "reason": "cliente solicitou"}}` : `{"reply": "Vou pedir pra atendente cancelar pra voce. Tudo bem?", "action": null}`}
+
+[7] Cliente novo (sem cadastro) quer agendar:
+Cliente: "oi, quero marcar banho do meu Bili pra sabado as 9h"
+{"reply": "Oi! Show, banho do Bili sábado às 9h. Posso confirmar?", "action": null}
+Apos confirmar:
+{"reply": "Confirmado! Sábado 9h. Vou estar te esperando 🐾", "action": {"type": "create_appointment", "serviceId": "<UUID>", "petName": "Bili", "date": "<YYYY-MM-DD>", "time": "09:00"}}
+
+[8] Cliente pede catalogo de servicos:
+Cliente: "quais servicos vcs tem?"
+{"reply": "A gente tem banho, tosa higienica, tosa completa, hidratacao, corte de unha. Tem algum especifico que voce quer?", "action": null}
+
+[9] Cliente NAO especificou servico:
+Cliente: "quero marcar pra amanha as 14h"
+{"reply": "Show! Pra qual servico? (banho, tosa, hidratacao...)", "action": null}
+
+═══════════════════════════════════════════════════════════════
+LEMBRA: SEMPRE JSON. SEMPRE pegue serviceId/appointmentId/petId DA LISTA.
+NUNCA invente UUIDs. Se nao tiver na lista, faca pergunta antes.
+
+Responda agora a proxima mensagem.`;
 }
 
 async function buildHistoryMessages(conversationId, limit = 8) {
@@ -446,10 +496,20 @@ async function generateGroqReply({
   customer,
   pet,
   pets,
+  upcomingAppointments = [],
   conversation,
   body,
 }) {
-  const systemPrompt = buildSystemPrompt({ settings, aiControl, services, products, customer, pet, pets });
+  const systemPrompt = buildSystemPrompt({
+    settings,
+    aiControl,
+    services,
+    products,
+    customer,
+    pet,
+    pets,
+    upcomingAppointments,
+  });
   const history = await buildHistoryMessages(conversation?.id, 8);
   const lastUserMessage = history[history.length - 1];
   if (!lastUserMessage || lastUserMessage.role !== "user" || lastUserMessage.content !== body) {
@@ -460,8 +520,8 @@ async function generateGroqReply({
   const result = await groqChat({
     apiKey,
     messages,
-    temperature: 0.5,
-    maxTokens: 500,
+    temperature: 0.4, // levemente mais conservadora — modelo 70B aguenta
+    maxTokens: 600,
     jsonMode: true, // forca resposta em JSON valido
   });
   return result.content;
@@ -598,6 +658,65 @@ async function executeAiAction({ action, usersId, conversation, customer, pet, p
     }
   }
 
+  if (action.type === "reschedule_appointment") {
+    if (!aiControl?.capabilities?.updateAppointment) {
+      return { executed: false, reason: "capability_disabled" };
+    }
+    const appointmentId = String(action.appointmentId || "").trim();
+    const newDate = String(action.newDate || "").trim();
+    const newTime = String(action.newTime || "").trim();
+    if (!appointmentId) return { executed: false, reason: "no_appointment_id" };
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(newDate)) return { executed: false, reason: "invalid_date", details: newDate };
+    if (!/^\d{2}:\d{2}/.test(newTime)) return { executed: false, reason: "invalid_time", details: newTime };
+
+    try {
+      const { default: Appointment } = await import("../models/Appointment.js");
+      const found = await Appointment.findOne({ where: { id: appointmentId, usersId } });
+      if (!found) return { executed: false, reason: "appointment_not_found" };
+      // Seguranca: so deixa remarcar agendamentos do customer atual
+      if (customer?.id && String(found.customerId) !== String(customer.id)) {
+        return { executed: false, reason: "appointment_belongs_to_other_customer" };
+      }
+      await found.update({
+        date: newDate,
+        time: newTime.slice(0, 5) + ":00",
+        observation: `${found.observation || ""}\n[IA remarcou via WhatsApp]`.trim(),
+      });
+      console.log(`[CrmAutoReply] Appointment ${appointmentId} remarcado: ${newDate} ${newTime}`);
+      return { executed: true, action: "rescheduled", appointmentId, newDate, newTime };
+    } catch (err) {
+      console.error("[CrmAutoReply] Erro remarcando:", err.message);
+      return { executed: false, reason: "db_error", error: err.message };
+    }
+  }
+
+  if (action.type === "cancel_appointment") {
+    if (!aiControl?.capabilities?.cancelAppointment) {
+      return { executed: false, reason: "capability_disabled" };
+    }
+    const appointmentId = String(action.appointmentId || "").trim();
+    if (!appointmentId) return { executed: false, reason: "no_appointment_id" };
+
+    try {
+      const { default: Appointment } = await import("../models/Appointment.js");
+      const found = await Appointment.findOne({ where: { id: appointmentId, usersId } });
+      if (!found) return { executed: false, reason: "appointment_not_found" };
+      if (customer?.id && String(found.customerId) !== String(customer.id)) {
+        return { executed: false, reason: "appointment_belongs_to_other_customer" };
+      }
+      const reason = String(action.reason || "Cliente cancelou via WhatsApp").slice(0, 200);
+      await found.update({
+        status: "Cancelado",
+        observation: `${found.observation || ""}\n[IA cancelou: ${reason}]`.trim(),
+      });
+      console.log(`[CrmAutoReply] Appointment ${appointmentId} cancelado: ${reason}`);
+      return { executed: true, action: "cancelled", appointmentId, reason };
+    } catch (err) {
+      console.error("[CrmAutoReply] Erro cancelando:", err.message);
+      return { executed: false, reason: "db_error", error: err.message };
+    }
+  }
+
   return { executed: false, reason: "unknown_action_type", type: action.type };
 }
 
@@ -727,9 +846,25 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
   // 1) Pega TODOS os servicos e produtos (limite alto)
   // 2) Filtra por relevancia conforme a mensagem do cliente
   // 3) Sempre inclui os mais comuns (banho/tosa/hidratacao) como base
-  const [allServices, allProducts] = await Promise.all([
+  // 4) Tambem carrega agendamentos futuros do cliente (para remarcar/cancelar)
+  const todayStartIso = new Date().toISOString().slice(0, 10);
+  const [allServices, allProducts, upcomingAppointments] = await Promise.all([
     Services.findAll({ where: { establishment: usersId }, order: [["name", "ASC"]], limit: 200 }).catch(() => []),
     Products.findAll({ where: { usersId }, order: [["name", "ASC"]], limit: 200 }).catch(() => []),
+    customer?.id
+      ? import("../models/Appointment.js").then(async ({ default: Appointment }) =>
+          Appointment.findAll({
+            where: {
+              usersId,
+              customerId: customer.id,
+              date: { [Op.gte]: todayStartIso },
+              status: { [Op.notIn]: ["Cancelado", "cancelado", "Concluido", "concluido"] },
+            },
+            order: [["date", "ASC"], ["time", "ASC"]],
+            limit: 5,
+          }).catch(() => []),
+        ).catch(() => [])
+      : Promise.resolve([]),
   ]);
 
   const PRIORITY_KEYWORDS = ["banho", "tosa", "hidrat", "pacotinho"];
@@ -799,6 +934,7 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
         customer,
         pet,
         pets,
+        upcomingAppointments,
         conversation,
         body,
       });
