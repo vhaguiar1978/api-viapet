@@ -264,11 +264,49 @@ function buildReply({ question, services, settings, customer, pet, history, iden
 
 function buildSystemPrompt({ settings, aiControl, services, products = [], customer, pet, pets = [], upcomingAppointments = [] }) {
   const storeName = settings?.storeName || "o pet shop";
-  const opening = String(settings?.openingTime || "08:00:00").slice(0, 5);
-  const closing = String(settings?.closingTime || "18:00:00").slice(0, 5);
-  const identifyAsAi = Boolean(aiControl?.identifyAsAi);
+  // PRIORIDADE: o que tem no painel da IA (scheduling) sobrepoe os horarios
+  // gerais da loja (settings). Antes a IA quotava o da loja, ignorando o painel.
+  const aiStart = String(aiControl?.scheduling?.allowedTimeStart || "").trim();
+  const aiEnd = String(aiControl?.scheduling?.allowedTimeEnd || "").trim();
+  const opening = aiStart || String(settings?.openingTime || "08:00:00").slice(0, 5);
+  const closing = aiEnd || String(settings?.closingTime || "18:00:00").slice(0, 5);
   const customInstructions = String(aiControl?.instructions || "").trim();
-  const assistantName = String(aiControl?.assistantName || "ViaPet IA").trim();
+  const customLower = customInstructions.toLowerCase();
+
+  // Detecta o nome se o dono escreveu "se apresenta com X" / "se apresente como X"
+  // / "voce e a X" nas instructions. Tem prioridade sobre assistantName do painel.
+  let assistantName = String(aiControl?.assistantName || "ViaPet IA").trim();
+  const nameMatch = customInstructions.match(/(?:apresenta(?:r|nta)?(?:\s+com|\s+como)?|voc[eê]\s+(?:e|é|s[eo]u)\s+a?)\s+([A-ZÁÉÍÓÚÇÃÕa-záéíóúçãõ][a-záéíóúçãõ]{2,20})/);
+  if (nameMatch) {
+    const detected = nameMatch[1];
+    // So sobrepoe se for nome diferente do assistantName atual
+    if (detected && !["ia", "iA", "atendente", "assistente", "robo", "chatbot"].includes(detected.toLowerCase())) {
+      assistantName = detected;
+    }
+  }
+
+  // Se o dono escreveu "nao fale que e uma ia" / "nao quero que voce fale que e ia"
+  // / similar — entao identifyAsAi=false (mesmo se o painel disse true).
+  let identifyAsAi = Boolean(aiControl?.identifyAsAi);
+  if (
+    customLower.includes("nao quero que voce fale que") ||
+    customLower.includes("não quero que voce fale que") ||
+    customLower.includes("nao fale que voce") ||
+    customLower.includes("não fale que voce") ||
+    customLower.includes("nao diga que e") ||
+    customLower.includes("não diga que é") ||
+    customLower.includes("aja como humana") ||
+    customLower.includes("atenda como humana")
+  ) {
+    identifyAsAi = false;
+  }
+
+  // Se o dono escreveu "nao envie mensagem que nao entendeu" — adiciona regra extra
+  const banUnclearReply =
+    customLower.includes("nao envie mensagem que nao entendeu") ||
+    customLower.includes("não envie mensagem que não entendeu") ||
+    customLower.includes("nao quero que voce diga que nao entendeu") ||
+    customLower.includes("não quero que voce diga que não entendeu");
   const escalation = (aiControl?.escalationKeywords || [])
     .filter(Boolean)
     .join(", ");
@@ -410,16 +448,18 @@ ${pets && pets.length > 1 ? `🐾 Este cliente tem ${pets.length} pets. ANTES de
 ${pets && pets.length === 1 ? `Cliente tem 1 pet (${pets[0].name}). Pode usar direto, sem perguntar qual.` : ""}
 
 ${customInstructions ? `═══════════════════════════════════════════════════════════════
-⭐ REGRAS ESPECIAIS DO DONO DA LOJA (PRIORIDADE MAXIMA — SIGA SEMPRE) ⭐
+⭐⭐⭐ REGRAS INVIOLAVEIS DO DONO DA LOJA ⭐⭐⭐
+   PRIORIDADE ABSOLUTA. ESTAS REGRAS SOBREPOEM TUDO ACIMA.
 ═══════════════════════════════════════════════════════════════
 ${customInstructions}
 ═══════════════════════════════════════════════════════════════
 ` : ""}
 
-O QUE NAO FAZER:
+O QUE NAO FAZER (NUNCA):
 - Inventar precos ou servicos fora da lista.
 - Tentar atender consulta veterinaria, vacina, exame ou cirurgia.
 - Dar diagnostico ou conselho veterinario.
+${banUnclearReply ? "- ❌ NUNCA RESPONDA \"nao entendi\", \"pode explicar com outras palavras\", \"nao entendi direito\". Se a mensagem for confusa, use o contexto da conversa para inferir e perguntar UMA coisa especifica que falte (data? servico? horario? pet?). NUNCA peca pro cliente reformular a mensagem dele." : ""}
 - Em caso de palavras como: ${escalation || "urgente, reclamacao, emergencia"} → escalar pra atendente humano.
 - Se o cliente pedir servico que NAO seja banho/tosa/hidratacao/estetica → diga que vai chamar a atendente humana.
 
@@ -503,7 +543,7 @@ NUNCA invente UUIDs. Se nao tiver na lista, faca pergunta antes.
 Responda agora a proxima mensagem.`;
 }
 
-async function buildHistoryMessages(conversationId, limit = 8) {
+async function buildHistoryMessages(conversationId, limit = 30) {
   if (!conversationId) return [];
   try {
     const rows = await CrmConversationMessage.findAll({
@@ -513,10 +553,13 @@ async function buildHistoryMessages(conversationId, limit = 8) {
       attributes: ["body", "direction", "createdAt"],
     });
     // Inverte para ordem cronologica e mapeia para roles do chat
-    return rows.reverse().map((m) => ({
-      role: m.direction === "outbound" ? "assistant" : "user",
-      content: String(m.body || "").slice(0, 500),
-    }));
+    return rows
+      .reverse()
+      .filter((m) => String(m.body || "").trim().length > 0)
+      .map((m) => ({
+        role: m.direction === "outbound" ? "assistant" : "user",
+        content: String(m.body || "").slice(0, 800), // mais contexto por mensagem
+      }));
   } catch (_) {
     return [];
   }
@@ -545,7 +588,7 @@ async function generateGroqReply({
     pets,
     upcomingAppointments,
   });
-  const history = await buildHistoryMessages(conversation?.id, 8);
+  const history = await buildHistoryMessages(conversation?.id, 30);
   const lastUserMessage = history[history.length - 1];
   if (!lastUserMessage || lastUserMessage.role !== "user" || lastUserMessage.content !== body) {
     history.push({ role: "user", content: String(body || "").slice(0, 500) });
