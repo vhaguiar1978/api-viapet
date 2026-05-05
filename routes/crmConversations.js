@@ -1017,6 +1017,33 @@ router.post("/crm-conversations/:conversationId/messages", authenticate, enforce
       try {
         baileysInstance = BaileysService.getInstance(usersId, "default");
         baileysConnected = await baileysInstance.isConnected();
+
+        // AUTO-RECOVERY: Se a instancia esta disconnected mas o user TEM creds salvas
+        // no DB (ja escaneou o QR antes), tenta reabrir a sessao na hora.
+        // Isso resolve o caso de o servidor ter reiniciado e o reinit em background
+        // ainda nao ter chegado neste user.
+        if (!baileysConnected) {
+          const hasCreds = Boolean(config?.baileys?.authState?.creds);
+          if (hasCreds && baileysInstance.connectionStatus !== "scanning") {
+            console.log(`[CRM Send] Tentando auto-recovery do Baileys para user=${usersId}`);
+            try {
+              await baileysInstance.initialize();
+              // Espera ate 8s pelo socket abrir
+              const startedAt = Date.now();
+              while (Date.now() - startedAt < 8000) {
+                if (baileysInstance.connectionStatus === "connected") break;
+                if (baileysInstance.connectionStatus === "error") break;
+                await new Promise((resolve) => setTimeout(resolve, 250));
+              }
+              baileysConnected = await baileysInstance.isConnected();
+              console.log(
+                `[CRM Send] Auto-recovery resultado: status=${baileysInstance.connectionStatus} connected=${baileysConnected}`,
+              );
+            } catch (recoveryErr) {
+              console.warn("[CRM Send] Auto-recovery falhou:", recoveryErr?.message);
+            }
+          }
+        }
       } catch (_) {
         baileysConnected = false;
       }
