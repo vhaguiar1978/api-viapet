@@ -1212,16 +1212,23 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
     .sort((a, b) => b.score - a.score)
     .map((x) => x.p);
 
-  // Pega historico recente para evitar repeticao
-  let history = [];
-  if (conversation?.id) {
+  // Historico de saida (so usado pelo fallback de keywords). Lazy-load
+  // pra economizar uma query DB quando o Groq tem sucesso (caminho normal).
+  let history = null;
+  const lazyHistory = async () => {
+    if (history !== null) return history;
+    if (!conversation?.id) {
+      history = [];
+      return history;
+    }
     history = await CrmConversationMessage.findAll({
       where: { conversationId: conversation.id, direction: "outbound" },
       order: [["createdAt", "DESC"]],
       limit: 3,
       attributes: ["body", "createdAt"],
     }).catch(() => []);
-  }
+    return history;
+  };
 
   // Toggle: por default a IA NAO se identifica como IA (mais humano)
   const identifyAsAi = Boolean(check.aiControl?.identifyAsAi);
@@ -1284,20 +1291,23 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
 
   // Fallback se Groq nao foi configurado ou falhou
   if (!reply || !reply.trim()) {
+    const histForFallback = await lazyHistory();
     reply = buildReply({
       question: body,
       services,
       settings: check.settings,
       customer,
       pet,
-      history,
+      history: histForFallback,
       identifyAsAi,
     });
     aiSource = "keywords";
   }
 
-  // Anti-repeticao: se a ultima resposta da IA eh igual, varia um pouco
-  const lastBotBody = String(history?.[0]?.body || "").trim();
+  // Anti-repeticao: so checa se ja carregou history (caminho fallback).
+  // No caminho Groq normal, o proprio modelo ja varia naturalmente.
+  const histForCheck = history; // null se Groq teve sucesso (nao foi carregado)
+  const lastBotBody = String(histForCheck?.[0]?.body || "").trim();
   const finalReply = lastBotBody && lastBotBody === reply.trim()
     ? `Posso te ajudar de outra forma? Tente perguntar sobre: "agendar banho amanha 10h", "quanto custa tosa" ou "que horas funciona".`
     : reply;

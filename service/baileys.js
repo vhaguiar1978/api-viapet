@@ -512,61 +512,130 @@ class BaileysService {
       // até alguém reabrir (status = pending/attending). Respeita o "Fechar".
       if (conversation.status === "closed") {
         console.log(`[Baileys IA] Auto-reply pulado (conversa fechada manualmente)`);
-      } else try {
-        // Busca TODOS os pets desse cliente (pode ter mais de um)
-        let customerPets = [];
+      } else {
+        // ─── DEBOUNCE: agrupa mensagens curtas em rapida sucessao ───────
+        // Se o cliente manda 5 mensagens em 10s ("oi", "tudo bem", "queria",
+        // "agendar", "banho"), a IA espera 6s sem nova mensagem antes de
+        // responder UMA vez agrupada. Antes ela respondia 5 vezes seguidas.
         try {
-          const { default: PetsModel } = await import("../models/Pets.js");
-          customerPets = await PetsModel.findAll({
-            where: { usersId: this.userId, custumerId: customer.id },
-            attributes: ["id", "name", "species", "breed", "sex", "birthdate"],
-            limit: 10,
-          });
-        } catch (_) {}
-
-        const { generateAutoReply } = await import("./crmAutoReply.js");
-        const result = await generateAutoReply({
-          usersId: this.userId,
-          conversation,
-          customer,
-          pet: customerPets[0] || null,
-          pets: customerPets,
-          body: messageBody,
-        });
-        if (result.replied && result.reply) {
-          console.log(`[Baileys IA] Respondendo automaticamente: ${result.reply.substring(0, 60)}`);
-          // Espera 2-4s antes de enviar (mais natural + evita rate limit)
-          await new Promise((r) => setTimeout(r, 2000 + Math.floor(Math.random() * 2000)));
-          const sendResult = await this.sendMessage(fromJid, result.reply);
-          // Salva mensagem outbound
-          await CrmConversationMessage.create({
-            id: uuidv4(),
-            conversationId: conversation.id,
-            usersId: this.userId,
-            customerId: customer.id,
-            direction: "outbound",
-            channel: "baileys",
-            messageType: "text",
-            body: result.reply,
-            providerMessageId: sendResult?.key?.id || `baileys_ai_${Date.now()}`,
-            status: "sent",
-            sentAt: new Date(),
-            payload: { source: "auto_reply" },
-          });
-          // Atualiza conversa
-          await conversation.update({
-            lastMessagePreview: result.reply.substring(0, 100),
-            lastMessageAt: new Date(),
-            lastOutboundAt: new Date(),
-          });
-        } else if (result.reason) {
-          console.log(`[Baileys IA] Auto-reply pulado (${result.reason})`);
+          this._scheduleAiReply({ conversation, customer, fromJid });
+        } catch (aiErr) {
+          console.warn("[Baileys IA] Erro ao agendar auto-reply:", aiErr?.message);
         }
-      } catch (aiErr) {
-        console.warn("[Baileys IA] Erro no auto-reply:", aiErr?.message);
       }
     } catch (error) {
       console.error("[Baileys] Error processing inbound message:", error);
+    }
+  }
+
+  // Agenda processamento da IA com debounce + lock por conversa.
+  _scheduleAiReply({ conversation, customer, fromJid }) {
+    if (!this._aiTimers) this._aiTimers = new Map();
+    if (!this._aiLocks) this._aiLocks = new Set();
+
+    const conversationId = conversation.id;
+    const DEBOUNCE_MS = 6000;
+
+    // Cancela timer anterior dessa conversa (debounce)
+    const existing = this._aiTimers.get(conversationId);
+    if (existing) {
+      clearTimeout(existing);
+      console.log(`[Baileys IA] Debounce: cancelando timer anterior para conversa ${conversationId.slice(0, 8)}`);
+    }
+
+    // Agenda novo timer
+    const timer = setTimeout(async () => {
+      this._aiTimers.delete(conversationId);
+
+      // Lock: nao processa 2x simultaneamente a mesma conversa
+      if (this._aiLocks.has(conversationId)) {
+        console.log(`[Baileys IA] Lock ativo para ${conversationId.slice(0, 8)}, pulando`);
+        return;
+      }
+      this._aiLocks.add(conversationId);
+
+      try {
+        await this._processAiReply({ conversation, customer, fromJid });
+      } finally {
+        this._aiLocks.delete(conversationId);
+      }
+    }, DEBOUNCE_MS);
+
+    this._aiTimers.set(conversationId, timer);
+  }
+
+  // Processa de fato a resposta da IA (chamado apos o debounce).
+  async _processAiReply({ conversation, customer, fromJid }) {
+    try {
+      // Recarrega a conversa do banco — pode ter sido fechada nesse intervalo
+      const fresh = await CrmConversation.findByPk(conversation.id);
+      if (!fresh || fresh.status === "closed") {
+        console.log(`[Baileys IA] Conversa ${conversation.id.slice(0, 8)} foi fechada, abortando reply`);
+        return;
+      }
+
+      // Pega a ULTIMA mensagem inbound da conversa (a mais recente)
+      const lastInbound = await CrmConversationMessage.findOne({
+        where: { conversationId: conversation.id, direction: "inbound" },
+        order: [["createdAt", "DESC"]],
+        attributes: ["body", "createdAt"],
+      });
+      const messageBody = String(lastInbound?.body || "").trim();
+      if (!messageBody) {
+        console.log(`[Baileys IA] Sem mensagem inbound recente, abortando`);
+        return;
+      }
+
+      // Carrega pets do cliente
+      let customerPets = [];
+      try {
+        const { default: PetsModel } = await import("../models/Pets.js");
+        customerPets = await PetsModel.findAll({
+          where: { usersId: this.userId, custumerId: customer.id },
+          attributes: ["id", "name", "species", "breed", "sex", "birthdate"],
+          limit: 10,
+        });
+      } catch (_) {}
+
+      const { generateAutoReply } = await import("./crmAutoReply.js");
+      const result = await generateAutoReply({
+        usersId: this.userId,
+        conversation: fresh,
+        customer,
+        pet: customerPets[0] || null,
+        pets: customerPets,
+        body: messageBody,
+      });
+
+      if (result.replied && result.reply) {
+        console.log(`[Baileys IA] Respondendo (debounced): ${result.reply.substring(0, 60)}`);
+        // Espera 1.5-3s antes de enviar (mais natural)
+        await new Promise((r) => setTimeout(r, 1500 + Math.floor(Math.random() * 1500)));
+        const sendResult = await this.sendMessage(fromJid, result.reply);
+        await CrmConversationMessage.create({
+          id: uuidv4(),
+          conversationId: fresh.id,
+          usersId: this.userId,
+          customerId: customer.id,
+          direction: "outbound",
+          channel: "baileys",
+          messageType: "text",
+          body: result.reply,
+          providerMessageId: sendResult?.key?.id || `baileys_ai_${Date.now()}`,
+          status: "sent",
+          sentAt: new Date(),
+          payload: { source: "auto_reply" },
+        });
+        await fresh.update({
+          lastMessagePreview: result.reply.substring(0, 100),
+          lastMessageAt: new Date(),
+          lastOutboundAt: new Date(),
+        });
+      } else if (result.reason) {
+        console.log(`[Baileys IA] Auto-reply pulado (${result.reason})`);
+      }
+    } catch (err) {
+      console.warn("[Baileys IA] Erro processando auto-reply:", err?.message);
     }
   }
 
