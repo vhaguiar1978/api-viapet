@@ -932,6 +932,57 @@ router.post(
   },
 );
 
+// Limpa todas as mensagens de uma conversa (mantem a conversa em si).
+// Usado quando o dono quer "zerar o historico" da conversa pra recomecar
+// limpo (testes com a IA, conversa antiga, etc.).
+router.delete("/crm-conversations/:conversationId/messages", authenticate, async (req, res) => {
+  try {
+    const usersId = getEstablishmentId(req);
+    const conversation = await CrmConversation.findOne({
+      where: { id: req.params.conversationId, usersId },
+    });
+    if (!conversation) {
+      return res.status(404).json({ message: "Conversa nao encontrada" });
+    }
+
+    const deleted = await CrmConversationMessage.destroy({
+      where: { conversationId: conversation.id, usersId },
+    });
+
+    // Reseta os campos de "ultima mensagem" da conversa
+    await conversation.update({
+      lastMessagePreview: "",
+      lastMessageAt: null,
+      lastInboundAt: null,
+      lastOutboundAt: null,
+      unreadCount: 0,
+      // Tambem despausa a IA (se estava pausada por escalonamento) — comeca limpo
+      metadata: {
+        ...(conversation.metadata || {}),
+        aiPaused: false,
+        aiPausedAt: null,
+        escalationReason: null,
+        escalationMessage: null,
+        clearedAt: new Date().toISOString(),
+      },
+    });
+
+    console.log(
+      `[CRM] Conversa ${conversation.id.slice(0, 8)} limpa por ${usersId} (${deleted} mensagens removidas)`,
+    );
+    return res.json({
+      message: `${deleted} mensagens removidas com sucesso.`,
+      data: { deleted, conversationId: conversation.id },
+    });
+  } catch (error) {
+    console.error("Erro ao limpar conversa:", error);
+    return res.status(500).json({
+      message: "Nao foi possivel limpar a conversa",
+      error: error.message,
+    });
+  }
+});
+
 router.post("/crm-conversations/:conversationId/messages", authenticate, enforcePlanLimit("messagesPerMonth"), async (req, res) => {
   try {
     const usersId = getEstablishmentId(req);
