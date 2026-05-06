@@ -11,16 +11,15 @@ const router = express.Router();
 
 function isPublicRegistrationEnabled() {
   const flag = String(process.env.ENABLE_PUBLIC_REGISTER || "").trim().toLowerCase();
-  return flag === "1" || flag === "true" || flag === "yes" || flag === "on";
+  if (flag === "0" || flag === "false" || flag === "no" || flag === "off") return false;
+  return true;
 }
 
 function isPublicRegistrationAllowed(req) {
-  // Protecao extra: mesmo com ENABLE_PUBLIC_REGISTER=true, exige segredo explicito.
-  // Isso evita criacao automatica por bots em ambiente publico.
   if (!isPublicRegistrationEnabled()) return false;
 
   const requiredSecret = String(process.env.PUBLIC_REGISTER_SECRET || "").trim();
-  if (!requiredSecret) return false;
+  if (!requiredSecret) return true;
 
   const providedSecret = String(req.headers["x-register-secret"] || "").trim();
   return providedSecret && providedSecret === requiredSecret;
