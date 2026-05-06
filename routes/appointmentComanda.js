@@ -539,6 +539,80 @@ router.delete("/appointments/:id/payments/:paymentId", auth, async (req, res) =>
   }
 });
 
+router.post("/appointments/repair-payment-statuses", auth, async (req, res) => {
+  try {
+    const usersId = req.user.establishment;
+    const deliveredStatuses = ["entregue", "concluido", "atendido", "pronto"];
+
+    const candidatePayments = await AppointmentPayment.findAll({
+      where: {
+        usersId,
+        status: "pendente",
+      },
+    });
+
+    const appointmentIdsToCheck = [
+      ...new Set(
+        candidatePayments
+          .map((payment) => String(payment.appointmentId || ""))
+          .filter(Boolean),
+      ),
+    ];
+
+    const appointmentsById = appointmentIdsToCheck.length
+      ? new Map(
+          (
+            await Appointment.findAll({
+              where: { id: appointmentIdsToCheck, usersId },
+            })
+          ).map((appointment) => [String(appointment.id), appointment]),
+        )
+      : new Map();
+
+    const affectedAppointmentIds = new Set();
+    let repairedCount = 0;
+
+    for (const payment of candidatePayments) {
+      const method = String(payment.paymentMethod || "").trim();
+      const amount = Number(payment.grossAmount || payment.amount || 0) || 0;
+      if (!method || amount <= 0) continue;
+
+      const appointment = appointmentsById.get(String(payment.appointmentId));
+      const appointmentStatus = String(appointment?.status || "").trim().toLowerCase();
+      if (!deliveredStatuses.includes(appointmentStatus)) continue;
+
+      await payment.update({
+        status: "pago",
+        paidAt: payment.paidAt || payment.updatedAt || payment.createdAt || new Date(),
+      });
+      repairedCount += 1;
+      affectedAppointmentIds.add(String(payment.appointmentId));
+    }
+
+    for (const appointmentId of affectedAppointmentIds) {
+      try {
+        await syncAppointmentFinance(appointmentId);
+      } catch (syncError) {
+        console.error("Erro ao ressincronizar agendamento:", appointmentId, syncError);
+      }
+    }
+
+    return res.json({
+      message: "Reparo de pagamentos concluído com sucesso",
+      data: {
+        repairedCount,
+        affectedAppointments: affectedAppointmentIds.size,
+      },
+    });
+  } catch (error) {
+    console.error("Erro ao reparar status de pagamentos:", error);
+    return res.status(500).json({
+      message: "Erro ao reparar status de pagamentos",
+      error: error.message,
+    });
+  }
+});
+
 router.get("/appointments/:id/history", auth, async (req, res) => {
   try {
     const details = await getAppointmentComandaDetails(
