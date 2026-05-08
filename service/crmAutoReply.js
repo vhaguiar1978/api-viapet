@@ -1725,7 +1725,7 @@ export async function testAiReply({ usersId, messages = [] }) {
 
   // Carrega servicos da loja (mesmo filtro que o pipeline real)
   const allServices = await Services.findAll({
-    where: { usersId },
+    where: { establishment: usersId },
     order: [["name", "ASC"]],
     limit: 60,
   });
