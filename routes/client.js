@@ -232,7 +232,7 @@ router.post("/customers", auth, async (req, res) => {
     // Cria o novo cliente
     const customer = await Custumers.create({
       usersId: req.user.establishment, // ID do usuário logado
-      name,
+      name: typeof name === "string" ? name.replace(/\s+/g, " ").trim() : name,
       email,
       phone,
       address,
@@ -435,8 +435,10 @@ router.put("/customers", auth, async (req, res) => {
     }
 
     // Atualiza os dados do cliente
+    const trimmedName =
+      typeof name === "string" ? name.replace(/\s+/g, " ").trim() : name;
     const updateData = {
-      name: name || customer.name,
+      name: trimmedName || customer.name,
       email: email || customer.email,
       phone: phone || customer.phone,
       address: address || customer.address,

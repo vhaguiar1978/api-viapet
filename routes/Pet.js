@@ -128,7 +128,7 @@ router.post("/pets", auth, async (req, res) => {
     // Cria o novo pet
     const pet = await Pets.create({
       usersId: req.user.establishment,
-      name,
+      name: typeof name === "string" ? name.replace(/\s+/g, " ").trim() : name,
       species,
       breed,
       color,
@@ -410,8 +410,10 @@ router.put("/pets/:id", auth, async (req, res) => {
     }
 
     // Atualiza os dados do pet
+    const trimmedName =
+      typeof name === "string" ? name.replace(/\s+/g, " ").trim() : name;
     await pet.update({
-      name: name || pet.name,
+      name: trimmedName || pet.name,
       species: species || pet.species,
       breed: breed || pet.breed,
       color: color || pet.color,

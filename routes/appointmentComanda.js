@@ -6,12 +6,27 @@ import AppointmentPayment from "../models/AppointmentPayment.js";
 import Finance from "../models/Finance.js";
 import Products from "../models/Products.js";
 import Services from "../models/Services.js";
+import sequelize from "../database/config.js";
 import {
   calculateMachineFeeBreakdown,
   getAppointmentComandaDetails,
   logAppointmentEvent,
   syncAppointmentFinance,
 } from "../service/appointmentFinance.js";
+
+// Ajusta o estoque do produto seguindo o mesmo padrao das vendas:
+// so atualiza quando o produto for unitary; delta negativo decrementa, positivo repoe.
+async function adjustProductStock({ productId, usersId, delta }) {
+  if (!productId || !delta) return;
+  const product = await Products.findOne({ where: { id: productId, usersId } });
+  if (!product || !product.unitary) return;
+  const sign = delta < 0 ? "-" : "+";
+  const magnitude = Math.abs(Number(delta));
+  await Products.update(
+    { stoke: sequelize.literal(`stoke ${sign} ${magnitude}`) },
+    { where: { id: productId, usersId } },
+  );
+}
 
 const router = express.Router();
 
@@ -129,6 +144,8 @@ router.post("/appointments/:id/items", auth, async (req, res) => {
       finalUnitPrice = hasExplicitUnitPrice ? finalUnitPrice : toNumber(service.price);
     }
 
+    let resolvedProduct = null;
+
     if (type === "product") {
       if (!resolvedProductId) {
         return res.status(400).json({ message: "productId é obrigatório" });
@@ -145,6 +162,7 @@ router.post("/appointments/:id/items", auth, async (req, res) => {
         return res.status(404).json({ message: "Produto não encontrado" });
       }
 
+      resolvedProduct = product;
       finalDescription = finalDescription || product.name;
       finalUnitPrice = hasExplicitUnitPrice ? finalUnitPrice : toNumber(product.price);
     }
@@ -158,6 +176,12 @@ router.post("/appointments/:id/items", auth, async (req, res) => {
     const qty = Number(quantity);
     const itemDiscount = toNumber(discount);
     const total = Math.max(finalUnitPrice * qty - itemDiscount, 0);
+
+    if (resolvedProduct?.unitary && Number(resolvedProduct.stoke || 0) < qty) {
+      return res.status(400).json({
+        message: `Estoque insuficiente para o produto ${resolvedProduct.name}`,
+      });
+    }
 
     const item = await AppointmentItem.create({
       appointmentId: appointment.id,
@@ -173,6 +197,14 @@ router.post("/appointments/:id/items", auth, async (req, res) => {
       observation: observation || null,
       createdBy: req.user.id,
     });
+
+    if (type === "product") {
+      await adjustProductStock({
+        productId: resolvedProductId,
+        usersId: req.user.establishment,
+        delta: -qty,
+      });
+    }
 
     const summary = await syncAppointmentFinance(appointment.id);
     await logAppointmentEvent({
@@ -223,6 +255,20 @@ router.put("/appointments/:id/items/:itemId", auth, async (req, res) => {
     const unitPrice = toNumber(req.body.unitPrice ?? item.unitPrice);
     const discount = toNumber(req.body.discount ?? item.discount);
 
+    const previousQuantity = Number(item.quantity || 0);
+    const quantityDelta = quantity - previousQuantity;
+
+    if (item.type === "product" && quantityDelta > 0) {
+      const product = await Products.findOne({
+        where: { id: item.productId, usersId: req.user.establishment },
+      });
+      if (product?.unitary && Number(product.stoke || 0) < quantityDelta) {
+        return res.status(400).json({
+          message: `Estoque insuficiente para o produto ${product.name}`,
+        });
+      }
+    }
+
     await item.update({
       description: req.body.description ?? item.description,
       observation: req.body.observation ?? item.observation,
@@ -231,6 +277,14 @@ router.put("/appointments/:id/items/:itemId", auth, async (req, res) => {
       discount,
       total: Math.max(unitPrice * quantity - discount, 0),
     });
+
+    if (item.type === "product" && quantityDelta !== 0) {
+      await adjustProductStock({
+        productId: item.productId,
+        usersId: req.user.establishment,
+        delta: -quantityDelta,
+      });
+    }
 
     const summary = await syncAppointmentFinance(appointment.id);
     await logAppointmentEvent({
@@ -278,7 +332,18 @@ router.delete("/appointments/:id/items/:itemId", auth, async (req, res) => {
     }
 
     const removedDescription = item.description;
+    const removedType = item.type;
+    const removedProductId = item.productId;
+    const removedQuantity = Number(item.quantity || 0);
     await item.destroy();
+
+    if (removedType === "product" && removedProductId && removedQuantity > 0) {
+      await adjustProductStock({
+        productId: removedProductId,
+        usersId: req.user.establishment,
+        delta: removedQuantity,
+      });
+    }
 
     const summary = await syncAppointmentFinance(appointment.id);
     await logAppointmentEvent({
