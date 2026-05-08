@@ -1212,7 +1212,7 @@ router.get("/admin/dashboard-summary", adminMiddleware, async (req, res) => {
     const [users, approvedPayments, crmAiSubscriptions] = await Promise.all([
       Users.findAll({
         where: { role: "proprietario" },
-        attributes: ["id", "name", "email", "plan", "status", "expirationDate", "createdAt"],
+        attributes: ["id", "name", "email", "plan", "status", "expirationDate", "createdAt", "lastAccess"],
         order: [["createdAt", "DESC"]],
       }),
       PaymentHistory.findAll({
@@ -1358,6 +1358,7 @@ router.get("/admin/dashboard-summary", adminMiddleware, async (req, res) => {
           name: item.name,
           email: item.email,
           createdAt: item.createdAt,
+          lastAccess: item.lastAccess,
         })),
         billingWatchlist: billingOverview
           .filter((item) => item.overdue || item.reminderDue)
@@ -1829,6 +1830,7 @@ router.delete("/admin/clients/:id", adminMiddleware, async (req, res) => {
         return String(entry || "").toLowerCase();
       }),
     );
+    const failedDestroys = [];
 
     try {
       const resolveTableName = (model) => {
@@ -1838,18 +1840,36 @@ router.delete("/admin/clients/:id", adminMiddleware, async (req, res) => {
         return "";
       };
 
-      const safeDestroy = async (label, model, where, optional = false) => {
+      let savepointCounter = 0;
+      const safeDestroy = async (label, model, where) => {
+        const tableName = resolveTableName(model);
+        if (tableName && !existingTables.has(tableName)) {
+          return;
+        }
+
+        const sp = `sp_destroy_${++savepointCounter}`;
+        await Users.sequelize.query(`SAVEPOINT ${sp}`, { transaction });
         try {
-          const tableName = resolveTableName(model);
-          if (tableName && !existingTables.has(tableName)) {
-            return;
-          }
           await model.destroy({ where, transaction });
+          await Users.sequelize.query(`RELEASE SAVEPOINT ${sp}`, { transaction });
         } catch (destroyError) {
-          if (optional) return;
-          throw new Error(`${label}: ${destroyError.message}`);
+          try {
+            await Users.sequelize.query(`ROLLBACK TO SAVEPOINT ${sp}`, {
+              transaction,
+            });
+          } catch (rollbackError) {
+            throw new Error(
+              `${label}: ${destroyError.message} (savepoint rollback failed: ${rollbackError.message})`,
+            );
+          }
+          failedDestroys.push({ label, error: destroyError.message });
+          console.warn(
+            `[admin/clients DELETE] safeDestroy '${label}' falhou: ${destroyError.message}`,
+          );
         }
       };
+      // contador de savepoints também usado pela varredura dinâmica abaixo
+      const nextSavepointName = (prefix) => `${prefix}_${++savepointCounter}`;
 
       await safeDestroy(
         "AppointmentStatusHistory",
@@ -1865,7 +1885,7 @@ router.delete("/admin/clients/:id", adminMiddleware, async (req, res) => {
       await safeDestroy("CrmAiActionLog", CrmAiActionLog, { usersId: { [Op.in]: relatedUserIds } });
       await safeDestroy("CrmConversationMessage", CrmConversationMessage, { usersId: { [Op.in]: relatedUserIds } });
       await safeDestroy("CrmConversation", CrmConversation, { usersId: { [Op.in]: relatedUserIds } });
-      await safeDestroy("PersonalFinance", PersonalFinance, { usersId: { [Op.in]: relatedUserIds } }, true);
+      await safeDestroy("PersonalFinance", PersonalFinance, { user: { [Op.in]: relatedUserIds } });
       await safeDestroy("FinancialRecords", FinancialRecords, { usersId: { [Op.in]: relatedUserIds } });
       await safeDestroy("CrmWhatsappMessage", CrmWhatsappMessage, { usersId: { [Op.in]: relatedUserIds } });
       await safeDestroy(
@@ -1952,6 +1972,69 @@ router.delete("/admin/clients/:id", adminMiddleware, async (req, res) => {
       await safeDestroy("Services", Services, { establishment: id });
       await safeDestroy("Settings", Settings, { usersId: { [Op.in]: relatedUserIds } });
 
+      // Limpeza dinâmica: descobre QUALQUER FK que aponte para a tabela "users"
+      // e remove as referências pendentes. Isso garante que tabelas novas (ou
+      // não cobertas explicitamente acima) não bloqueiem o user.destroy().
+      try {
+        const [fkRows] = await Users.sequelize.query(
+          `SELECT
+             tc.table_name AS table_name,
+             kcu.column_name AS column_name
+           FROM information_schema.table_constraints AS tc
+           JOIN information_schema.key_column_usage AS kcu
+             ON tc.constraint_name = kcu.constraint_name
+            AND tc.table_schema = kcu.table_schema
+           JOIN information_schema.constraint_column_usage AS ccu
+             ON ccu.constraint_name = tc.constraint_name
+            AND ccu.table_schema = tc.table_schema
+           WHERE tc.constraint_type = 'FOREIGN KEY'
+             AND ccu.table_name = 'users'`,
+          { transaction },
+        );
+
+        for (const row of fkRows || []) {
+          const tableName = row.table_name;
+          const columnName = row.column_name;
+          if (!tableName || !columnName) continue;
+          if (tableName.toLowerCase() === "users") continue;
+          const sp = nextSavepointName("sp_fk");
+          await Users.sequelize.query(`SAVEPOINT ${sp}`, { transaction });
+          try {
+            await Users.sequelize.query(
+              `DELETE FROM "${tableName}" WHERE "${columnName}" IN (:ids)`,
+              {
+                replacements: { ids: relatedUserIds },
+                transaction,
+              },
+            );
+            await Users.sequelize.query(`RELEASE SAVEPOINT ${sp}`, {
+              transaction,
+            });
+          } catch (cleanupError) {
+            try {
+              await Users.sequelize.query(`ROLLBACK TO SAVEPOINT ${sp}`, {
+                transaction,
+              });
+            } catch (rollbackError) {
+              throw new Error(
+                `FK cleanup ${tableName}.${columnName}: ${cleanupError.message} (rollback failed: ${rollbackError.message})`,
+              );
+            }
+            failedDestroys.push({
+              label: `FK cleanup ${tableName}.${columnName}`,
+              error: cleanupError.message,
+            });
+            console.warn(
+              `[admin/clients DELETE] FK cleanup '${tableName}.${columnName}' falhou: ${cleanupError.message}`,
+            );
+          }
+        }
+      } catch (fkScanError) {
+        console.warn(
+          `[admin/clients DELETE] varredura de FKs falhou: ${fkScanError.message}`,
+        );
+      }
+
       if (employeeIds.length) {
         await Users.destroy({
           where: { id: { [Op.in]: employeeIds } },
@@ -1968,12 +2051,14 @@ router.delete("/admin/clients/:id", adminMiddleware, async (req, res) => {
 
     return res.json({
       message: "Cliente e todos os dados relacionados excluidos com sucesso",
+      warnings: failedDestroys.length ? failedDestroys : undefined,
     });
   } catch (error) {
     console.error("Erro ao excluir cliente:", error);
     return res.status(500).json({
       message: "Erro ao excluir cliente",
       error: error.message,
+      detail: error.original?.detail || error.parent?.detail || undefined,
     });
   }
 });

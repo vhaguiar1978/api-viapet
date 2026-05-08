@@ -60,7 +60,15 @@ const Finance = sequelize.define(
       allowNull: true,
     },
     frequency: {
-      type: DataTypes.ENUM("unico", "mensal", "anual"),
+      type: DataTypes.ENUM("unico", "mensal", "anual", "parcelado"),
+      allowNull: true,
+    },
+    installmentIndex: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+    },
+    installmentTotal: {
+      type: DataTypes.INTEGER,
       allowNull: true,
     },
     paymentMethod: {

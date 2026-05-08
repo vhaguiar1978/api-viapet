@@ -21,39 +21,37 @@ const databaseUrl = firstValidEnv(
   'SUPABASE_DB_URL',
 );
 
-const config = {
-  development: {
+function buildEnvConfig(defaultHost) {
+  const dialect = process.env.DB_DIALECT || (databaseUrl ? 'postgres' : 'mysql');
+  const base = {
     use_env_variable: databaseUrl ? 'DATABASE_URL' : undefined,
     username: firstValidEnv('DB_USER', 'PGUSER', 'POSTGRES_USER') || 'viapet',
     password: firstValidEnv('DB_PASS', 'PGPASSWORD', 'POSTGRES_PASSWORD'),
     database: firstValidEnv('DB_NAME', 'PGDATABASE', 'POSTGRES_DATABASE') || 'viapet',
-    host: firstValidEnv('DB_HOST', 'PGHOST', 'POSTGRES_HOST') || 'localhost',
+    host: firstValidEnv('DB_HOST', 'PGHOST', 'POSTGRES_HOST') || defaultHost,
     port: firstValidEnv('DB_PORT', 'PGPORT', 'POSTGRES_PORT') || 3306,
-    dialect: process.env.DB_DIALECT || (databaseUrl ? 'postgres' : 'mysql'),
-    timezone: databaseUrl ? undefined : '-03:00',
-    dialectOptions: databaseUrl ? {
-      ssl: {
-        require: true,
-        rejectUnauthorized: false
-      }
-    } : undefined
-  },
-  production: {
-    use_env_variable: databaseUrl ? 'DATABASE_URL' : undefined,
-    username: firstValidEnv('DB_USER', 'PGUSER', 'POSTGRES_USER') || 'viapet',
-    password: firstValidEnv('DB_PASS', 'PGPASSWORD', 'POSTGRES_PASSWORD'),
-    database: firstValidEnv('DB_NAME', 'PGDATABASE', 'POSTGRES_DATABASE') || 'viapet',
-    host: firstValidEnv('DB_HOST', 'PGHOST', 'POSTGRES_HOST') || 'api.viapet.app',
-    port: firstValidEnv('DB_PORT', 'PGPORT', 'POSTGRES_PORT') || 3306,
-    dialect: process.env.DB_DIALECT || (databaseUrl ? 'postgres' : 'mysql'),
-    timezone: databaseUrl ? undefined : '-03:00',
-    dialectOptions: databaseUrl ? {
-      ssl: {
-        require: true,
-        rejectUnauthorized: false
-      }
-    } : undefined
+    dialect,
+  };
+
+  if (dialect === 'mysql' || dialect === 'mariadb') {
+    base.timezone = '-03:00';
   }
+
+  if (databaseUrl) {
+    base.dialectOptions = {
+      ssl: {
+        require: true,
+        rejectUnauthorized: false,
+      },
+    };
+  }
+
+  return base;
+}
+
+const config = {
+  development: buildEnvConfig('localhost'),
+  production: buildEnvConfig('api.viapet.app'),
 };
 
 module.exports = config;

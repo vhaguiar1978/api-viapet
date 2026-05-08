@@ -16,6 +16,7 @@ import CrmAiSubscription from "../models/CrmAiSubscription.js";
 import sequelize from "../database/config.js";
 import { createSubscriptionPreference, processWebhookEvent, validateWebhookSignature } from "../service/mercadopago.js";
 import { checkLimit } from "../service/planLimits.js";
+import { testAiReply } from "../service/crmAutoReply.js";
 
 const router = express.Router();
 const CRM_AI_PRICE = Number(process.env.CRM_AI_PRICE || 49.9);
@@ -1486,6 +1487,36 @@ router.post("/control/evaluate", auth, async (req, res) => {
       success: false,
       error: "Erro ao validar acao da IA CRM",
       details: error.message,
+    });
+  }
+});
+
+// Chat de teste do painel: simula uma conversa com a IA do estabelecimento
+// usando o mesmo system prompt de producao (BASE + servicos + instrucoes da
+// loja). Nao salva nada, nao executa acoes — so devolve o texto da resposta.
+router.post("/control/test-reply", auth, async (req, res) => {
+  try {
+    const usersId = getEstablishmentId(req);
+    const messages = Array.isArray(req.body?.messages) ? req.body.messages : [];
+
+    if (messages.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: "Envie ao menos uma mensagem do usuario para testar.",
+      });
+    }
+
+    const result = await testAiReply({ usersId, messages });
+
+    return res.json({
+      success: true,
+      data: result,
+    });
+  } catch (error) {
+    console.error("Erro no chat de teste da IA:", error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || "Erro ao gerar resposta de teste",
     });
   }
 });

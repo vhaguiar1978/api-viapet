@@ -205,6 +205,55 @@ async function ensureAppointmentSchema() {
   }
 }
 
+async function ensureFinanceSchema() {
+  const queryInterface = sequelize.getQueryInterface();
+  const dialect = sequelize.getDialect();
+
+  try {
+    const financeTable = await queryInterface.describeTable("finances");
+
+    if (!financeTable.installmentIndex) {
+      await queryInterface.addColumn("finances", "installmentIndex", {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+      });
+      console.log("Coluna installmentIndex adicionada em Finances");
+    }
+
+    if (!financeTable.installmentTotal) {
+      await queryInterface.addColumn("finances", "installmentTotal", {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+      });
+      console.log("Coluna installmentTotal adicionada em Finances");
+    }
+
+    if (dialect === "postgres") {
+      await sequelize.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1
+            FROM pg_enum
+            WHERE enumlabel = 'parcelado'
+              AND enumtypid = (
+                SELECT oid FROM pg_type WHERE typname = 'enum_finances_frequency'
+              )
+          ) THEN
+            ALTER TYPE "enum_finances_frequency" ADD VALUE 'parcelado';
+          END IF;
+        END$$;
+      `);
+    } else if (dialect === "mysql" || dialect === "mariadb") {
+      await sequelize.query(
+        "ALTER TABLE `finances` MODIFY COLUMN `frequency` ENUM('unico','mensal','anual','parcelado') NULL",
+      );
+    }
+  } catch (error) {
+    console.error("Nao foi possivel validar o schema de Finances:", error);
+  }
+}
+
 async function ensureSettingsAutomationsSchema() {
   const queryInterface = sequelize.getQueryInterface();
   try {
@@ -427,6 +476,7 @@ sequelize
     await ensureWhatsappHubSchema();
     await ensureCrmConversationsSchema();
     await ensureSettingsAutomationsSchema();
+    await ensureFinanceSchema();
     console.log("Conectado ao banco de dados");
     // Reabre sessoes Baileys em background (nao bloqueia startup)
     reinitBaileysSessions();

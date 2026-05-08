@@ -974,6 +974,8 @@ router.post("/finance", authenticate, async (req, res) => {
       feePercentage,
       feeAmount,
       netAmount,
+      installmentIndex,
+      installmentTotal,
     } = req.body;
     const normalizedDate = date ? normalizeFinanceDateInput(date) : null;
     const normalizedDueDate = dueDate ? normalizeFinanceDateInput(dueDate) : null;
@@ -1011,6 +1013,8 @@ router.post("/finance", authenticate, async (req, res) => {
       notes,
       attachments,
       status,
+      installmentIndex: installmentIndex ?? null,
+      installmentTotal: installmentTotal ?? null,
       createdBy: req.user.id,
       usersId: req.user.establishment,
     });
