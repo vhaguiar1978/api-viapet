@@ -1,11 +1,13 @@
 // Cliente da API Groq (compativel com OpenAI Chat Completions).
-// Modelo padrao: llama-3.3-70b-versatile (mais inteligente, ainda gratuito).
-// Para casos extremamente simples e velocidade pura, pode usar llama-3.1-8b-instant.
+// Modelo padrao: llama-3.1-8b-instant (limites grátis bem mais altos:
+// ~30k tokens/min e ~500k tokens/dia, vs 12k/min e 100k/dia do 70B).
+// Pra atendimento de WhatsApp de pet shop a qualidade do 8B e suficiente.
 // Doc: https://console.groq.com/docs/quickstart
 
 const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
-const DEFAULT_MODEL = "llama-3.3-70b-versatile";
+const DEFAULT_MODEL = "llama-3.1-8b-instant";
 const FAST_MODEL = "llama-3.1-8b-instant";
+const SMART_MODEL = "llama-3.3-70b-versatile";
 const DEFAULT_TIMEOUT_MS = 18000;
 
 /**
@@ -83,3 +85,4 @@ export async function groqChat({
 
 export const GROQ_DEFAULT_MODEL = DEFAULT_MODEL;
 export const GROQ_FAST_MODEL = FAST_MODEL;
+export const GROQ_SMART_MODEL = SMART_MODEL;
