@@ -19,7 +19,7 @@ import { checkLimit } from "../service/planLimits.js";
 import { testAiReply } from "../service/crmAutoReply.js";
 
 const router = express.Router();
-const CRM_AI_PRICE = Number(process.env.CRM_AI_PRICE || 49.9);
+const CRM_AI_PRICE = Number(process.env.CRM_AI_PRICE || 29.9);
 const VALID_WEEK_DAYS = [
   "sunday",
   "monday",

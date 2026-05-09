@@ -30,7 +30,7 @@ const CrmAiSubscription = sequelize.define(
     amount: {
       type: DataTypes.DECIMAL(10, 2),
       allowNull: false,
-      defaultValue: 49.9,
+      defaultValue: 29.9,
     },
     currency: {
       type: DataTypes.STRING(3),

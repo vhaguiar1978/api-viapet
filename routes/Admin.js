@@ -2510,7 +2510,7 @@ router.post("/admin/crm-ai/:id/grant-free", adminMiddleware, async (req, res) =>
 router.post("/admin/crm-ai/:id/activate-paid", adminMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
-    const { days = 30, amount = 49.9, notes = "" } = req.body || {};
+    const { days = 30, amount = 29.9, notes = "" } = req.body || {};
     const user = await Users.findByPk(id);
 
     if (!user) {
@@ -2535,7 +2535,7 @@ router.post("/admin/crm-ai/:id/activate-paid", adminMiddleware, async (req, res)
         user_id: id,
         status: "active",
         payment_status: "manual_paid",
-        amount: Number(amount || 49.9),
+        amount: Number(amount || 29.9),
         currency: "BRL",
         activated_at: now,
         next_billing_date: nextBillingDate,
@@ -2545,7 +2545,7 @@ router.post("/admin/crm-ai/:id/activate-paid", adminMiddleware, async (req, res)
       await subscription.update({
         status: "active",
         payment_status: "manual_paid",
-        amount: Number(amount || 49.9),
+        amount: Number(amount || 29.9),
         activated_at: now,
         next_billing_date: nextBillingDate,
         cancelled_at: null,
