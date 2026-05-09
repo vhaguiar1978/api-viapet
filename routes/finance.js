@@ -11,6 +11,7 @@ import Finance from "../models/Finance.js";
 import CashClosure from "../models/CashClosure.js";
 import sequelize from "sequelize";
 import { hydrateAppointmentsWithFinancialDetails } from "../service/appointmentFinance.js";
+import { logActivity } from "../service/activityLogger.js";
 const router = express.Router();
 
 function normalizeViaCentralMetricText(value = "") {
@@ -1019,12 +1020,34 @@ router.post("/finance", authenticate, async (req, res) => {
       usersId: req.user.establishment,
     });
 
+    logActivity({
+      req,
+      modulo: "financeiro",
+      acao: "finance_created",
+      descricao: `Lançamento financeiro: ${finance.description || "(sem descrição)"} — R$ ${finance.amount}`,
+      entidadeTipo: "finance",
+      entidadeId: finance.id,
+      metadata: {
+        type: finance.type,
+        amount: finance.amount,
+        category: finance.category,
+        status: finance.status,
+      },
+    });
+
     res.status(201).json({
       message: "Registro financeiro criado com sucesso",
       data: finance,
     });
   } catch (error) {
     console.error("Erro ao criar registro financeiro:", error);
+    logActivity({
+      req,
+      modulo: "financeiro",
+      acao: "save_error",
+      descricao: `Erro ao criar lançamento financeiro: ${error.message}`,
+      metadata: { error: error.name },
+    });
     res.status(500).json({
       message: "Erro ao criar registro financeiro",
       error: error.message,
@@ -1434,12 +1457,28 @@ router.put("/finance/:id", authenticate, async (req, res) => {
 
     const updatedFinance = await finance.update(updatePayload);
 
+    logActivity({
+      req,
+      modulo: "financeiro",
+      acao: "finance_updated",
+      descricao: `Lançamento financeiro atualizado`,
+      entidadeTipo: "finance",
+      entidadeId: updatedFinance.id,
+    });
+
     res.json({
       message: "Registro financeiro atualizado com sucesso",
       data: updatedFinance,
     });
   } catch (error) {
     console.error("Erro ao atualizar registro financeiro:", error);
+    logActivity({
+      req,
+      modulo: "financeiro",
+      acao: "save_error",
+      descricao: `Erro ao atualizar lançamento: ${error.message}`,
+      metadata: { error: error.name, financeId: req.params?.id },
+    });
     res.status(500).json({
       message: "Erro ao atualizar registro financeiro",
       error: error.message,
@@ -1464,7 +1503,20 @@ router.delete("/finance/:id", authenticate, async (req, res) => {
       });
     }
 
+    const deletedDescription = finance.description;
+    const deletedAmount = finance.amount;
+    const deletedId = finance.id;
+
     await finance.destroy();
+
+    logActivity({
+      req,
+      modulo: "financeiro",
+      acao: "finance_deleted",
+      descricao: `Lançamento excluído: ${deletedDescription || "(sem descrição)"} — R$ ${deletedAmount}`,
+      entidadeTipo: "finance",
+      entidadeId: deletedId,
+    });
 
     res.json({
       message: "Registro financeiro excluído com sucesso",
@@ -1539,6 +1591,28 @@ router.patch("/finance/:id/status", authenticate, async (req, res) => {
       status,
       paymentMethod: paymentMethod || "Pendente",
     });
+
+    if (status === "pago" || status === "paid" || status === "confirmado") {
+      logActivity({
+        req,
+        modulo: "financeiro",
+        acao: "payment_confirmed",
+        descricao: `Pagamento confirmado: R$ ${updatedFinance.amount}`,
+        entidadeTipo: "finance",
+        entidadeId: updatedFinance.id,
+        metadata: { paymentMethod: paymentMethod || "Pendente", status },
+      });
+    } else {
+      logActivity({
+        req,
+        modulo: "financeiro",
+        acao: "finance_status_changed",
+        descricao: `Status do lançamento: ${status}`,
+        entidadeTipo: "finance",
+        entidadeId: updatedFinance.id,
+        metadata: { status, paymentMethod: paymentMethod || null },
+      });
+    }
 
     res.json({
       message: "Status atualizado com sucesso",

@@ -10,6 +10,7 @@ import Sales from "../models/Sales.js";
 import SaleItem from "../models/SaleItem.js";
 import Product from "../models/Products.js";
 import AppointmentPayment from "../models/AppointmentPayment.js";
+import { logActivity } from "../service/activityLogger.js";
 const router = express.Router();
 
 router.get("/customers/search", auth, async (req, res) => {
@@ -249,12 +250,29 @@ router.post("/customers", auth, async (req, res) => {
       status,
     });
 
+    logActivity({
+      req,
+      modulo: "clientes",
+      acao: "customer_created",
+      descricao: `Cliente cadastrado: ${customer.name}`,
+      entidadeTipo: "customer",
+      entidadeId: customer.id,
+      metadata: { name: customer.name, hasPhone: !!phone, hasEmail: !!email },
+    });
+
     return res.status(201).json({
       message: "Cliente cadastrado com sucesso",
       customer,
     });
   } catch (error) {
     console.error(error);
+    logActivity({
+      req,
+      modulo: "clientes",
+      acao: "save_error",
+      descricao: `Erro ao cadastrar cliente: ${error.message}`,
+      metadata: { error: error.name },
+    });
     return res.status(500).json({ error: "Erro ao cadastrar cliente" });
   }
 });
@@ -466,12 +484,28 @@ router.put("/customers", auth, async (req, res) => {
     const updatedCustomer = await Custumers.findByPk(id);
     console.log("Data salva:", updatedCustomer.birthDate); // Debug
 
+    logActivity({
+      req,
+      modulo: "clientes",
+      acao: "customer_updated",
+      descricao: `Cliente atualizado: ${updatedCustomer.name}`,
+      entidadeTipo: "customer",
+      entidadeId: updatedCustomer.id,
+    });
+
     return res.status(200).json({
       message: "Cliente atualizado com sucesso",
       data: updatedCustomer,
     });
   } catch (error) {
     console.error("Erro ao atualizar cliente:", error);
+    logActivity({
+      req,
+      modulo: "clientes",
+      acao: "save_error",
+      descricao: `Erro ao atualizar cliente: ${error.message}`,
+      metadata: { error: error.name },
+    });
     return res.status(500).json({
       message: "Erro ao atualizar cliente",
       error: error.message,
@@ -850,8 +884,20 @@ router.delete("/client/:id", auth, async (req, res) => {
       });
     }
 
+    const deletedName = customer.name;
+    const deletedId = customer.id;
+
     // Deleta o cliente
     await customer.destroy();
+
+    logActivity({
+      req,
+      modulo: "clientes",
+      acao: "customer_deleted",
+      descricao: `Cliente excluído: ${deletedName}`,
+      entidadeTipo: "customer",
+      entidadeId: deletedId,
+    });
 
     return res.status(200).json({
       message: "Cliente deletado com sucesso",

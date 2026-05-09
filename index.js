@@ -48,6 +48,19 @@ import whatsappHubRouter from "./routes/whatsappHub.js";
 import FilterRouter from "./routes/filter.routes.js";
 import appointmentComandaRouter from "./routes/appointmentComanda.js";
 import vaccinePlansRouter from "./routes/vaccinePlans.js";
+import activityClientRouter from "./routes/activityClient.js";
+import adminUserActivityRouter from "./routes/adminUserActivity.js";
+import adminFinanceRouter from "./routes/adminFinance.js";
+import adminAddonsRouter from "./routes/adminAddons.js";
+import adminClientDetailRouter from "./routes/adminClientDetail.js";
+import adminAuditRouter from "./routes/adminAudit.js";
+import { adminAuditMiddleware } from "./middlewares/adminAudit.js";
+import adminAlertsRouter from "./routes/adminAlerts.js";
+import alertEngine from "./service/alertEngine.js";
+import {
+  attachActivityHelper,
+  activityErrorHandler,
+} from "./middlewares/activityCapture.js";
 import net from "node:net";
 process.env.TZ = "America/Sao_Paulo";
 const app = express();
@@ -125,6 +138,7 @@ app.get("/api/db-status", async (_req, res) => {
   }
 });
 app.use("/uploads", express.static("uploads"));
+app.use(attachActivityHelper);
 app.use(loginRouter);
 app.use(loginFuncRouter);
 app.use(registerRouter);
@@ -164,6 +178,16 @@ app.use(FilterRouter);
 app.use("/services", serviceRoutes);
 app.use(appointmentComandaRouter);
 app.use(vaccinePlansRouter);
+app.use(activityClientRouter);
+app.use(adminUserActivityRouter);
+app.use(adminAuditMiddleware);
+app.use(adminFinanceRouter);
+app.use(adminAddonsRouter);
+app.use(adminClientDetailRouter);
+app.use(adminAuditRouter);
+app.use(adminAlertsRouter);
+// Error handler do activity logger — DEVE vir depois das rotas
+app.use(activityErrorHandler);
 // Configure as associações antes de sincronizar
 setupAssociations();
 
@@ -268,6 +292,234 @@ async function ensureSettingsAutomationsSchema() {
     }
   } catch (error) {
     console.error("Nao foi possivel validar o schema de Settings (crmAutomations):", error);
+  }
+}
+
+async function ensureAlertsSchema() {
+  const queryInterface = sequelize.getQueryInterface();
+  try {
+    const tables = await queryInterface.showAllTables();
+    const normalized = tables.map((t) => (typeof t === "string" ? t : t.tableName));
+    if (!normalized.includes("alert_rules")) {
+      await queryInterface.createTable("alert_rules", {
+        id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
+        name: { type: DataTypes.STRING(160), allowNull: false },
+        kind: { type: DataTypes.STRING(60), allowNull: false },
+        config_json: { type: DataTypes.JSON, allowNull: true },
+        channel: { type: DataTypes.STRING(20), allowNull: false, defaultValue: "in_app" },
+        recipient: { type: DataTypes.STRING(180), allowNull: true },
+        active: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
+        last_triggered_at: { type: DataTypes.DATE, allowNull: true },
+        last_check_at: { type: DataTypes.DATE, allowNull: true },
+        last_payload_json: { type: DataTypes.JSON, allowNull: true },
+        cooldown_hours: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 24 },
+        created_at: { type: DataTypes.DATE, allowNull: false, defaultValue: sequelize.literal("CURRENT_TIMESTAMP") },
+        updated_at: { type: DataTypes.DATE, allowNull: false, defaultValue: sequelize.literal("CURRENT_TIMESTAMP") },
+      });
+      console.log("Tabela alert_rules criada");
+    }
+    if (!normalized.includes("alert_events")) {
+      await queryInterface.createTable("alert_events", {
+        id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
+        rule_id: { type: DataTypes.UUID, allowNull: false },
+        rule_name: { type: DataTypes.STRING(160), allowNull: true },
+        kind: { type: DataTypes.STRING(60), allowNull: false },
+        severity: { type: DataTypes.STRING(20), allowNull: false, defaultValue: "info" },
+        title: { type: DataTypes.STRING(180), allowNull: false },
+        message: { type: DataTypes.TEXT, allowNull: true },
+        payload_json: { type: DataTypes.JSON, allowNull: true },
+        delivery_status: { type: DataTypes.STRING(20), allowNull: false, defaultValue: "pending" },
+        delivered_via: { type: DataTypes.STRING(20), allowNull: true },
+        acknowledged_at: { type: DataTypes.DATE, allowNull: true },
+        created_at: { type: DataTypes.DATE, allowNull: false, defaultValue: sequelize.literal("CURRENT_TIMESTAMP") },
+      });
+      console.log("Tabela alert_events criada");
+    }
+  } catch (error) {
+    console.error("Nao foi possivel validar o schema de alertas:", error);
+  }
+}
+
+async function ensureAdminAuditSchema() {
+  const queryInterface = sequelize.getQueryInterface();
+  try {
+    const tables = await queryInterface.showAllTables();
+    const normalized = tables.map((t) => (typeof t === "string" ? t : t.tableName));
+    if (!normalized.includes("admin_audit_logs")) {
+      await queryInterface.createTable("admin_audit_logs", {
+        id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
+        admin_user_id: { type: DataTypes.UUID, allowNull: true },
+        admin_name: { type: DataTypes.STRING(180), allowNull: true },
+        action: { type: DataTypes.STRING(60), allowNull: false },
+        target_type: { type: DataTypes.STRING(60), allowNull: true },
+        target_id: { type: DataTypes.STRING(80), allowNull: true },
+        target_label: { type: DataTypes.STRING(180), allowNull: true },
+        method: { type: DataTypes.STRING(10), allowNull: true },
+        path: { type: DataTypes.STRING(255), allowNull: true },
+        status_code: { type: DataTypes.INTEGER, allowNull: true },
+        metadata_json: { type: DataTypes.JSON, allowNull: true },
+        ip: { type: DataTypes.STRING(60), allowNull: true },
+        user_agent: { type: DataTypes.STRING(255), allowNull: true },
+        created_at: { type: DataTypes.DATE, allowNull: false, defaultValue: sequelize.literal("CURRENT_TIMESTAMP") },
+      });
+      console.log("Tabela admin_audit_logs criada");
+    }
+    try {
+      const indexes = await queryInterface.showIndex("admin_audit_logs");
+      const has = (name) => indexes.some((i) => i.name === name);
+      if (!has("idx_admin_audit_admin_created")) {
+        await queryInterface.addIndex("admin_audit_logs", ["admin_user_id", "created_at"], {
+          name: "idx_admin_audit_admin_created",
+        });
+      }
+      if (!has("idx_admin_audit_action")) {
+        await queryInterface.addIndex("admin_audit_logs", ["action"], { name: "idx_admin_audit_action" });
+      }
+      if (!has("idx_admin_audit_created")) {
+        await queryInterface.addIndex("admin_audit_logs", ["created_at"], { name: "idx_admin_audit_created" });
+      }
+    } catch (idxErr) {
+      console.warn("Aviso ao criar índices de admin_audit_logs:", idxErr.message);
+    }
+  } catch (error) {
+    console.error("Nao foi possivel validar o schema de admin_audit_logs:", error);
+  }
+}
+
+async function ensureAddonsSchema() {
+  const queryInterface = sequelize.getQueryInterface();
+  try {
+    const tables = await queryInterface.showAllTables();
+    const normalized = tables.map((t) => (typeof t === "string" ? t : t.tableName));
+
+    if (!normalized.includes("addons")) {
+      await queryInterface.createTable("addons", {
+        id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true, allowNull: false },
+        key: { type: DataTypes.STRING(60), allowNull: false, unique: true },
+        name: { type: DataTypes.STRING(120), allowNull: false },
+        description: { type: DataTypes.TEXT, allowNull: true },
+        default_amount: { type: DataTypes.DECIMAL(10, 2), allowNull: false, defaultValue: 0 },
+        billing_cycle: { type: DataTypes.STRING(20), allowNull: false, defaultValue: "monthly" },
+        active: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
+        sort_order: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
+        created_at: { type: DataTypes.DATE, allowNull: false, defaultValue: sequelize.literal("CURRENT_TIMESTAMP") },
+        updated_at: { type: DataTypes.DATE, allowNull: false, defaultValue: sequelize.literal("CURRENT_TIMESTAMP") },
+      });
+      console.log("Tabela addons criada");
+    }
+
+    if (!normalized.includes("client_addons")) {
+      await queryInterface.createTable("client_addons", {
+        id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true, allowNull: false },
+        client_user_id: { type: DataTypes.UUID, allowNull: false },
+        addon_id: { type: DataTypes.UUID, allowNull: false },
+        addon_key: { type: DataTypes.STRING(60), allowNull: false },
+        status: { type: DataTypes.STRING(20), allowNull: false, defaultValue: "active" },
+        amount_override: { type: DataTypes.DECIMAL(10, 2), allowNull: true },
+        activated_at: { type: DataTypes.DATE, allowNull: true },
+        next_billing_date: { type: DataTypes.DATE, allowNull: true },
+        cancelled_at: { type: DataTypes.DATE, allowNull: true },
+        last_payment_at: { type: DataTypes.DATE, allowNull: true },
+        notes: { type: DataTypes.TEXT, allowNull: true },
+        created_at: { type: DataTypes.DATE, allowNull: false, defaultValue: sequelize.literal("CURRENT_TIMESTAMP") },
+        updated_at: { type: DataTypes.DATE, allowNull: false, defaultValue: sequelize.literal("CURRENT_TIMESTAMP") },
+      });
+      console.log("Tabela client_addons criada");
+    }
+
+    try {
+      const indexes = await queryInterface.showIndex("client_addons");
+      const has = (name) => indexes.some((i) => i.name === name);
+      if (!has("idx_client_addons_user")) {
+        await queryInterface.addIndex("client_addons", ["client_user_id"], { name: "idx_client_addons_user" });
+      }
+      if (!has("idx_client_addons_addon")) {
+        await queryInterface.addIndex("client_addons", ["addon_id"], { name: "idx_client_addons_addon" });
+      }
+      if (!has("idx_client_addons_status")) {
+        await queryInterface.addIndex("client_addons", ["status"], { name: "idx_client_addons_status" });
+      }
+      if (!has("uq_client_addons_user_addon")) {
+        await queryInterface.addIndex("client_addons", ["client_user_id", "addon_id"], {
+          name: "uq_client_addons_user_addon",
+          unique: true,
+        });
+      }
+    } catch (idxErr) {
+      console.warn("Aviso ao criar índices de client_addons:", idxErr.message);
+    }
+
+    // Seed inicial: registra IA CRM como primeiro addon, se ainda não existir
+    const { default: Addon } = await import("./models/Addon.js");
+    const existing = await Addon.findOne({ where: { key: "ia_crm" } });
+    if (!existing) {
+      await Addon.create({
+        key: "ia_crm",
+        name: "IA CRM",
+        description: "Atendimento automático no WhatsApp com IA",
+        default_amount: 29.9,
+        billing_cycle: "monthly",
+        active: true,
+        sort_order: 1,
+      });
+      console.log("Addon 'ia_crm' cadastrado");
+    }
+  } catch (error) {
+    console.error("Nao foi possivel validar o schema de addons:", error);
+  }
+}
+
+async function ensureActivityLogsSchema() {
+  const queryInterface = sequelize.getQueryInterface();
+  try {
+    const tables = await queryInterface.showAllTables();
+    const normalized = tables.map((t) => (typeof t === "string" ? t : t.tableName));
+    if (!normalized.includes("activity_logs")) {
+      await queryInterface.createTable("activity_logs", {
+        id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true, allowNull: false },
+        tenant_id: { type: DataTypes.UUID, allowNull: true },
+        user_id: { type: DataTypes.UUID, allowNull: true },
+        nome_usuario: { type: DataTypes.STRING(180), allowNull: true },
+        modulo: { type: DataTypes.STRING(60), allowNull: false },
+        acao: { type: DataTypes.STRING(80), allowNull: false },
+        descricao: { type: DataTypes.STRING(500), allowNull: true },
+        entidade_tipo: { type: DataTypes.STRING(60), allowNull: true },
+        entidade_id: { type: DataTypes.STRING(60), allowNull: true },
+        metadata_json: { type: DataTypes.JSON, allowNull: true },
+        ip: { type: DataTypes.STRING(60), allowNull: true },
+        navegador: { type: DataTypes.STRING(255), allowNull: true },
+        created_at: {
+          type: DataTypes.DATE,
+          allowNull: false,
+          defaultValue: sequelize.literal("CURRENT_TIMESTAMP"),
+        },
+      });
+      console.log("Tabela activity_logs criada");
+    }
+
+    try {
+      const indexes = await queryInterface.showIndex("activity_logs");
+      const has = (name) => indexes.some((i) => i.name === name);
+      if (!has("idx_activity_logs_tenant_created")) {
+        await queryInterface.addIndex("activity_logs", ["tenant_id", "created_at"], {
+          name: "idx_activity_logs_tenant_created",
+        });
+      }
+      if (!has("idx_activity_logs_user_created")) {
+        await queryInterface.addIndex("activity_logs", ["user_id", "created_at"], {
+          name: "idx_activity_logs_user_created",
+        });
+      }
+      if (!has("idx_activity_logs_modulo_acao")) {
+        await queryInterface.addIndex("activity_logs", ["modulo", "acao"], {
+          name: "idx_activity_logs_modulo_acao",
+        });
+      }
+    } catch (idxErr) {
+      console.warn("Aviso ao criar índices de activity_logs:", idxErr.message);
+    }
+  } catch (error) {
+    console.error("Nao foi possivel validar o schema de activity_logs:", error);
   }
 }
 
@@ -477,6 +729,10 @@ sequelize
     await ensureCrmConversationsSchema();
     await ensureSettingsAutomationsSchema();
     await ensureFinanceSchema();
+    await ensureActivityLogsSchema();
+    await ensureAddonsSchema();
+    await ensureAdminAuditSchema();
+    await ensureAlertsSchema();
     console.log("Conectado ao banco de dados");
     // Reabre sessoes Baileys em background (nao bloqueia startup)
     reinitBaileysSessions();
@@ -507,6 +763,21 @@ app.listen(PORT, () => {
       }
     });
     console.log("🤖 Cron de automacoes CRM ativado (a cada 5 min)");
+  }
+
+  // Cron de alertas admin — roda a cada 30 minutos
+  if (process.env.DISABLE_ADMIN_ALERTS_CRON !== "true") {
+    cron.schedule("*/30 * * * *", async () => {
+      try {
+        const result = await alertEngine.runAlerts();
+        if (result.fired > 0) {
+          console.log(`🔔 Alertas admin: ${result.fired}/${result.processed} dispararam`);
+        }
+      } catch (error) {
+        console.error("❌ Erro no cron de alertas admin:", error.message);
+      }
+    });
+    console.log("🔔 Cron de alertas admin ativado (a cada 30 min)");
   }
 
   // Keep-alive: ping próprio a cada 14 minutos para evitar hibernação no Render

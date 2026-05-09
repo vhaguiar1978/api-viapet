@@ -5,6 +5,7 @@ import Custumers from "../models/Custumers.js";
 import { Op } from "sequelize";
 import Belongings from "../models/Belongings.js";
 import sequelize from "../database/config.js";
+import { logActivity } from "../service/activityLogger.js";
 
 const router = express.Router();
 
@@ -142,12 +143,29 @@ router.post("/pets", auth, async (req, res) => {
       observation,
       allergic,
     });
+    logActivity({
+      req,
+      modulo: "pets",
+      acao: "pet_created",
+      descricao: `Pet cadastrado: ${pet.name} (${pet.species || "sem espécie"})`,
+      entidadeTipo: "pet",
+      entidadeId: pet.id,
+      metadata: { species: pet.species, customerId: custumerId },
+    });
+
     return res.status(201).json({
       message: "Pet cadastrado com sucesso",
       data: pet,
     });
   } catch (error) {
     console.error("Erro ao cadastrar pet:", error);
+    logActivity({
+      req,
+      modulo: "pets",
+      acao: "save_error",
+      descricao: `Erro ao cadastrar pet: ${error.message}`,
+      metadata: { error: error.name },
+    });
     return res.status(500).json({
       message: "Erro ao cadastrar pet",
       error: error.message,
@@ -427,12 +445,28 @@ router.put("/pets/:id", auth, async (req, res) => {
       custumerId: customerId,
     });
 
+    logActivity({
+      req,
+      modulo: "pets",
+      acao: "pet_updated",
+      descricao: `Pet atualizado: ${pet.name}`,
+      entidadeTipo: "pet",
+      entidadeId: pet.id,
+    });
+
     return res.status(200).json({
       message: "Pet atualizado com sucesso",
       data: pet,
     });
   } catch (error) {
     console.error("Erro ao atualizar pet:", error);
+    logActivity({
+      req,
+      modulo: "pets",
+      acao: "save_error",
+      descricao: `Erro ao atualizar pet: ${error.message}`,
+      metadata: { error: error.name },
+    });
     return res.status(500).json({
       message: "Erro ao atualizar pet",
       error: error.message,
@@ -459,8 +493,20 @@ router.delete("/pets/:id", auth, async (req, res) => {
       });
     }
 
+    const removedName = pet.name;
+    const removedId = pet.id;
+
     // Remove o pet
     await pet.destroy();
+
+    logActivity({
+      req,
+      modulo: "pets",
+      acao: "pet_deleted",
+      descricao: `Pet removido: ${removedName}`,
+      entidadeTipo: "pet",
+      entidadeId: removedId,
+    });
 
     return res.status(200).json({
       message: "Pet removido com sucesso",

@@ -6,6 +6,7 @@ import net from "node:net";
 import "dotenv/config";
 import Users from "../../models/Users.js";
 import LoginHistory from "../../models/LoginHistory.js";
+import { logActivity } from "../../service/activityLogger.js";
 
 const router = express.Router();
 
@@ -126,21 +127,57 @@ router.post("/login", async (req, res) => {
 
     if (!user) {
       await registerLoginHistory(null, req, "failed");
+      logActivity({
+        req,
+        modulo: "auth",
+        acao: "login_failed",
+        descricao: "Email não cadastrado",
+        metadata: { email: normalizedEmail, reason: "user_not_found" },
+      });
       return res.status(401).json({ message: "Email ou senha invalidos" });
     }
 
     if (!user.password || typeof user.password !== "string") {
       await registerLoginHistory(user.id, req, "failed");
+      logActivity({
+        req,
+        userId: user.id,
+        tenantId: user.establishment || user.id,
+        nomeUsuario: user.name,
+        modulo: "auth",
+        acao: "login_failed",
+        descricao: "Conta sem senha definida",
+        metadata: { reason: "no_password" },
+      });
       return res.status(401).json({ message: "Email ou senha invalidos" });
     }
 
     const validPassword = await bcrypt.compare(password, user.password);
     if (!validPassword) {
       await registerLoginHistory(user.id, req, "failed");
+      logActivity({
+        req,
+        userId: user.id,
+        tenantId: user.establishment || user.id,
+        nomeUsuario: user.name,
+        modulo: "auth",
+        acao: "login_failed",
+        descricao: "Senha incorreta",
+        metadata: { reason: "wrong_password" },
+      });
       return res.status(401).json({ message: "Email ou senha invalidos" });
     }
 
     if (!user.status) {
+      logActivity({
+        req,
+        userId: user.id,
+        tenantId: user.establishment || user.id,
+        nomeUsuario: user.name,
+        modulo: "auth",
+        acao: "login_blocked",
+        descricao: "Tentativa de login em conta inativa",
+      });
       return res.status(403).json({
         message: "Usuario inativo. Entre em contato com o administrador.",
       });
@@ -161,6 +198,16 @@ router.post("/login", async (req, res) => {
     const token = buildAuthToken(user);
 
     await registerLoginHistory(user.id, req, "success");
+    logActivity({
+      req,
+      userId: user.id,
+      tenantId: user.establishment || user.id,
+      nomeUsuario: user.name,
+      modulo: "auth",
+      acao: "login_success",
+      descricao: `Login realizado por ${user.name}`,
+      metadata: { role: user.role },
+    });
     try {
       await user.update({ lastAccess: new Date() });
     } catch {

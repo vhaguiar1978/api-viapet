@@ -9,6 +9,7 @@ import Users from "../models/Users.js";
 import AppointmentItem from "../models/AppointmentItem.js";
 import AppointmentPayment from "../models/AppointmentPayment.js";
 import AppointmentStatusHistory from "../models/AppointmentStatusHistory.js";
+import { logActivity } from "../service/activityLogger.js";
 import { Op } from "sequelize";
 import {
   mensagemPacotinho,
@@ -370,6 +371,20 @@ router.post("/appointments", auth, async (req, res) => {
       }
     }
 
+    logActivity({
+      req,
+      modulo: "agenda",
+      acao: "appointment_created",
+      descricao: `Novo agendamento criado`,
+      entidadeTipo: "appointment",
+      entidadeId: appointment.id,
+      metadata: {
+        date: appointment.date,
+        hour: appointment.hour,
+        type: appointment.type,
+      },
+    });
+
     return res.status(201).json({
       message: "Agendamento criado com sucesso",
       data: appointment,
@@ -379,6 +394,13 @@ router.post("/appointments", auth, async (req, res) => {
       await transaction.rollback();
     }
     console.error("Erro ao criar agendamento:", error);
+    logActivity({
+      req,
+      modulo: "agenda",
+      acao: "save_error",
+      descricao: `Erro ao criar agendamento: ${error.message}`,
+      metadata: { error: error.name },
+    });
     return res.status(500).json({
       message: "Erro ao criar agendamento",
       error: error.message,
@@ -1128,6 +1150,20 @@ router.put("/appointments/:id", auth, async (req, res) => {
 
     console.log("PUT /appointments/:id - Response Data:", appointmentWithDetails);
 
+    logActivity({
+      req,
+      modulo: "agenda",
+      acao: "appointment_updated",
+      descricao: `Agendamento editado`,
+      entidadeTipo: "appointment",
+      entidadeId: updatedAppointment.id,
+      metadata: {
+        date: updatedAppointment.date,
+        hour: updatedAppointment.hour,
+        status: updatedAppointment.status,
+      },
+    });
+
     return res.status(200).json({
       message: "Agendamento atualizado com sucesso",
       data: appointmentWithDetails,
@@ -1135,6 +1171,13 @@ router.put("/appointments/:id", auth, async (req, res) => {
   } catch (error) {
     console.error("Erro ao atualizar agendamento:", error);
     console.error("PUT /appointments/:id - Error Details:", error);
+    logActivity({
+      req,
+      modulo: "agenda",
+      acao: "save_error",
+      descricao: `Erro ao atualizar agendamento: ${error.message}`,
+      metadata: { error: error.name, appointmentId: req.params?.id },
+    });
     return res.status(500).json({
       message: "Erro ao atualizar agendamento",
       error: error.message,
@@ -1301,10 +1344,23 @@ router.delete("/appointments/:id", auth, async (req, res) => {
       transaction: t,
     });
 
+    const deletedAppointmentId = appointment.id;
+    const deletedDate = appointment.date;
+
     // Finalmente, exclui o agendamento
     await appointment.destroy({ transaction: t });
 
     await t.commit();
+
+    logActivity({
+      req,
+      modulo: "agenda",
+      acao: "appointment_deleted",
+      descricao: `Agendamento excluído`,
+      entidadeTipo: "appointment",
+      entidadeId: deletedAppointmentId,
+      metadata: { date: deletedDate },
+    });
 
     return res.status(200).json({
       message: "Agendamento excluído com sucesso",
