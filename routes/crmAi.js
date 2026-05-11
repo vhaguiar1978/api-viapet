@@ -13,6 +13,7 @@ import CrmConversation from "../models/CrmConversation.js";
 import CrmConversationMessage from "../models/CrmConversationMessage.js";
 import CrmAiActionLog from "../models/CrmAiActionLog.js";
 import CrmAiSubscription from "../models/CrmAiSubscription.js";
+import CustomerAiNote from "../models/CustomerAiNote.js";
 import sequelize from "../database/config.js";
 import { createSubscriptionPreference, processWebhookEvent, validateWebhookSignature } from "../service/mercadopago.js";
 import { checkLimit } from "../service/planLimits.js";
@@ -2888,6 +2889,143 @@ router.post("/webhook", async (req, res) => {
       processed: false,
       error: error.message,
     });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CAMADA 2 DE APRENDIZADO — feedback humano e notas por cliente
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Captura feedback humano (👍/👎) em uma resposta da IA. Quando o operador
+// envia "down" + uma correção textual, a correção é AUTOMATICAMENTE adicionada
+// ao playbook do dono (max 50 entries, FIFO) — assim a IA aprende com os erros.
+router.post("/feedback/:actionLogId", auth, async (req, res) => {
+  try {
+    const usersId = getEstablishmentId(req);
+    const { actionLogId } = req.params;
+    const { feedback, correctedReply } = req.body || {};
+
+    if (!actionLogId) {
+      return res.status(400).json({ success: false, error: "actionLogId obrigatorio" });
+    }
+    const valid = ["up", "down", null];
+    if (feedback !== undefined && !valid.includes(feedback)) {
+      return res.status(400).json({ success: false, error: "feedback deve ser 'up', 'down' ou null" });
+    }
+
+    const log = await CrmAiActionLog.findOne({ where: { id: actionLogId, usersId } });
+    if (!log) {
+      return res.status(404).json({ success: false, error: "Log de acao nao encontrado" });
+    }
+
+    log.feedback = feedback ?? null;
+    log.correctedReply = correctedReply ? String(correctedReply).slice(0, 2000) : null;
+    log.feedbackBy = req.user?.id || null;
+    log.feedbackAt = new Date();
+
+    // Se feedback negativo + correcao, adiciona como exemplo no playbook do dono
+    // (a IA passa a usar essa correcao em futuras conversas)
+    if (feedback === "down" && correctedReply && !log.appliedToPlaybook) {
+      const settings = await Settings.findOne({ where: { usersId } });
+      const connection = settings?.whatsappConnection || {};
+      const aiControl = connection.crmAiControl || {};
+      const playbook = Array.isArray(aiControl.playbookMessages) ? aiControl.playbookMessages.slice() : [];
+      playbook.push({
+        role: "assistant",
+        text: String(correctedReply).slice(0, 600),
+        source: "auto_correction",
+        actionLogId: log.id,
+        createdAt: new Date().toISOString(),
+      });
+      const trimmed = playbook.slice(-50);
+      const updatedAiControl = { ...aiControl, playbookMessages: trimmed };
+      const updatedConnection = { ...connection, crmAiControl: updatedAiControl };
+      if (settings) {
+        settings.whatsappConnection = updatedConnection;
+        await settings.save();
+      }
+      log.appliedToPlaybook = true;
+    }
+
+    await log.save();
+    return res.json({ success: true, data: log });
+  } catch (error) {
+    console.error("Erro ao salvar feedback da IA:", error);
+    return res.status(500).json({
+      success: false,
+      error: "Erro ao salvar feedback",
+      details: error.message,
+    });
+  }
+});
+
+// Lista notas de IA de um cliente. A IA usa essas notas como contexto extra
+// no system prompt sempre que esse cliente conversar.
+router.get("/customers/:customerId/notes", auth, async (req, res) => {
+  try {
+    const usersId = getEstablishmentId(req);
+    const { customerId } = req.params;
+    const rows = await CustomerAiNote.findAll({
+      where: { usersId, customerId },
+      order: [["pinned", "DESC"], ["createdAt", "DESC"]],
+      limit: 100,
+    });
+    return res.json({ success: true, data: rows });
+  } catch (error) {
+    console.error("Erro ao listar notas do cliente:", error);
+    return res.status(500).json({ success: false, error: "Erro ao listar notas", details: error.message });
+  }
+});
+
+router.post("/customers/:customerId/notes", auth, async (req, res) => {
+  try {
+    const usersId = getEstablishmentId(req);
+    const { customerId } = req.params;
+    const { note, pinned } = req.body || {};
+    if (!note || String(note).trim().length < 2) {
+      return res.status(400).json({ success: false, error: "Conteudo da nota muito curto" });
+    }
+    const row = await CustomerAiNote.create({
+      usersId,
+      customerId,
+      note: String(note).slice(0, 1000),
+      pinned: Boolean(pinned),
+      createdBy: req.user?.id || null,
+    });
+    return res.json({ success: true, data: row });
+  } catch (error) {
+    console.error("Erro ao criar nota do cliente:", error);
+    return res.status(500).json({ success: false, error: "Erro ao criar nota", details: error.message });
+  }
+});
+
+router.put("/notes/:noteId", auth, async (req, res) => {
+  try {
+    const usersId = getEstablishmentId(req);
+    const { noteId } = req.params;
+    const row = await CustomerAiNote.findOne({ where: { id: noteId, usersId } });
+    if (!row) return res.status(404).json({ success: false, error: "Nota nao encontrada" });
+    if (typeof req.body?.note === "string") row.note = String(req.body.note).slice(0, 1000);
+    if (typeof req.body?.pinned === "boolean") row.pinned = req.body.pinned;
+    await row.save();
+    return res.json({ success: true, data: row });
+  } catch (error) {
+    console.error("Erro ao atualizar nota:", error);
+    return res.status(500).json({ success: false, error: "Erro ao atualizar nota", details: error.message });
+  }
+});
+
+router.delete("/notes/:noteId", auth, async (req, res) => {
+  try {
+    const usersId = getEstablishmentId(req);
+    const { noteId } = req.params;
+    const row = await CustomerAiNote.findOne({ where: { id: noteId, usersId } });
+    if (!row) return res.status(404).json({ success: false, error: "Nota nao encontrada" });
+    await row.destroy();
+    return res.json({ success: true });
+  } catch (error) {
+    console.error("Erro ao deletar nota:", error);
+    return res.status(500).json({ success: false, error: "Erro ao deletar nota", details: error.message });
   }
 });
 

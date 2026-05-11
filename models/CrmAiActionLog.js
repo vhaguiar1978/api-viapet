@@ -74,6 +74,27 @@ const CrmAiActionLog = sequelize.define(
       allowNull: false,
       defaultValue: {},
     },
+    feedback: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    correctedReply: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    },
+    feedbackBy: {
+      type: DataTypes.UUID,
+      allowNull: true,
+    },
+    feedbackAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
+    appliedToPlaybook: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
+    },
   },
   {
     timestamps: true,

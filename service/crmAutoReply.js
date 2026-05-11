@@ -5,6 +5,8 @@ import Products from "../models/Products.js";
 import CrmAiSubscription from "../models/CrmAiSubscription.js";
 import CrmAiActionLog from "../models/CrmAiActionLog.js";
 import CrmConversationMessage from "../models/CrmConversationMessage.js";
+import CrmConversation from "../models/CrmConversation.js";
+import CustomerAiNote from "../models/CustomerAiNote.js";
 import { groqChat } from "./groqClient.js";
 
 function normalizeSearchable(value) {
@@ -224,11 +226,21 @@ function buildInfoServicoReply({ greeting, services, pet }) {
   return `${greeting} Oferecemos ${list}${pet?.name ? `. Quer agendar algum para o ${pet.name}?` : ". Posso agendar para voce?"}`;
 }
 
-function buildIndefinidoReply({ greeting, services, history }) {
-  // Se o cliente disse algo nao classificado, evita repetir a ultima resposta
-  const lastBot = history?.[0]?.body || "";
-  const opcoes = services.slice(0, 3).map((s) => s.name).join(", ");
-  return `${greeting} Nao entendi direito, pode me explicar com outras palavras? Posso ajudar com: agendamento, preco, horario ou cancelamento. Servicos disponiveis: ${opcoes || "banho, tosa"}.`;
+function buildIndefinidoReply({ greeting, services, history, pet, customer }) {
+  // PROIBIDO dizer "nao entendi" ou pedir pro cliente reformular. Em vez disso,
+  // oferece opcoes claras e pergunta 1 coisa especifica baseada no contexto.
+  const opcoes = services.slice(0, 3).map((s) => s.name);
+  const opcoesStr = opcoes.length ? opcoes.join(", ") : "banho, tosa, hidratacao";
+  const petPart = pet?.name ? ` pro ${pet.name}` : "";
+
+  // Variacoes humanas que SEMPRE oferecem caminho, nunca pedem reformulacao
+  const variants = [
+    `${greeting} Posso te ajudar com agendamento${petPart}, valores ou tirar uma duvida 😊 O que voce precisa hoje?`,
+    `${greeting} A gente trabalha com ${opcoesStr}${petPart ? " — pro " + pet.name : ""}. Voce quer agendar ou saber valores?`,
+    `${greeting} Me conta o que voce precisa${petPart}: quer marcar um horario, saber o preco, ou outra coisa? 🐾`,
+    `${greeting} Posso agendar um ${opcoes[0] || "banho"}${petPart}, te passar valores ou tirar duvida sobre nossos servicos. Qual desses te ajuda agora?`,
+  ];
+  return variants[Math.floor(Math.random() * variants.length)];
 }
 
 // ─── Builder principal: roteia para o construtor certo ───────────────────
@@ -256,7 +268,7 @@ function buildReply({ question, services, settings, customer, pet, history, iden
     case "telefone":
       return `${greeting} Pode me falar por aqui mesmo! O que você precisa?`;
     default:
-      return buildIndefinidoReply({ greeting, services, history });
+      return buildIndefinidoReply({ greeting, services, history, pet, customer });
   }
 }
 
@@ -273,7 +285,13 @@ INTENÇÕES POSSÍVEIS:
 agendar / saber preço / verificar horário / remarcar / cancelar / busca e entrega / endereço / forma de pagamento / horário de funcionamento / falar com humano / reclamação / dúvida / pacotinho / saúde do pet (este SEMPRE encaminha pra humano).
 
 INTERPRETAÇÃO:
-Mensagens de WhatsApp vêm com erros, abreviações e frases curtas. Use SEMPRE o contexto da conversa anterior. Se o cliente disser só "sim" / "não" / "amanhã" / "14h" / "manhã", entenda como resposta da última pergunta. Nunca diga que não entendeu se houver qualquer pista.
+Mensagens de WhatsApp vêm com erros, abreviações e frases curtas. Use SEMPRE o contexto da conversa anterior. Se o cliente disser só "sim" / "não" / "amanhã" / "14h" / "manhã", entenda como resposta da última pergunta.
+
+REGRA DE OURO DE INTERPRETAÇÃO (a mais importante): **NUNCA diga que "não entendeu"**, "não peguei", "não compreendi", "pode reformular", "pode explicar com outras palavras" ou qualquer variação. Em vez disso:
+1. INFIRA a intenção mais provável pelo contexto da conversa e pelos últimos atendimentos.
+2. Se houver dúvida real, faça UMA pergunta específica sobre o que falta (qual pet? qual data? qual serviço? qual horário?).
+3. Se a mensagem for muito ambígua, ofereça 2 opções curtas: "Você quer agendar um banho ou ver os valores?".
+Pedir pro cliente reformular a mensagem dele é PROIBIDO — quem precisa se virar é você, não ele.
 
 Exemplo: cliente "quero banho e hidratacao para amanha 14h" → você "Claro 😊 Vou verificar banho com hidratação para amanhã às 14h. Me confirma o nome do pet e o porte dele, por favor?"
 
@@ -311,15 +329,17 @@ SAÚDE DO PET (doença, ferida, alergia, vômito, dor, coceira, comportamento es
 ESCALAÇÃO PRA HUMANO:
 Cliente irritado, reclamação, reembolso, desconto fora do padrão, saúde do pet, pedido explícito de atendente, ameaça de processo, IA insegura. Frase: "Vou chamar uma pessoa da equipe pra te ajudar melhor com isso, tá bom? 😊"
 
-QUANDO NÃO ENTENDER (só se realmente não houver pista):
-"Desculpa, acho que não peguei certinho 😅 Você quer agendar, saber valores, remarcar ou falar com alguém da equipe?"
+QUANDO NÃO HOUVER PISTA NENHUMA (raríssimo — só primeira mensagem totalmente vaga):
+NÃO diga que não entendeu. Em vez disso, abra opções de forma natural:
+"Oi! 😊 Você quer agendar um banho ou tosa, saber valores ou tirar uma dúvida sobre algum dos nossos serviços? 🐾"
+SEMPRE prefira inferir e perguntar 1 detalhe específico em vez de pedir reformulação.
 
 SAUDAÇÃO INICIAL (cliente abriu conversa sem contexto):
 "Oi, tudo bem? 😊 Seja bem-vindo(a)! Você gostaria de agendar um banho e tosa, saber valores ou tirar uma dúvida? 🐾"
 
 Sua missão: fazer o cliente se sentir bem atendido, entendido e seguro.`;
 
-function buildSystemPrompt({ settings, aiControl, services, products = [], customer, pet, pets = [], upcomingAppointments = [] }) {
+function buildSystemPrompt({ settings, aiControl, services, products = [], customer, pet, pets = [], upcomingAppointments = [], customerNotes = [], conversationSummary = null }) {
   const storeName = settings?.storeName || "o pet shop";
   // PRIORIDADE: o que tem no painel da IA (scheduling) sobrepoe os horarios
   // gerais da loja (settings). Antes a IA quotava o da loja, ignorando o painel.
@@ -358,12 +378,11 @@ function buildSystemPrompt({ settings, aiControl, services, products = [], custo
     identifyAsAi = false;
   }
 
-  // Se o dono escreveu "nao envie mensagem que nao entendeu" — adiciona regra extra
-  const banUnclearReply =
-    customLower.includes("nao envie mensagem que nao entendeu") ||
-    customLower.includes("não envie mensagem que não entendeu") ||
-    customLower.includes("nao quero que voce diga que nao entendeu") ||
-    customLower.includes("não quero que voce diga que não entendeu");
+  // Regra "nunca diga que não entendeu" agora é PADRÃO (sempre ligada) — decisão
+  // de produto: a IA NUNCA deve devolver "não entendi" / "pode reformular". Ela
+  // deve inferir pelo contexto e perguntar 1 coisa específica que falta. O dono
+  // pode anular escrevendo o oposto nas instruções inviolaveis se quiser.
+  const banUnclearReply = true;
   const escalation = (aiControl?.escalationKeywords || [])
     .filter(Boolean)
     .join(", ");
@@ -548,6 +567,8 @@ CONTEXTO DO CLIENTE ATUAL:
 - ${customerInfo}
 ${petInfo}
 ${upcomingList ? `\nAgendamentos futuros deste cliente:\n${upcomingList}` : ""}
+${(Array.isArray(customerNotes) && customerNotes.length > 0) ? `\n📌 ANOTACOES SOBRE ESTE CLIENTE (MEMORIA DA IA — leve em conta sempre):\n${customerNotes.slice(0, 10).map((n, i) => `${i + 1}. ${String(n.note || "").slice(0, 300)}`).join("\n")}` : ""}
+${conversationSummary ? `\n📝 RESUMO DA CONVERSA ATE AGORA (mensagens antigas resumidas — use como contexto):\n${String(conversationSummary).slice(0, 1200)}` : ""}
 
 ${pets && pets.length > 1 ? `🐾 Este cliente tem ${pets.length} pets. ANTES de agendar/remarcar, identifique qual pet pelo NOME (pergunte se nao for claro).` : ""}
 ${pets && pets.length === 1 ? `Cliente tem 1 pet (${pets[0].name}). Pode usar direto, sem perguntar qual.` : ""}
@@ -564,7 +585,7 @@ O QUE NAO FAZER (NUNCA):
 - Inventar precos ou servicos fora da lista.
 - Tentar atender consulta veterinaria, vacina, exame ou cirurgia.
 - Dar diagnostico ou conselho veterinario.
-${banUnclearReply ? "- ❌ NUNCA RESPONDA \"nao entendi\", \"pode explicar com outras palavras\", \"nao entendi direito\". Se a mensagem for confusa, use o contexto da conversa para inferir e perguntar UMA coisa especifica que falte (data? servico? horario? pet?). NUNCA peca pro cliente reformular a mensagem dele." : ""}
+- ❌❌❌ PROIBIDO RESPONDER "nao entendi", "nao compreendi", "nao peguei", "pode reformular", "pode explicar com outras palavras", "pode repetir", "nao entendi direito", "como assim", ou qualquer variacao. Pedir pro cliente reformular a mensagem dele E PROIBIDO. Se a mensagem for confusa: (1) USE o contexto da conversa anterior + os agendamentos futuros do cliente + o nome dos pets para INFERIR a intencao mais provavel; (2) Se ainda assim tiver duvida, faca UMA pergunta especifica sobre o que falta (qual data? qual pet? qual servico? qual horario?); (3) Em ultimo caso, ofereca 2 opcoes claras ("Voce quer agendar um banho ou ver os valores?"). Quem se vira pra entender e VOCE, nao o cliente.
 - Em caso de palavras como: ${escalation || "urgente, reclamacao, emergencia"} → escalar pra atendente humano.
 - Se o cliente pedir servico que NAO seja banho/tosa/hidratacao/estetica → diga que vai chamar a atendente humana.
 
@@ -670,6 +691,78 @@ async function buildHistoryMessages(conversationId, limit = 30) {
   }
 }
 
+// Resumo de conversa longa: quando a conversa ultrapassa 20 mensagens, gera
+// um resumo das mensagens antigas via Groq e persiste em conversation.metadata.
+// Assim o contexto da IA fica curto (ultimas 8 + resumo) mesmo em conversas
+// gigantes. Fire-and-forget: nao bloqueia a resposta ao cliente.
+async function maybeUpdateConversationSummary({ conversation, apiKey, usersId }) {
+  try {
+    if (!conversation?.id || !apiKey) return;
+    const total = await CrmConversationMessage.count({
+      where: { conversationId: conversation.id },
+    });
+    if (total < 20) return;
+
+    const meta = conversation.metadata || {};
+    const lastCount = Number(meta.aiSummaryMessageCount || 0);
+    // So regenera quando passar 10 novas mensagens desde o ultimo resumo
+    if (lastCount > 0 && total - lastCount < 10) return;
+
+    // Pega as mensagens MAIS ANTIGAS (exceto as 8 ultimas que ja viram no
+    // contexto direto). Limita a 60 pra nao estourar.
+    const skipRecent = 8;
+    const olderMessages = await CrmConversationMessage.findAll({
+      where: { conversationId: conversation.id },
+      order: [["createdAt", "ASC"]],
+      limit: Math.min(total - skipRecent, 60),
+      attributes: ["direction", "body", "createdAt"],
+    });
+
+    if (olderMessages.length < 5) return;
+
+    const transcript = olderMessages
+      .map((m) => {
+        const who = m.direction === "outbound" ? "ATENDENTE" : "CLIENTE";
+        return `${who}: ${String(m.body || "").slice(0, 300)}`;
+      })
+      .join("\n");
+
+    const summaryPrompt = [
+      {
+        role: "system",
+        content:
+          "Voce e um resumidor de conversas de atendimento. Resuma a conversa abaixo em ate 6 bullets curtos, em portugues, focando em: nome do cliente, nome(s) do(s) pet(s), preferencias mencionadas (horario, servico, dia da semana), restricoes ou alergias do pet, agendamentos passados citados, e qualquer combinado pendente. SEJA OBJETIVO. Sem floreios.",
+      },
+      {
+        role: "user",
+        content: `Conversa (do mais antigo pro mais recente):\n${transcript.slice(0, 6000)}`,
+      },
+    ];
+
+    const result = await groqChat({
+      apiKey,
+      messages: summaryPrompt,
+      temperature: 0.2,
+      maxTokens: 400,
+    });
+    const summary = String(result?.content || "").trim();
+    if (!summary) return;
+
+    const newMeta = {
+      ...meta,
+      aiSummary: summary,
+      aiSummaryAt: new Date().toISOString(),
+      aiSummaryMessageCount: total,
+    };
+    await CrmConversation.update(
+      { metadata: newMeta },
+      { where: { id: conversation.id, usersId } },
+    );
+  } catch (err) {
+    console.warn("[CrmAutoReply] Falha ao gerar resumo de conversa:", err?.message);
+  }
+}
+
 async function generateGroqReply({
   apiKey,
   settings,
@@ -680,6 +773,8 @@ async function generateGroqReply({
   pet,
   pets,
   upcomingAppointments = [],
+  customerNotes = [],
+  conversationSummary = null,
   conversation,
   body,
 }) {
@@ -692,6 +787,8 @@ async function generateGroqReply({
     pet,
     pets,
     upcomingAppointments,
+    customerNotes,
+    conversationSummary,
   });
   const history = await buildHistoryMessages(conversation?.id, 8);
   const lastUserMessage = history[history.length - 1];
@@ -1152,10 +1249,48 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
     return { replied: false, reason: check.reason };
   }
 
-  // Se a conversa ja foi escalada (aiPaused), nao responde mais nessa conversa
-  // ate o atendente humano "retomar" via UI.
+  // Se a conversa ja foi escalada (aiPaused), normalmente nao responde mais
+  // nessa conversa ate o atendente humano "retomar" via UI.
+  // EXCECAO: auto-despausa por inatividade — se passou X horas desde aiPausedAt,
+  // a IA volta a responder. Default 6h, configuravel em aiControl.autoResumeAfterHours.
+  // Defina como 0 (ou false) para desativar a auto-despausa.
   if (conversation?.metadata?.aiPaused) {
-    return { replied: false, reason: "ai_paused_in_conversation" };
+    const autoResumeHoursRaw = check.aiControl?.autoResumeAfterHours;
+    const autoResumeHours =
+      autoResumeHoursRaw === undefined || autoResumeHoursRaw === null
+        ? 6
+        : Number(autoResumeHoursRaw);
+    const pausedAtIso = conversation.metadata?.aiPausedAt;
+    const pausedAt = pausedAtIso ? new Date(pausedAtIso) : null;
+    const elapsedMs = pausedAt && !Number.isNaN(pausedAt.getTime())
+      ? Date.now() - pausedAt.getTime()
+      : null;
+    const shouldAutoResume =
+      autoResumeHours > 0 &&
+      elapsedMs !== null &&
+      elapsedMs >= autoResumeHours * 60 * 60 * 1000;
+
+    if (!shouldAutoResume) {
+      return { replied: false, reason: "ai_paused_in_conversation" };
+    }
+
+    // Despausa e segue. Persiste no banco para o painel refletir.
+    const nextMeta = { ...(conversation.metadata || {}) };
+    nextMeta.aiPaused = false;
+    delete nextMeta.aiPausedAt;
+    delete nextMeta.escalationReason;
+    delete nextMeta.escalationMessage;
+    nextMeta.aiAutoResumedAt = new Date().toISOString();
+    try {
+      await CrmConversation.update(
+        { metadata: nextMeta },
+        { where: { id: conversation.id } },
+      );
+      conversation.metadata = nextMeta;
+      console.log(`[CrmAutoReply] Auto-despausa: conversa ${String(conversation.id).slice(0, 8)} ociosa ha ${Math.round(elapsedMs / 3600000)}h`);
+    } catch (err) {
+      console.warn("[CrmAutoReply] Falha ao auto-despausar conversa:", err.message);
+    }
   }
 
   // ESCALACAO: detecta palavras-chave do CONTROLE + defaults
@@ -1180,9 +1315,10 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
   // 1) Pega TODOS os servicos e produtos (limite alto)
   // 2) Filtra por relevancia conforme a mensagem do cliente
   // 3) Sempre inclui os mais comuns (banho/tosa/hidratacao) como base
-  // 4) Tambem carrega agendamentos futuros do cliente (para remarcar/cancelar)
+  // 4) Tambem carrega: agendamentos futuros, anotacoes do cliente (memoria
+  // da IA) e o resumo persistido da conversa (se existir).
   const todayStartIso = new Date().toISOString().slice(0, 10);
-  const [allServices, allProducts, upcomingAppointments] = await Promise.all([
+  const [allServices, allProducts, upcomingAppointments, customerNotes] = await Promise.all([
     Services.findAll({ where: { establishment: usersId }, order: [["name", "ASC"]], limit: 200 }).catch(() => []),
     Products.findAll({ where: { usersId }, order: [["name", "ASC"]], limit: 200 }).catch(() => []),
     customer?.id
@@ -1199,7 +1335,18 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
           }).catch(() => []),
         ).catch(() => [])
       : Promise.resolve([]),
+    customer?.id
+      ? CustomerAiNote.findAll({
+          where: { usersId, customerId: customer.id },
+          order: [["pinned", "DESC"], ["createdAt", "DESC"]],
+          limit: 10,
+        }).catch(() => [])
+      : Promise.resolve([]),
   ]);
+
+  // Resumo da conversa: persistido em conversation.metadata.aiSummary quando o
+  // historico passa de 20 mensagens. Veja maybeUpdateConversationSummary().
+  const conversationSummary = conversation?.metadata?.aiSummary || null;
 
   const PRIORITY_KEYWORDS = ["banho", "tosa", "hidrat", "pacotinho"];
   const messageLower = normalizeSearchable(body);
@@ -1276,6 +1423,8 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
         pet,
         pets,
         upcomingAppointments,
+        customerNotes,
+        conversationSummary,
         conversation,
         body,
       });
@@ -1308,7 +1457,29 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
         }
       }
     } catch (groqErr) {
-      console.warn(`[CrmAutoReply] Groq falhou (${groqErr.message}), usando fallback keywords`);
+      // Falha aqui = IA "burra" pra usuario final (cai em keywords pobre).
+      // Sobe pra error pra ficar visivel em monitoramento e logs em arquivo.
+      const status = groqErr?.response?.status || groqErr?.status || "n/a";
+      console.error(
+        `[CrmAutoReply] Groq FALHOU (status=${status}, msg="${groqErr?.message || groqErr}") — caindo em fallback de keywords. Verifique GROQ_API_KEY, rate limit ou timeout.`,
+      );
+      try {
+        await CrmAiActionLog.create({
+          usersId,
+          conversationId: conversation?.id || null,
+          customerId: customer?.id || null,
+          petId: pet?.id || null,
+          authorUserId: null,
+          actionType: "groq_failure",
+          status: "failed",
+          summary: `Groq falhou (status=${status}): ${String(groqErr?.message || groqErr).slice(0, 200)}`,
+          assistantReply: "",
+          approvalRequired: false,
+          approvedByHuman: false,
+          executed: false,
+          payload: { status, message: String(groqErr?.message || groqErr).slice(0, 500) },
+        });
+      } catch (_) {}
     }
   }
 
@@ -1353,6 +1524,12 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
     });
   } catch (err) {
     console.warn("[CrmAutoReply] Falha ao logar acao:", err.message);
+  }
+
+  // Fire-and-forget: atualiza resumo da conversa se ja passou de 20 mensagens.
+  // Nao bloqueia o retorno ao cliente.
+  if (groqApiKey && conversation?.id) {
+    maybeUpdateConversationSummary({ conversation, apiKey: groqApiKey, usersId }).catch(() => {});
   }
 
   return { replied: true, reply: finalReply };

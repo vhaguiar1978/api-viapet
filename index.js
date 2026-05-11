@@ -693,6 +693,46 @@ async function ensureCrmConversationsSchema() {
   }
 }
 
+async function ensureCrmAiLearningSchema() {
+  // Camada 2 de aprendizado: adiciona colunas de feedback em crm_ai_action_logs
+  // (para 👍/👎 + correção humana virar exemplo de playbook) e cria a tabela
+  // customer_ai_notes (anotações por cliente que viram contexto da IA).
+  const queryInterface = sequelize.getQueryInterface();
+
+  async function ensureColumn(tableName, tableSchema, columnName, definition) {
+    if (tableSchema[columnName]) return;
+    await queryInterface.addColumn(tableName, columnName, definition);
+    console.log(`Coluna ${columnName} adicionada em ${tableName}`);
+  }
+
+  try {
+    const actionLogsTable = await queryInterface.describeTable("crm_ai_action_logs");
+    await ensureColumn("crm_ai_action_logs", actionLogsTable, "feedback", {
+      type: DataTypes.STRING,
+      allowNull: true,
+    });
+    await ensureColumn("crm_ai_action_logs", actionLogsTable, "correctedReply", {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    });
+    await ensureColumn("crm_ai_action_logs", actionLogsTable, "feedbackBy", {
+      type: DataTypes.UUID,
+      allowNull: true,
+    });
+    await ensureColumn("crm_ai_action_logs", actionLogsTable, "feedbackAt", {
+      type: DataTypes.DATE,
+      allowNull: true,
+    });
+    await ensureColumn("crm_ai_action_logs", actionLogsTable, "appliedToPlaybook", {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
+    });
+  } catch (error) {
+    console.error("Nao foi possivel validar o schema de crm_ai_action_logs:", error?.message);
+  }
+}
+
 async function reinitBaileysSessions() {
   // Apos restart, reabre as conexoes Baileys de quem ja tinha sessao salva.
   // Sem isso, os usuarios continuam recebendo "connected" no DB mas o socket
@@ -733,6 +773,7 @@ sequelize
     await ensureAddonsSchema();
     await ensureAdminAuditSchema();
     await ensureAlertsSchema();
+    await ensureCrmAiLearningSchema();
     console.log("Conectado ao banco de dados");
     // Reabre sessoes Baileys em background (nao bloqueia startup)
     reinitBaileysSessions();
