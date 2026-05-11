@@ -7,6 +7,7 @@ import CrmAiActionLog from "../models/CrmAiActionLog.js";
 import CrmConversationMessage from "../models/CrmConversationMessage.js";
 import CrmConversation from "../models/CrmConversation.js";
 import CustomerAiNote from "../models/CustomerAiNote.js";
+import KnowledgeBaseEntry from "../models/KnowledgeBaseEntry.js";
 import { groqChat } from "./groqClient.js";
 
 function normalizeSearchable(value) {
@@ -339,7 +340,7 @@ SAUDAÇÃO INICIAL (cliente abriu conversa sem contexto):
 
 Sua missão: fazer o cliente se sentir bem atendido, entendido e seguro.`;
 
-function buildSystemPrompt({ settings, aiControl, services, products = [], customer, pet, pets = [], upcomingAppointments = [], customerNotes = [], conversationSummary = null }) {
+function buildSystemPrompt({ settings, aiControl, services, products = [], customer, pet, pets = [], upcomingAppointments = [], customerNotes = [], conversationSummary = null, knowledgeBase = [] }) {
   const storeName = settings?.storeName || "o pet shop";
   // PRIORIDADE: o que tem no painel da IA (scheduling) sobrepoe os horarios
   // gerais da loja (settings). Antes a IA quotava o da loja, ignorando o painel.
@@ -562,6 +563,10 @@ ${servicesList || "- (lista vazia)"}
 
 ${nonSpecialtyList ? `SERVICOS QUE A LOJA TEM MAS VOCE NAO AGENDA (encaminha pra atendente humano):\n${nonSpecialtyList}\n` : ""}
 ${productsList ? `PRODUTOS NA LOJA:\n${productsList}\n` : ""}
+${(Array.isArray(knowledgeBase) && knowledgeBase.length > 0) ? `
+📚 BASE DE CONHECIMENTO DA LOJA (manual oficial do dono — use como VERDADE ABSOLUTA. Cite esses dados quando o cliente perguntar):
+${knowledgeBase.slice(0, 20).map((k, i) => `[${i + 1}] ${String(k.title || "").slice(0, 80)}: ${String(k.content || "").slice(0, 400)}`).join("\n")}
+` : ""}
 
 CONTEXTO DO CLIENTE ATUAL:
 - ${customerInfo}
@@ -775,6 +780,7 @@ async function generateGroqReply({
   upcomingAppointments = [],
   customerNotes = [],
   conversationSummary = null,
+  knowledgeBase = [],
   conversation,
   body,
 }) {
@@ -789,6 +795,7 @@ async function generateGroqReply({
     upcomingAppointments,
     customerNotes,
     conversationSummary,
+    knowledgeBase,
   });
   const history = await buildHistoryMessages(conversation?.id, 8);
   const lastUserMessage = history[history.length - 1];
@@ -1318,7 +1325,7 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
   // 4) Tambem carrega: agendamentos futuros, anotacoes do cliente (memoria
   // da IA) e o resumo persistido da conversa (se existir).
   const todayStartIso = new Date().toISOString().slice(0, 10);
-  const [allServices, allProducts, upcomingAppointments, customerNotes] = await Promise.all([
+  const [allServices, allProducts, upcomingAppointments, customerNotes, knowledgeBase] = await Promise.all([
     Services.findAll({ where: { establishment: usersId }, order: [["name", "ASC"]], limit: 200 }).catch(() => []),
     Products.findAll({ where: { usersId }, order: [["name", "ASC"]], limit: 200 }).catch(() => []),
     customer?.id
@@ -1342,6 +1349,11 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
           limit: 10,
         }).catch(() => [])
       : Promise.resolve([]),
+    KnowledgeBaseEntry.findAll({
+      where: { usersId },
+      order: [["pinned", "DESC"], ["order", "ASC"], ["createdAt", "DESC"]],
+      limit: 20,
+    }).catch(() => []),
   ]);
 
   // Resumo da conversa: persistido em conversation.metadata.aiSummary quando o
@@ -1425,6 +1437,7 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
         upcomingAppointments,
         customerNotes,
         conversationSummary,
+        knowledgeBase,
         conversation,
         body,
       });

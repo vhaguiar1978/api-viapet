@@ -14,6 +14,7 @@ import CrmConversationMessage from "../models/CrmConversationMessage.js";
 import CrmAiActionLog from "../models/CrmAiActionLog.js";
 import CrmAiSubscription from "../models/CrmAiSubscription.js";
 import CustomerAiNote from "../models/CustomerAiNote.js";
+import KnowledgeBaseEntry from "../models/KnowledgeBaseEntry.js";
 import sequelize from "../database/config.js";
 import { createSubscriptionPreference, processWebhookEvent, validateWebhookSignature } from "../service/mercadopago.js";
 import { checkLimit } from "../service/planLimits.js";
@@ -3026,6 +3027,88 @@ router.delete("/notes/:noteId", auth, async (req, res) => {
   } catch (error) {
     console.error("Erro ao deletar nota:", error);
     return res.status(500).json({ success: false, error: "Erro ao deletar nota", details: error.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CAMADA 3.1 — Base de conhecimento da loja
+// O dono cadastra entradas de texto (manual da loja, regras de pacote, etc).
+// Cada entrada e injetada no system prompt da IA — vira "verdade absoluta"
+// pra IA usar nas respostas. Max 30 entries por loja (controlado no painel).
+// ═══════════════════════════════════════════════════════════════════════════
+
+router.get("/knowledge-base", auth, async (req, res) => {
+  try {
+    const usersId = getEstablishmentId(req);
+    const rows = await KnowledgeBaseEntry.findAll({
+      where: { usersId },
+      order: [["pinned", "DESC"], ["order", "ASC"], ["createdAt", "DESC"]],
+      limit: 100,
+    });
+    return res.json({ success: true, data: rows });
+  } catch (error) {
+    console.error("Erro ao listar base de conhecimento:", error);
+    return res.status(500).json({ success: false, error: "Erro ao listar base de conhecimento", details: error.message });
+  }
+});
+
+router.post("/knowledge-base", auth, async (req, res) => {
+  try {
+    const usersId = getEstablishmentId(req);
+    const { title, content, pinned } = req.body || {};
+    if (!title || String(title).trim().length < 2) {
+      return res.status(400).json({ success: false, error: "Titulo muito curto" });
+    }
+    if (!content || String(content).trim().length < 2) {
+      return res.status(400).json({ success: false, error: "Conteudo muito curto" });
+    }
+    const count = await KnowledgeBaseEntry.count({ where: { usersId } });
+    if (count >= 30) {
+      return res.status(400).json({ success: false, error: "Limite de 30 entradas na base de conhecimento atingido" });
+    }
+    const row = await KnowledgeBaseEntry.create({
+      usersId,
+      title: String(title).slice(0, 120),
+      content: String(content).slice(0, 2000),
+      pinned: Boolean(pinned),
+      createdBy: req.user?.id || null,
+    });
+    return res.json({ success: true, data: row });
+  } catch (error) {
+    console.error("Erro ao criar entrada da base de conhecimento:", error);
+    return res.status(500).json({ success: false, error: "Erro ao criar entrada", details: error.message });
+  }
+});
+
+router.put("/knowledge-base/:entryId", auth, async (req, res) => {
+  try {
+    const usersId = getEstablishmentId(req);
+    const { entryId } = req.params;
+    const row = await KnowledgeBaseEntry.findOne({ where: { id: entryId, usersId } });
+    if (!row) return res.status(404).json({ success: false, error: "Entrada nao encontrada" });
+    if (typeof req.body?.title === "string") row.title = String(req.body.title).slice(0, 120);
+    if (typeof req.body?.content === "string") row.content = String(req.body.content).slice(0, 2000);
+    if (typeof req.body?.pinned === "boolean") row.pinned = req.body.pinned;
+    if (typeof req.body?.order === "number") row.order = req.body.order;
+    await row.save();
+    return res.json({ success: true, data: row });
+  } catch (error) {
+    console.error("Erro ao atualizar entrada da base de conhecimento:", error);
+    return res.status(500).json({ success: false, error: "Erro ao atualizar entrada", details: error.message });
+  }
+});
+
+router.delete("/knowledge-base/:entryId", auth, async (req, res) => {
+  try {
+    const usersId = getEstablishmentId(req);
+    const { entryId } = req.params;
+    const row = await KnowledgeBaseEntry.findOne({ where: { id: entryId, usersId } });
+    if (!row) return res.status(404).json({ success: false, error: "Entrada nao encontrada" });
+    await row.destroy();
+    return res.json({ success: true });
+  } catch (error) {
+    console.error("Erro ao deletar entrada da base de conhecimento:", error);
+    return res.status(500).json({ success: false, error: "Erro ao deletar entrada", details: error.message });
   }
 });
 
