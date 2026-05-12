@@ -173,6 +173,87 @@ router.get("/admin/user-activity/dashboard", authenticate, activityAccess, async
       limit: 20,
     });
 
+    // =============================================================
+    // NOVAS AGREGAÇÕES — "Resumo do período"
+    // (eventsTotal, eventsByDay, eventsByModule, tenantsActive)
+    // =============================================================
+
+    // Total de eventos no período (mesmos filtros do baseWhere)
+    const eventsTotal = await ActivityLog.count({ where: baseWhere });
+
+    // Eventos por dia — em fuso BR pra alinhar com o resto do app
+    const eventsByDayRaw = await ActivityLog.findAll({
+      attributes: [
+        [
+          literal(`DATE(created_at AT TIME ZONE 'America/Sao_Paulo')`),
+          "dia",
+        ],
+        [fn("COUNT", col("id")), "total"],
+      ],
+      where: baseWhere,
+      group: [literal(`DATE(created_at AT TIME ZONE 'America/Sao_Paulo')`)],
+      order: [[literal("dia"), "ASC"]],
+      raw: true,
+    });
+    const eventsByDay = eventsByDayRaw.map((r) => ({
+      dia: r.dia,
+      total: Number(r.total),
+    }));
+
+    // Eventos por módulo
+    const eventsByModuleRaw = await ActivityLog.findAll({
+      attributes: ["modulo", [fn("COUNT", col("id")), "total"]],
+      where: baseWhere,
+      group: ["modulo"],
+      order: [[literal("total"), "DESC"]],
+      raw: true,
+    });
+    const eventsByModule = eventsByModuleRaw.map((r) => ({
+      modulo: r.modulo,
+      total: Number(r.total),
+    }));
+
+    // Empresas (tenants) mais ativas — só faz sentido para admin global
+    // (proprietario já está filtrado num único tenant, fica vazio).
+    let tenantsActive = [];
+    if (req.user?.role === "admin" && !tenant_id) {
+      const tenantsRaw = await ActivityLog.findAll({
+        attributes: [
+          "tenant_id",
+          [fn("COUNT", col("id")), "total"],
+          [fn("COUNT", fn("DISTINCT", col("user_id"))), "usersDistinct"],
+          [fn("MAX", col("created_at")), "lastEvent"],
+        ],
+        where: {
+          ...baseWhere,
+          tenant_id: { [Op.not]: null },
+        },
+        group: ["tenant_id"],
+        order: [[literal("total"), "DESC"]],
+        limit: 20,
+        raw: true,
+      });
+      // Resolve nome da empresa via Users (id == tenant_id do dono)
+      const tenantIds = tenantsRaw.map((r) => r.tenant_id);
+      const tenantOwners = tenantIds.length
+        ? await Users.findAll({
+            where: { id: { [Op.in]: tenantIds } },
+            attributes: ["id", "name", "email"],
+          })
+        : [];
+      const ownerMap = new Map(
+        tenantOwners.map((u) => [u.id, { name: u.name, email: u.email }]),
+      );
+      tenantsActive = tenantsRaw.map((r) => ({
+        tenantId: r.tenant_id,
+        name: ownerMap.get(r.tenant_id)?.name || r.tenant_id,
+        email: ownerMap.get(r.tenant_id)?.email || null,
+        total: Number(r.total),
+        usersDistinct: Number(r.usersDistinct),
+        lastEvent: r.lastEvent,
+      }));
+    }
+
     return res.json({
       ok: true,
       data: {
@@ -182,6 +263,10 @@ router.get("/admin/user-activity/dashboard", authenticate, activityAccess, async
         topPages,
         topActions,
         recentErrors,
+        eventsTotal,
+        eventsByDay,
+        eventsByModule,
+        tenantsActive,
       },
     });
   } catch (error) {
