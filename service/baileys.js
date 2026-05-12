@@ -609,8 +609,23 @@ class BaileysService {
 
       if (result.replied && result.reply) {
         console.log(`[Baileys IA] Respondendo (debounced): ${result.reply.substring(0, 60)}`);
-        // Espera 1.5-3s antes de enviar (mais natural)
-        await new Promise((r) => setTimeout(r, 1500 + Math.floor(Math.random() * 1500)));
+        // Humanizacao: simula tempo de digitacao real + mostra "digitando..."
+        // pro cliente. Sem isso a resposta chega instantanea e entrega que e bot.
+        // Calculo: ~55ms por char (~218 chars/min, equivalente a digitador medio)
+        // + base aleatoria 1.2-2.5s (tempo de "ler e pensar"). Cap 12s no maximo
+        // pra nao deixar o cliente esperando demais em respostas longas.
+        const replyLen = String(result.reply || "").length;
+        const readPause = 1200 + Math.floor(Math.random() * 1300);
+        const typingTime = Math.min(replyLen * 55, 9000);
+        const totalDelay = readPause + typingTime;
+        try {
+          // Mostra "digitando..." no WhatsApp do cliente durante o delay
+          await this.sock?.sendPresenceUpdate?.("composing", fromJid);
+        } catch (_) {}
+        await new Promise((r) => setTimeout(r, totalDelay));
+        try {
+          await this.sock?.sendPresenceUpdate?.("paused", fromJid);
+        } catch (_) {}
         const sendResult = await this.sendMessage(fromJid, result.reply);
         await CrmConversationMessage.create({
           id: uuidv4(),

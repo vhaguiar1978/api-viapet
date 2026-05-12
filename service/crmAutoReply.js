@@ -9,6 +9,7 @@ import CrmConversation from "../models/CrmConversation.js";
 import CustomerAiNote from "../models/CustomerAiNote.js";
 import KnowledgeBaseEntry from "../models/KnowledgeBaseEntry.js";
 import { groqChat } from "./groqClient.js";
+import { getAvailableSlots, detectScheduleQuery } from "./agendaAvailability.js";
 
 function normalizeSearchable(value) {
   return String(value || "")
@@ -340,7 +341,7 @@ SAUDAÇÃO INICIAL (cliente abriu conversa sem contexto):
 
 Sua missão: fazer o cliente se sentir bem atendido, entendido e seguro.`;
 
-function buildSystemPrompt({ settings, aiControl, services, products = [], customer, pet, pets = [], upcomingAppointments = [], customerNotes = [], conversationSummary = null, knowledgeBase = [] }) {
+function buildSystemPrompt({ settings, aiControl, services, products = [], customer, pet, pets = [], upcomingAppointments = [], customerNotes = [], conversationSummary = null, knowledgeBase = [], lastVisit = null, availableSlots = null }) {
   const storeName = settings?.storeName || "o pet shop";
   // PRIORIDADE: o que tem no painel da IA (scheduling) sobrepoe os horarios
   // gerais da loja (settings). Antes a IA quotava o da loja, ignorando o painel.
@@ -399,6 +400,82 @@ function buildSystemPrompt({ settings, aiControl, services, products = [], custo
   const today = new Date().toLocaleDateString("pt-BR");
   const todayIso = new Date().toISOString().slice(0, 10);
   const tomorrowIso = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+
+  // Saudação por período do dia (humanização: humano não diz "Oi!" às 7h
+  // nem às 22h — diz "Bom dia" / "Boa noite"). Usa hora de São Paulo via
+  // toLocaleString pra não pegar UTC do servidor.
+  const nowSp = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
+  const hourSp = nowSp.getHours();
+  let timeGreeting;
+  let timePeriod;
+  if (hourSp >= 5 && hourSp < 12) {
+    timeGreeting = "Bom dia";
+    timePeriod = "manhã";
+  } else if (hourSp >= 12 && hourSp < 18) {
+    timeGreeting = "Boa tarde";
+    timePeriod = "tarde";
+  } else {
+    timeGreeting = "Boa noite";
+    timePeriod = "noite";
+  }
+
+  // Recorrência: se o cliente teve um agendamento concluído nos últimos 30 dias,
+  // a IA deve tratá-lo como cliente fiel — saudação calorosa com nome ("Oi Lorrayne!
+  // Tudo bem? Saudades 😊"). Acima de 60 dias, frase tipo "Quanto tempo!". Sem
+  // visitas concluídas = cliente novo (tratamento padrão).
+  let recurrenceTag = null;
+  if (lastVisit && lastVisit.date) {
+    const lastDate = new Date(`${lastVisit.date}T00:00:00`);
+    if (!Number.isNaN(lastDate.getTime())) {
+      const daysSince = Math.floor((Date.now() - lastDate.getTime()) / 86400000);
+      const firstName = String(customer?.name || "").trim().split(/\s+/)[0] || "";
+      if (daysSince <= 30) {
+        recurrenceTag = `recente:${daysSince}d:${firstName}`;
+      } else if (daysSince <= 90) {
+        recurrenceTag = `medio:${daysSince}d:${firstName}`;
+      } else {
+        recurrenceTag = `antigo:${daysSince}d:${firstName}`;
+      }
+    }
+  }
+
+  // Bloco de horários livres REAIS da agenda — só é populado quando o backend
+  // detectou que o cliente perguntou por disponibilidade (palavras tipo
+  // "horário", "vaga", "manhã", "amanhã"). A IA deve usar EXATAMENTE esses
+  // horários, nunca inventar.
+  let availabilitySection = "";
+  if (availableSlots && Array.isArray(availableSlots.slots)) {
+    const periodLabel = availableSlots.queryPeriod
+      ? ` (${availableSlots.queryPeriod === "manha" ? "manhã" : availableSlots.queryPeriod})`
+      : "";
+    const dateLabel = availableSlots.queryDate === todayIso
+      ? "HOJE"
+      : availableSlots.queryDate === tomorrowIso
+        ? "AMANHÃ"
+        : `${availableSlots.dayLabel || ""} ${availableSlots.queryDate}`.trim();
+
+    if (availableSlots.slots.length > 0) {
+      availabilitySection = `
+🕐 HORÁRIOS LIVRES NA AGENDA — ${dateLabel}${periodLabel}:
+${availableSlots.slots.map((t) => `• ${t}`).join("\n")}
+
+⚠️ INSTRUÇÕES OBRIGATÓRIAS QUANTO A ESSES HORÁRIOS:
+1. Use APENAS horários DA LISTA ACIMA. NUNCA invente outros.
+2. Se a lista tem 1 horário só → ofereça ele direto ("Pra ${dateLabel.toLowerCase()}${periodLabel} eu tenho só ${availableSlots.slots[0]} disponível, fica bom pra você?").
+3. Se tem 2-6 → liste de forma natural ("Pra ${dateLabel.toLowerCase()}${periodLabel} eu tenho ${availableSlots.slots.slice(0, -1).join(", ")} e ${availableSlots.slots.slice(-1)[0]}. Qual fica melhor?").
+4. NUNCA mostre uma lista numerada formal — escreva de forma natural como atendente humana faria.
+5. Depois do cliente escolher, SEMPRE confirme TUDO: "Confere: Pet [nome] / Serviço [X] / ${dateLabel} às [HORA]. Posso confirmar?".
+6. SÓ depois da confirmação você usa a action create_appointment.`;
+    } else {
+      const reasonHint =
+        availableSlots.reason === "day_not_allowed" ? "esse dia a loja não atende"
+        : availableSlots.reason === "daily_limit_reached" ? "a agenda já encheu"
+        : "não tem horário livre";
+      availabilitySection = `
+🕐 AGENDA CHEIA — ${dateLabel}${periodLabel}: ${reasonHint}.
+Reposta sugerida: "Poxa, pra ${dateLabel.toLowerCase()}${periodLabel} ${reasonHint} 😔 Quer que eu veja outro dia ou outro período pra você?"`;
+    }
+  }
 
   // Playbook: pares de Q/A que o dono salvou no painel pra ensinar a IA
   // como responder em situacoes especificas. Vira "few-shot" no prompt.
@@ -550,7 +627,30 @@ PERSONA E TOM:
 - Calorosa, simpatica, profissional. Tom informal brasileiro.
 - Frases curtas e diretas (1 a 3). Sem encher o cliente de blablabla.
 - Emojis com moderacao 🐾 😊 ❤️
-- Hoje e ${today} (${todayIso}). Fuso horario: America/Sao_Paulo (Brasil). Use isso para resolver "hoje", "amanha", "sabado", etc.
+- Hoje e ${today} (${todayIso}). Agora sao ${String(hourSp).padStart(2, "0")}h em São Paulo — periodo da ${timePeriod}.
+
+⏰ SAUDAÇÃO POR HORÁRIO (use quando for a 1ª resposta da conversa ou após muito tempo):
+- Manhã (5h-12h): "${timeGreeting}!" / "Oi, ${timeGreeting.toLowerCase()}!"
+- Tarde (12h-18h): "${timeGreeting}!" / "Oi, ${timeGreeting.toLowerCase()}!"
+- Noite (18h-5h): "${timeGreeting}!" / "Oi, ${timeGreeting.toLowerCase()}!"
+- AGORA é "${timeGreeting}" — NUNCA diga "Bom dia" à tarde nem "Boa tarde" de manhã. Erro clássico de bot, atendente humana NUNCA faz isso.
+
+🎭 VARIAÇÃO HUMANA (nunca repita a mesma palavra de afirmação 2 vezes seguidas):
+- Pra confirmar: "Show!", "Perfeito!", "Fechou!", "Beleza!", "Tranquilo!", "Ótimo!", "Combinado!", "Que bom!", "Maravilha!"
+- Pra entender: "Aham", "Entendi", "Saquei", "Sim sim", "Pode deixar", "Imagina"
+- Pra encerrar: "Te espero!", "Até lá!", "Qualquer coisa me chama 😊", "Tô por aqui!", "Beijo no pet por mim 🐾"
+- Sortear naturalmente. Cliente que recebe sempre "Show!" percebe que é bot.
+
+💗 EMPATIA OBRIGATÓRIA — REGRA #1 DA HUMANIZAÇÃO:
+Antes de qualquer resposta OPERACIONAL, RECONHEÇA a emoção do cliente quando houver:
+- Cliente preocupado ("meu pet tá meio quieto", "tô preocupada"): "Ai, entendo essa preocupação 😔" ANTES de qualquer coisa.
+- Cliente animado/feliz ("acabei de adotar!", "primeiro banho dele!"): "Que coisa boa! 🥰" / "Aaai que delícia! Parabéns!"
+- Cliente com pressa ("tô correndo", "rapidinho"): seja ainda mais objetiva, sem perder o tom — "Show, vou ser rápida! 😊"
+- Cliente frustrado ("já tentei várias vezes", "ninguém me responde"): "Nossa, desculpa por isso 🙏 Vou te ajudar agora."
+- Cliente mandou foto/vídeo do pet: SEMPRE reagir antes — "Aaai que fofura! 🥰" / "Que gracinha esse focinho!"
+- Cliente falou do pet com carinho: comente do pet pelo nome ("o Thor ❤️", "a Luna").
+
+❌ NUNCA seja só funcional. Atendente humana SEMPRE acolhe antes de resolver. Bot vai direto ao operacional, humana lê o sentimento primeiro.
 
 ⛔ NUNCA MOSTRE IDs PARA O CLIENTE (UUIDs sao SO INTERNOS).
 
@@ -577,6 +677,16 @@ ${conversationSummary ? `\n📝 RESUMO DA CONVERSA ATE AGORA (mensagens antigas 
 
 ${pets && pets.length > 1 ? `🐾 Este cliente tem ${pets.length} pets. ANTES de agendar/remarcar, identifique qual pet pelo NOME (pergunte se nao for claro).` : ""}
 ${pets && pets.length === 1 ? `Cliente tem 1 pet (${pets[0].name}). Pode usar direto, sem perguntar qual.` : ""}
+${recurrenceTag && recurrenceTag.startsWith("recente:") ? `
+💚 CLIENTE FIEL — última visita há ${recurrenceTag.split(":")[1]} (dentro dos últimos 30 dias).
+ABRA a conversa com tom caloroso de quem já conhece: "${timeGreeting}${recurrenceTag.split(":")[2] ? `, ${recurrenceTag.split(":")[2]}` : ""}! Tudo bem? 😊" / "Oi${recurrenceTag.split(":")[2] ? `, ${recurrenceTag.split(":")[2]}` : ""}! Que bom te ver de novo 🐾". Trate como amigo, não como cliente novo.` : ""}
+${recurrenceTag && recurrenceTag.startsWith("medio:") ? `
+💛 CLIENTE QUE VOLTOU — última visita há ${recurrenceTag.split(":")[1]} (1-3 meses atrás).
+Saudação tipo: "${timeGreeting}${recurrenceTag.split(":")[2] ? `, ${recurrenceTag.split(":")[2]}` : ""}! Que bom te ver por aqui de novo 😊". Demonstre que lembra dele.` : ""}
+${recurrenceTag && recurrenceTag.startsWith("antigo:") ? `
+🧡 CLIENTE SUMIDO — última visita há ${recurrenceTag.split(":")[1]} (mais de 3 meses).
+Saudação tipo: "${timeGreeting}${recurrenceTag.split(":")[2] ? `, ${recurrenceTag.split(":")[2]}` : ""}! Quanto tempo 🤩 Como está o pet?". Acolha o retorno sem cobrar a ausência.` : ""}
+${availabilitySection}
 
 ${customInstructions ? `═══════════════════════════════════════════════════════════════
 ⭐⭐⭐ REGRAS INVIOLAVEIS DO DONO DA LOJA ⭐⭐⭐
@@ -781,6 +891,8 @@ async function generateGroqReply({
   customerNotes = [],
   conversationSummary = null,
   knowledgeBase = [],
+  lastVisit = null,
+  availableSlots = null,
   conversation,
   body,
 }) {
@@ -796,6 +908,8 @@ async function generateGroqReply({
     customerNotes,
     conversationSummary,
     knowledgeBase,
+    lastVisit,
+    availableSlots,
   });
   const history = await buildHistoryMessages(conversation?.id, 8);
   const lastUserMessage = history[history.length - 1];
@@ -807,7 +921,10 @@ async function generateGroqReply({
   const result = await groqChat({
     apiKey,
     messages,
-    temperature: 0.4, // levemente mais conservadora — modelo 70B aguenta
+    // Temperature 0.7 (era 0.4) = respostas com mais variação e naturalidade.
+    // 0.4 deixava a IA previsível demais ("Show!... Posso confirmar?" em loop).
+    // 0.7 mantém coerência mas dá espontaneidade humana.
+    temperature: 0.7,
     maxTokens: 600,
     jsonMode: true, // forca resposta em JSON valido
   });
@@ -1325,7 +1442,7 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
   // 4) Tambem carrega: agendamentos futuros, anotacoes do cliente (memoria
   // da IA) e o resumo persistido da conversa (se existir).
   const todayStartIso = new Date().toISOString().slice(0, 10);
-  const [allServices, allProducts, upcomingAppointments, customerNotes, knowledgeBase] = await Promise.all([
+  const [allServices, allProducts, upcomingAppointments, customerNotes, knowledgeBase, lastVisit] = await Promise.all([
     Services.findAll({ where: { establishment: usersId }, order: [["name", "ASC"]], limit: 200 }).catch(() => []),
     Products.findAll({ where: { usersId }, order: [["name", "ASC"]], limit: 200 }).catch(() => []),
     customer?.id
@@ -1354,7 +1471,48 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
       order: [["pinned", "DESC"], ["order", "ASC"], ["createdAt", "DESC"]],
       limit: 20,
     }).catch(() => []),
+    // Última visita concluída (humanização: detecta cliente recorrente pra
+    // saudação calorosa "Oi Fulana, saudades! 😊"). Pega o agendamento
+    // concluído mais recente — se for < 30 dias, cliente é recorrente.
+    customer?.id
+      ? import("../models/Appointment.js").then(async ({ default: Appointment }) =>
+          Appointment.findOne({
+            where: {
+              usersId,
+              customerId: customer.id,
+              status: { [Op.in]: ["Concluido", "concluido", "Finalizado", "finalizado"] },
+            },
+            order: [["date", "DESC"], ["time", "DESC"]],
+            attributes: ["date", "time"],
+          }).catch(() => null),
+        ).catch(() => null)
+      : Promise.resolve(null),
   ]);
+
+  // Disponibilidade real da agenda — se o cliente perguntou "tem horário?",
+  // "amanhã de manhã?", etc., consulta os slots realmente livres e injeta no
+  // contexto da IA. Sem isso a IA inventa horários ou só pergunta "qual prefere?".
+  // Só dispara quando detectScheduleQuery encontra sinais claros (palavras de
+  // agenda OU referência de data/período).
+  let availableSlots = null;
+  try {
+    const scheduleQuery = detectScheduleQuery(body);
+    if (scheduleQuery) {
+      const slotsResult = await getAvailableSlots({
+        usersId,
+        date: scheduleQuery.date,
+        period: scheduleQuery.period,
+        type: "estetica",
+        settings: check.settings,
+        aiControl: check.aiControl,
+        maxSlots: 6,
+      });
+      availableSlots = { ...slotsResult, queryDate: scheduleQuery.date, queryPeriod: scheduleQuery.period };
+      console.log(`[CrmAutoReply] Slots livres ${scheduleQuery.date}${scheduleQuery.period ? ` (${scheduleQuery.period})` : ""}: ${slotsResult.slots.join(", ") || "nenhum"}`);
+    }
+  } catch (err) {
+    console.warn("[CrmAutoReply] Falha buscando slots:", err?.message);
+  }
 
   // Resumo da conversa: persistido em conversation.metadata.aiSummary quando o
   // historico passa de 20 mensagens. Veja maybeUpdateConversationSummary().
@@ -1438,6 +1596,8 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
         customerNotes,
         conversationSummary,
         knowledgeBase,
+        lastVisit,
+        availableSlots,
         conversation,
         body,
       });
