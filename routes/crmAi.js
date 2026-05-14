@@ -33,12 +33,12 @@ const VALID_WEEK_DAYS = [
 ];
 const VALID_AGENDA_TYPES = ["estetica", "clinica", "internacao"];
 
-// IMPORTANTE: o default eh "tudo liberado". Quando o usuario habilita a IA,
-// todas as capacidades ja vem ativas. Ele DESMARCA o que nao quer dentro do
-// painel — nao precisa habilitar uma a uma.
+// MODO REAL: defaults vêm com a IA ligada e tudo liberado. O dono pode
+// desmarcar no painel o que não quiser. Antes vinha enabled=false e exigia
+// ativação explícita — virava "modo simples / fallback de keywords" de fato.
 const DEFAULT_CONTROL = {
-  enabled: false, // continua false: o user precisa ativar a IA explicitamente
-  autoReplyEnabled: true, // ja vem ligado, espera o user marcar enabled
+  enabled: true,
+  autoReplyEnabled: true,
   autoExecuteEnabled: true,
   assistantName: "ViaPet IA",
   provider: "Groq",

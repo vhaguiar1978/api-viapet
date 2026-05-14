@@ -8,7 +8,47 @@ import CrmConversationMessage from "../models/CrmConversationMessage.js";
 import CrmConversation from "../models/CrmConversation.js";
 import CustomerAiNote from "../models/CustomerAiNote.js";
 import KnowledgeBaseEntry from "../models/KnowledgeBaseEntry.js";
-import { groqChat } from "./groqClient.js";
+import { groqChat, GROQ_DEFAULT_MODEL, GROQ_SMART_MODEL } from "./groqClient.js";
+
+// Híbrido 8B/70B: decide quando vale a pena chamar o modelo SMART (70B).
+// Critérios: mensagem ambígua/longa, palavra de escalação, conversa já grande,
+// cliente fiel sumido (caso emocional), ou pedido envolvendo dinheiro/saúde.
+function shouldUseSmartModel({ body, aiControl, history = [], customer, lastVisit }) {
+  const text = String(body || "").toLowerCase();
+  if (!text) return false;
+
+  // 1) escalação explícita configurada pelo dono
+  const escalationKw = (aiControl?.escalationKeywords || [])
+    .filter(Boolean)
+    .map((k) => String(k).toLowerCase());
+  if (escalationKw.some((k) => k && text.includes(k))) return true;
+
+  // 2) mensagens emocionais / saúde / pagamento — requer nuance
+  const sensitive = [
+    "reclamac", "reclamaç", "problema", "decepcion", "horrivel", "horrível",
+    "saude", "saúde", "doente", "vomit", "machucad", "ferida", "sangue",
+    "pagamento", "reembolso", "estorno", "cobranc", "cobranç", "valor errado",
+    "advogad", "processo", "procon",
+  ];
+  if (sensitive.some((k) => text.includes(k))) return true;
+
+  // 3) conversa longa (12+ mensagens) — provavelmente caso difícil
+  if (Array.isArray(history) && history.length >= 12) return true;
+
+  // 4) mensagem longa (>200 chars) — cliente escreveu muito, merece análise
+  if (text.length > 200) return true;
+
+  // 5) cliente sumido (>90d) voltando — momento emocional, vale o smart
+  if (lastVisit?.date) {
+    const lastDate = new Date(`${lastVisit.date}T00:00:00`);
+    if (!Number.isNaN(lastDate.getTime())) {
+      const daysSince = Math.floor((Date.now() - lastDate.getTime()) / 86400000);
+      if (daysSince > 90) return true;
+    }
+  }
+
+  return false;
+}
 import { getAvailableSlots, detectScheduleQuery } from "./agendaAvailability.js";
 
 function normalizeSearchable(value) {
@@ -918,8 +958,16 @@ async function generateGroqReply({
   }
   const messages = [{ role: "system", content: systemPrompt }, ...history];
 
+  // Híbrido: escolhe 70B em casos sensíveis, 8B no atendimento padrão.
+  const useSmart = shouldUseSmartModel({ body, aiControl, history, customer, lastVisit });
+  const chosenModel = useSmart ? GROQ_SMART_MODEL : GROQ_DEFAULT_MODEL;
+  if (useSmart) {
+    console.log(`[CrmAutoReply] Usando modelo SMART (${chosenModel}) — caso sensível detectado`);
+  }
+
   const result = await groqChat({
     apiKey,
+    model: chosenModel,
     messages,
     // Temperature 0.7 (era 0.4) = respostas com mais variação e naturalidade.
     // 0.4 deixava a IA previsível demais ("Show!... Posso confirmar?" em loop).
@@ -1768,8 +1816,20 @@ export async function testAiReply({ usersId, messages = [] }) {
 
   const groqMessages = [{ role: "system", content: systemPrompt }, ...cleanMessages];
 
+  // Híbrido também no chat de teste: detecta caso sensível e troca pro smart.
+  const lastUserBody = cleanMessages[cleanMessages.length - 1]?.content || "";
+  const useSmart = shouldUseSmartModel({
+    body: lastUserBody,
+    aiControl,
+    history: cleanMessages,
+    customer: null,
+    lastVisit: null,
+  });
+  const chosenModel = useSmart ? GROQ_SMART_MODEL : GROQ_DEFAULT_MODEL;
+
   const result = await groqChat({
     apiKey: groqApiKey,
+    model: chosenModel,
     messages: groqMessages,
     temperature: 0.4,
     maxTokens: 600,
