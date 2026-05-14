@@ -1649,11 +1649,22 @@ router.post("/appointments/package", auth, async (req, res) => {
 });
 
 //Fila de agendamento geral
+// Retorna: encaixes manuais (queue:true) + todos os agendamentos do dia
+// das agendas estetica e clinica, ordenados por horario.
 router.get("/appointments/queue/geral/true", auth, async (req, res) => {
+  const now = new Date();
+  const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+
   const appointments = await Appointment.findAll({
     where: {
-      queue: true,
       usersId: req.user.establishment,
+      [Op.or]: [
+        { queue: true },
+        {
+          date: todayStr,
+          type: { [Op.in]: ["estetica", "clinica"] },
+        },
+      ],
     },
     include: [
       {
@@ -1668,8 +1679,16 @@ router.get("/appointments/queue/geral/true", auth, async (req, res) => {
         model: Services,
         as: "Service",
       },
+      {
+        model: Users,
+        as: "responsible",
+      },
     ],
-    order: [["queueTime", "ASC"]],
+    order: [
+      ["queueTime", "ASC"],
+      ["date", "ASC"],
+      ["time", "ASC"],
+    ],
   });
   return res.status(200).json({ data: appointments });
 });
@@ -1697,6 +1716,46 @@ router.get("/appointments/queue/geral/false", auth, async (req, res) => {
     order: [["queueTime", "ASC"]],
   });
   return res.status(200).json({ data: appointments });
+});
+
+// Reordenar a fila manualmente. Recebe { orderedIds: [...] } e atribui um
+// queueTime sequencial (base = agora, incrementando segundos) para cada id,
+// marcando-os como queue:true para fixar a ordem definida pelo usuario.
+router.patch("/appointments/queue/reorder", auth, async (req, res) => {
+  const transaction = await sequelize.transaction();
+  try {
+    const orderedIds = Array.isArray(req.body?.orderedIds) ? req.body.orderedIds : [];
+    if (!orderedIds.length) {
+      await transaction.rollback();
+      return res.status(400).json({ message: "orderedIds e obrigatorio" });
+    }
+
+    const baseTime = Date.now();
+    for (let index = 0; index < orderedIds.length; index += 1) {
+      const id = orderedIds[index];
+      if (!id) continue;
+      const queueTime = new Date(baseTime + index * 1000);
+      await Appointment.update(
+        { queue: true, queueTime },
+        {
+          where: { id, usersId: req.user.establishment },
+          transaction,
+        },
+      );
+    }
+
+    await transaction.commit();
+    return res.status(200).json({ message: "Fila reordenada com sucesso" });
+  } catch (error) {
+    if (!transaction.finished) {
+      await transaction.rollback();
+    }
+    console.error("Erro ao reordenar fila:", error);
+    return res.status(500).json({
+      message: "Erro ao reordenar fila",
+      error: error.message,
+    });
+  }
 });
 
 //adicionar na fila geral
