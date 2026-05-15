@@ -78,6 +78,11 @@ const AppointmentPayment = sequelize.define(
       onUpdate: "CASCADE",
       onDelete: "SET NULL",
     },
+    bankAccountId: {
+      type: DataTypes.UUID,
+      allowNull: true,
+      comment: "Conta bancária onde o pagamento foi recebido",
+    },
     createdBy: {
       type: DataTypes.UUID,
       allowNull: false,

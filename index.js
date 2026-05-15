@@ -28,6 +28,9 @@ import appointmentRouter from "./routes/Agendamento.js";
 import adminRouter from "./routes/Admin.js";
 import whatsappRouter from "./service/whatsapp.js";
 import financeRouter from "./routes/finance.js";
+import paymentMethodFeesRouter from "./routes/paymentMethodFees.js";
+import bankAccountsRouter from "./routes/bankAccounts.js";
+import bankReconciliationRouter from "./routes/bankReconciliation.js";
 import personalFinanceRouter from "./routes/personal_finances.js";
 import driversRouter from "./routes/drivers.js";
 import bannersRouter from "./routes/banner.js";
@@ -163,6 +166,9 @@ app.use(whatsappRouter);
 app.use(whatsappOfficialRouter);
 app.use(whatsappHubRouter);
 app.use(financeRouter);
+app.use(paymentMethodFeesRouter);
+app.use(bankAccountsRouter);
+app.use(bankReconciliationRouter);
 app.use(personalFinanceRouter);
 app.use(driversRouter);
 app.use(bannersRouter);
@@ -252,6 +258,68 @@ async function ensureFinanceSchema() {
       console.log("Coluna installmentTotal adicionada em Finances");
     }
 
+    if (!financeTable.purchaseGroupId) {
+      await queryInterface.addColumn("finances", "purchaseGroupId", {
+        type: DataTypes.UUID,
+        allowNull: true,
+      });
+      console.log("Coluna purchaseGroupId adicionada em Finances");
+    }
+
+    if (!financeTable.parentFinanceId) {
+      await queryInterface.addColumn("finances", "parentFinanceId", {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+      });
+      console.log("Coluna parentFinanceId adicionada em Finances");
+    }
+
+    if (!financeTable.vendor) {
+      await queryInterface.addColumn("finances", "vendor", {
+        type: DataTypes.STRING(180),
+        allowNull: true,
+      });
+      console.log("Coluna vendor adicionada em Finances");
+    }
+
+    if (!financeTable.costCenter) {
+      await queryInterface.addColumn("finances", "costCenter", {
+        type: DataTypes.STRING(120),
+        allowNull: true,
+      });
+      console.log("Coluna costCenter adicionada em Finances");
+    }
+
+    if (!financeTable.bankAccountId) {
+      await queryInterface.addColumn("finances", "bankAccountId", {
+        type: DataTypes.UUID,
+        allowNull: true,
+      });
+      console.log("Coluna bankAccountId adicionada em Finances");
+    }
+
+    try {
+      const indexes = await queryInterface.showIndex("finances");
+      const has = (name) => indexes.some((i) => i.name === name);
+      if (!has("idx_finance_purchase_group")) {
+        await queryInterface.addIndex("finances", ["purchaseGroupId"], { name: "idx_finance_purchase_group" });
+      }
+      if (!has("idx_finance_bank_account")) {
+        await queryInterface.addIndex("finances", ["bankAccountId"], { name: "idx_finance_bank_account" });
+      }
+    } catch (idxErr) {
+      console.warn("Aviso ao criar indices novos em finances:", idxErr.message);
+    }
+
+    const appointmentPaymentsTable = await queryInterface.describeTable("appointment_payments");
+    if (!appointmentPaymentsTable.bankAccountId) {
+      await queryInterface.addColumn("appointment_payments", "bankAccountId", {
+        type: DataTypes.UUID,
+        allowNull: true,
+      });
+      console.log("Coluna bankAccountId adicionada em AppointmentPayments");
+    }
+
     if (dialect === "postgres") {
       await sequelize.query(`
         DO $$
@@ -275,6 +343,188 @@ async function ensureFinanceSchema() {
     }
   } catch (error) {
     console.error("Nao foi possivel validar o schema de Finances:", error);
+  }
+}
+
+async function ensureBankAccountsSchema() {
+  const queryInterface = sequelize.getQueryInterface();
+  try {
+    const tables = await queryInterface.showAllTables();
+    const normalized = tables.map((t) => (typeof t === "string" ? t : t.tableName));
+
+    if (!normalized.includes("bank_accounts")) {
+      await queryInterface.createTable("bank_accounts", {
+        id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true, allowNull: false },
+        usersId: { type: DataTypes.UUID, allowNull: false },
+        name: { type: DataTypes.STRING(120), allowNull: false },
+        bank: { type: DataTypes.STRING(120), allowNull: true },
+        agency: { type: DataTypes.STRING(20), allowNull: true },
+        accountNumber: { type: DataTypes.STRING(40), allowNull: true },
+        accountType: { type: DataTypes.STRING(30), allowNull: false, defaultValue: "corrente" },
+        pixKey: { type: DataTypes.STRING(180), allowNull: true },
+        initialBalance: { type: DataTypes.DECIMAL(12, 2), allowNull: false, defaultValue: 0 },
+        active: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
+        notes: { type: DataTypes.TEXT, allowNull: true },
+        createdAt: { type: DataTypes.DATE, allowNull: false, defaultValue: sequelize.literal("CURRENT_TIMESTAMP") },
+        updatedAt: { type: DataTypes.DATE, allowNull: false, defaultValue: sequelize.literal("CURRENT_TIMESTAMP") },
+      });
+      console.log("Tabela bank_accounts criada");
+    }
+
+    try {
+      const indexes = await queryInterface.showIndex("bank_accounts");
+      const has = (name) => indexes.some((i) => i.name === name);
+      if (!has("idx_bank_accounts_user")) {
+        await queryInterface.addIndex("bank_accounts", ["usersId"], { name: "idx_bank_accounts_user" });
+      }
+      if (!has("idx_bank_accounts_active")) {
+        await queryInterface.addIndex("bank_accounts", ["usersId", "active"], { name: "idx_bank_accounts_active" });
+      }
+    } catch (idxErr) {
+      console.warn("Aviso ao criar indices de bank_accounts:", idxErr.message);
+    }
+  } catch (error) {
+    console.error("Nao foi possivel validar o schema de bank_accounts:", error?.message);
+  }
+}
+
+async function ensureBankReconciliationSchema() {
+  const queryInterface = sequelize.getQueryInterface();
+  try {
+    const tables = await queryInterface.showAllTables();
+    const normalized = tables.map((t) => (typeof t === "string" ? t : t.tableName));
+
+    if (!normalized.includes("bank_statements")) {
+      await queryInterface.createTable("bank_statements", {
+        id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true, allowNull: false },
+        usersId: { type: DataTypes.UUID, allowNull: false },
+        bankAccountId: { type: DataTypes.UUID, allowNull: true },
+        sourceType: { type: DataTypes.STRING(20), allowNull: false },
+        fileName: { type: DataTypes.STRING(255), allowNull: true },
+        startDate: { type: DataTypes.DATE, allowNull: true },
+        endDate: { type: DataTypes.DATE, allowNull: true },
+        totalEntries: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
+        totalCredits: { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: 0 },
+        totalDebits: { type: DataTypes.DECIMAL(14, 2), allowNull: false, defaultValue: 0 },
+        status: { type: DataTypes.STRING(20), allowNull: false, defaultValue: "imported" },
+        notes: { type: DataTypes.TEXT, allowNull: true },
+        createdBy: { type: DataTypes.UUID, allowNull: true },
+        createdAt: { type: DataTypes.DATE, allowNull: false, defaultValue: sequelize.literal("CURRENT_TIMESTAMP") },
+        updatedAt: { type: DataTypes.DATE, allowNull: false, defaultValue: sequelize.literal("CURRENT_TIMESTAMP") },
+      });
+      console.log("Tabela bank_statements criada");
+    }
+
+    if (!normalized.includes("bank_statement_entries")) {
+      await queryInterface.createTable("bank_statement_entries", {
+        id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true, allowNull: false },
+        statementId: { type: DataTypes.UUID, allowNull: false },
+        usersId: { type: DataTypes.UUID, allowNull: false },
+        bankAccountId: { type: DataTypes.UUID, allowNull: true },
+        entryDate: { type: DataTypes.DATEONLY, allowNull: false },
+        direction: { type: DataTypes.STRING(10), allowNull: false },
+        amount: { type: DataTypes.DECIMAL(14, 2), allowNull: false },
+        description: { type: DataTypes.STRING(500), allowNull: true },
+        payerName: { type: DataTypes.STRING(180), allowNull: true },
+        payerDocument: { type: DataTypes.STRING(20), allowNull: true },
+        externalId: { type: DataTypes.STRING(120), allowNull: true },
+        paymentMethodHint: { type: DataTypes.STRING(40), allowNull: true },
+        rawJson: { type: DataTypes.JSON, allowNull: true },
+        matchStatus: { type: DataTypes.STRING(20), allowNull: false, defaultValue: "pending" },
+        matchedFinanceId: { type: DataTypes.INTEGER, allowNull: true },
+        matchedPaymentId: { type: DataTypes.UUID, allowNull: true },
+        matchConfidence: { type: DataTypes.DECIMAL(4, 3), allowNull: true },
+        matchedAt: { type: DataTypes.DATE, allowNull: true },
+        matchedBy: { type: DataTypes.UUID, allowNull: true },
+        matchSource: { type: DataTypes.STRING(20), allowNull: true },
+        createdAt: { type: DataTypes.DATE, allowNull: false, defaultValue: sequelize.literal("CURRENT_TIMESTAMP") },
+        updatedAt: { type: DataTypes.DATE, allowNull: false, defaultValue: sequelize.literal("CURRENT_TIMESTAMP") },
+      });
+      console.log("Tabela bank_statement_entries criada");
+    }
+
+    if (!normalized.includes("reconciliation_matches")) {
+      await queryInterface.createTable("reconciliation_matches", {
+        id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true, allowNull: false },
+        usersId: { type: DataTypes.UUID, allowNull: false },
+        entryId: { type: DataTypes.UUID, allowNull: false },
+        bankAccountId: { type: DataTypes.UUID, allowNull: true },
+        financeId: { type: DataTypes.INTEGER, allowNull: true },
+        paymentId: { type: DataTypes.UUID, allowNull: true },
+        confidence: { type: DataTypes.DECIMAL(4, 3), allowNull: true },
+        source: { type: DataTypes.STRING(20), allowNull: false },
+        grossAmount: { type: DataTypes.DECIMAL(12, 2), allowNull: true },
+        feeAmount: { type: DataTypes.DECIMAL(12, 2), allowNull: true },
+        netAmount: { type: DataTypes.DECIMAL(12, 2), allowNull: true },
+        notes: { type: DataTypes.TEXT, allowNull: true },
+        createdBy: { type: DataTypes.UUID, allowNull: true },
+        createdAt: { type: DataTypes.DATE, allowNull: false, defaultValue: sequelize.literal("CURRENT_TIMESTAMP") },
+        updatedAt: { type: DataTypes.DATE, allowNull: false, defaultValue: sequelize.literal("CURRENT_TIMESTAMP") },
+      });
+      console.log("Tabela reconciliation_matches criada");
+    }
+
+    try {
+      const idx = await queryInterface.showIndex("bank_statement_entries");
+      const has = (name) => idx.some((i) => i.name === name);
+      if (!has("idx_bse_user_status")) {
+        await queryInterface.addIndex("bank_statement_entries", ["usersId", "matchStatus"], { name: "idx_bse_user_status" });
+      }
+      if (!has("idx_bse_statement")) {
+        await queryInterface.addIndex("bank_statement_entries", ["statementId"], { name: "idx_bse_statement" });
+      }
+      if (!has("idx_bse_amount_date")) {
+        await queryInterface.addIndex("bank_statement_entries", ["amount", "entryDate"], { name: "idx_bse_amount_date" });
+      }
+    } catch (idxErr) {
+      console.warn("Aviso ao criar indices em bank_statement_entries:", idxErr.message);
+    }
+  } catch (error) {
+    console.error("Nao foi possivel validar o schema de conciliacao bancaria:", error?.message);
+  }
+}
+
+async function ensurePaymentMethodFeesSchema() {
+  const queryInterface = sequelize.getQueryInterface();
+  try {
+    const tables = await queryInterface.showAllTables();
+    const normalized = tables.map((t) => (typeof t === "string" ? t : t.tableName));
+
+    if (!normalized.includes("payment_method_fees")) {
+      await queryInterface.createTable("payment_method_fees", {
+        id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true, allowNull: false },
+        usersId: { type: DataTypes.UUID, allowNull: false },
+        method: { type: DataTypes.STRING(40), allowNull: false },
+        label: { type: DataTypes.STRING(80), allowNull: false },
+        feePercent: { type: DataTypes.DECIMAL(5, 2), allowNull: false, defaultValue: 0 },
+        feeFixed: { type: DataTypes.DECIMAL(10, 2), allowNull: false, defaultValue: 0 },
+        active: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
+        sortOrder: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
+        createdAt: { type: DataTypes.DATE, allowNull: false, defaultValue: sequelize.literal("CURRENT_TIMESTAMP") },
+        updatedAt: { type: DataTypes.DATE, allowNull: false, defaultValue: sequelize.literal("CURRENT_TIMESTAMP") },
+      });
+      console.log("Tabela payment_method_fees criada");
+    }
+
+    try {
+      const indexes = await queryInterface.showIndex("payment_method_fees");
+      const has = (name) => indexes.some((i) => i.name === name);
+      if (!has("uq_payment_method_fees_user_method")) {
+        await queryInterface.addIndex("payment_method_fees", ["usersId", "method"], {
+          name: "uq_payment_method_fees_user_method",
+          unique: true,
+        });
+      }
+      if (!has("idx_payment_method_fees_user")) {
+        await queryInterface.addIndex("payment_method_fees", ["usersId"], {
+          name: "idx_payment_method_fees_user",
+        });
+      }
+    } catch (idxErr) {
+      console.warn("Aviso ao criar indices de payment_method_fees:", idxErr.message);
+    }
+  } catch (error) {
+    console.error("Nao foi possivel validar o schema de payment_method_fees:", error?.message);
   }
 }
 
@@ -769,6 +1019,9 @@ sequelize
     await ensureCrmConversationsSchema();
     await ensureSettingsAutomationsSchema();
     await ensureFinanceSchema();
+    await ensureBankAccountsSchema();
+    await ensureBankReconciliationSchema();
+    await ensurePaymentMethodFeesSchema();
     await ensureActivityLogsSchema();
     await ensureAddonsSchema();
     await ensureAdminAuditSchema();

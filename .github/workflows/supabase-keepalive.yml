@@ -1,0 +1,37 @@
+name: Supabase Keepalive
+
+# Mantem o projeto Supabase ativo no plano free, que pausa automaticamente
+# apos ~7 dias sem atividade. Roda a cada 3 dias e faz uma query trivial.
+#
+# Para que funcione, adicione no GitHub o secret:
+#   SUPABASE_DATABASE_URL = postgresql://postgres.<projeto>:<senha>@aws-1-us-east-1.pooler.supabase.com:5432/postgres
+# (Configurar em: Settings -> Secrets and variables -> Actions -> New repository secret)
+
+on:
+  schedule:
+    # A cada 3 dias as 09:00 UTC (06:00 horario de Brasilia).
+    # Cron do GitHub Actions e em UTC.
+    - cron: "0 9 */3 * *"
+  workflow_dispatch: # permite acionar manualmente pela aba Actions
+
+jobs:
+  ping:
+    name: Ping Supabase
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install pg
+        run: npm install pg@^8.20.0 --no-save --no-audit --no-fund
+
+      - name: Ping database
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DATABASE_URL }}
+        run: node scripts/keepalive-supabase.js

@@ -15,6 +15,7 @@ import {
   createWhatsappMessage,
   updateMessageDeliveryStatus,
 } from "./whatsappMessageService.js";
+import { scheduleMetaAutoReply } from "./whatsappOfficialAutoReply.js";
 
 function getNested(payload, path, fallback = undefined) {
   const segments = Array.isArray(path) ? path : String(path || "").split(".");
@@ -240,6 +241,20 @@ export async function processWebhookPayload(payload = {}) {
           rawPayload: event.payload || {},
           sentAt: null,
         });
+
+        // Dispara IA do CRM com debounce (igual Baileys). Só responde texto;
+        // tipos sem corpo real (image sem caption) caem com body "[image]" e
+        // serão filtrados dentro de generateAutoReply.
+        try {
+          scheduleMetaAutoReply({
+            companyId,
+            conversation,
+            customer,
+            phone: event.from,
+          });
+        } catch (aiErr) {
+          console.warn("[Meta IA] Erro ao agendar auto-reply:", aiErr?.message);
+        }
       } else if (event.kind === "status") {
         await updateMessageDeliveryStatus({
           metaMessageId: event.metaMessageId,

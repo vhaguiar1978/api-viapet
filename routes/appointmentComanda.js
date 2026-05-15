@@ -9,6 +9,7 @@ import Services from "../models/Services.js";
 import sequelize from "../database/config.js";
 import {
   calculateMachineFeeBreakdown,
+  resolveFeeBreakdownForMethod,
   getAppointmentComandaDetails,
   logAppointmentEvent,
   syncAppointmentFinance,
@@ -434,7 +435,22 @@ router.post("/appointments/:id/payments", auth, async (req, res) => {
       });
     }
 
-    const breakdown = calculateMachineFeeBreakdown(normalizedAmount, feePercentage);
+    let breakdown;
+    if (feePercentage != null && Number(feePercentage) > 0) {
+      breakdown = calculateMachineFeeBreakdown(normalizedAmount, feePercentage);
+    } else {
+      const resolved = await resolveFeeBreakdownForMethod({
+        usersId: req.user.establishment,
+        grossAmount: normalizedAmount,
+        paymentMethod,
+      });
+      breakdown = {
+        grossAmount: resolved.grossAmount,
+        feePercentage: resolved.feePercentage,
+        feeAmount: resolved.feeAmount,
+        netAmount: resolved.netAmount,
+      };
+    }
 
     const payment = await AppointmentPayment.create({
       appointmentId: appointment.id,

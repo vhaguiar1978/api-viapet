@@ -1,4 +1,5 @@
 import express from "express";
+import { randomUUID } from "node:crypto";
 import authenticate from "../middlewares/auth.js";
 import Sales from "../models/Sales.js";
 import Appointment from "../models/Appointment.js";
@@ -10,7 +11,8 @@ import { Op } from "sequelize";
 import Finance from "../models/Finance.js";
 import CashClosure from "../models/CashClosure.js";
 import sequelize from "sequelize";
-import { hydrateAppointmentsWithFinancialDetails } from "../service/appointmentFinance.js";
+import { hydrateAppointmentsWithFinancialDetails, resolveFeeBreakdownForMethod } from "../service/appointmentFinance.js";
+import PaymentMethodFee, { DEFAULT_PAYMENT_METHODS, normalizePaymentMethodKey } from "../models/PaymentMethodFee.js";
 import { logActivity } from "../service/activityLogger.js";
 const router = express.Router();
 
@@ -715,7 +717,9 @@ async function keepOnlyCurrentAgendaFinanceRows(finances = [], usersId) {
 function buildFinanceSummaryFromRows(finances = []) {
   const summary = {
     entradas: {
-      total: 0,
+      total: 0, // = bruto (compatibilidade)
+      bruto: 0,
+      liquido: 0,
       count: 0,
     },
     taxas: {
@@ -730,16 +734,25 @@ function buildFinanceSummaryFromRows(finances = []) {
       fixas: 0,
       variaveis: 0,
     },
-    saldo: 0,
+    saldo: 0, // bruto - saidas (compatibilidade)
+    saldoBruto: 0,
+    saldoLiquido: 0, // = lucroLiquidoReal: líquido das entradas - todas as saídas
+    lucroLiquidoReal: 0,
     totalSales: 0,
   };
 
   (Array.isArray(finances) ? finances : []).forEach((finance) => {
     const amount = parseFloat(finance.amount) || 0;
     const feeAmount = parseFloat(finance.feeAmount) || 0;
+    const gross = parseFloat(finance.grossAmount);
+    const net = parseFloat(finance.netAmount);
+    const grossValue = Number.isFinite(gross) && gross > 0 ? gross : amount;
+    const netValue = Number.isFinite(net) && net > 0 ? net : Math.max(0, amount - feeAmount);
 
     if (finance.type === "entrada") {
       summary.entradas.total += amount;
+      summary.entradas.bruto += grossValue;
+      summary.entradas.liquido += netValue;
       summary.entradas.count += 1;
       summary.taxas.total += feeAmount;
     } else {
@@ -758,6 +771,9 @@ function buildFinanceSummaryFromRows(finances = []) {
   });
 
   summary.saldo = summary.entradas.total - summary.saidas.total;
+  summary.saldoBruto = summary.entradas.bruto - summary.saidas.total;
+  summary.saldoLiquido = summary.entradas.liquido - summary.saidas.total;
+  summary.lucroLiquidoReal = summary.saldoLiquido;
   summary.totalSales = summary.entradas.total;
   return summary;
 }
@@ -953,6 +969,31 @@ function buildViaCentralOverviewPayload(appointments = [], sales = [], financeSu
   };
 }
 
+// Calcula array de N valores de parcela com ajuste de centavos na última.
+// Ex: total=100, n=3 → [33.33, 33.33, 33.34]
+function splitInstallmentAmount(totalAmount, parts) {
+  const totalCents = Math.round(Number(totalAmount) * 100);
+  const n = Math.max(1, Math.floor(parts));
+  const base = Math.floor(totalCents / n);
+  const remainder = totalCents - base * n;
+  return Array.from({ length: n }, (_, i) => {
+    const cents = i === n - 1 ? base + remainder : base;
+    return Number((cents / 100).toFixed(2));
+  });
+}
+
+// Soma N meses a uma data preservando o dia (ou último dia do mês se overflow)
+function addMonthsKeepingDay(baseDate, monthsToAdd) {
+  const d = new Date(baseDate);
+  if (!Number.isFinite(d.getTime())) return null;
+  const targetMonth = d.getMonth() + monthsToAdd;
+  const result = new Date(d.getFullYear(), targetMonth, 1, 12, 0, 0);
+  const desiredDay = d.getDate();
+  const lastDayOfMonth = new Date(result.getFullYear(), result.getMonth() + 1, 0).getDate();
+  result.setDate(Math.min(desiredDay, lastDayOfMonth));
+  return result;
+}
+
 // Criar nova entrada/saída financeira
 router.post("/finance", authenticate, async (req, res) => {
   try {
@@ -977,6 +1018,10 @@ router.post("/finance", authenticate, async (req, res) => {
       netAmount,
       installmentIndex,
       installmentTotal,
+      purchaseGroupId,
+      vendor,
+      costCenter,
+      bankAccountId,
     } = req.body;
     const normalizedDate = date ? normalizeFinanceDateInput(date) : null;
     const normalizedDueDate = dueDate ? normalizeFinanceDateInput(dueDate) : null;
@@ -995,14 +1040,123 @@ router.post("/finance", authenticate, async (req, res) => {
       });
     }
 
+    let finalGross = grossAmount != null ? Number(grossAmount) : null;
+    let finalFeePct = feePercentage != null ? Number(feePercentage) : null;
+    let finalFeeAmount = feeAmount != null ? Number(feeAmount) : null;
+    let finalNet = netAmount != null ? Number(netAmount) : null;
+
+    if (type === "entrada" && finalGross == null) {
+      finalGross = Number(amount) || 0;
+    }
+
+    const shouldAutoCompute =
+      type === "entrada" &&
+      paymentMethod &&
+      (finalFeeAmount == null || finalNet == null);
+
+    if (shouldAutoCompute) {
+      try {
+        const breakdown = await resolveFeeBreakdownForMethod({
+          usersId: req.user.establishment,
+          grossAmount: finalGross,
+          paymentMethod,
+          hasInstallments: Number(installmentTotal || 0) > 1,
+          overridePercent: finalFeePct,
+        });
+        if (finalFeePct == null) finalFeePct = breakdown.feePercentage;
+        if (finalFeeAmount == null) finalFeeAmount = breakdown.feeAmount;
+        if (finalNet == null) finalNet = breakdown.netAmount;
+      } catch (feeErr) {
+        console.warn("Falha ao auto-calcular taxa, seguindo sem auto-calc:", feeErr?.message);
+      }
+    }
+
+    const totalParts = Number(installmentTotal || 0);
+    const shouldFanOutInstallments =
+      totalParts > 1 &&
+      (installmentIndex == null || installmentIndex === "" || installmentIndex === 0) &&
+      !purchaseGroupId &&
+      (frequency === "parcelado" || frequency == null);
+
+    if (shouldFanOutInstallments) {
+      const totalAmount = Number(amount) || 0;
+      const parcelAmounts = splitInstallmentAmount(totalAmount, totalParts);
+      const groupId = randomUUID();
+      const baseDate = normalizedDueDate || normalizedDate || new Date();
+
+      const rowsPayload = parcelAmounts.map((parcelAmount, i) => {
+        const parcelDue = addMonthsKeepingDay(baseDate, i);
+        return {
+          type,
+          description: description ? `${description} (${i + 1}/${totalParts})` : description,
+          amount: parcelAmount,
+          grossAmount: type === "entrada" ? parcelAmount : null,
+          feePercentage: null,
+          feeAmount: null,
+          netAmount: type === "entrada" ? parcelAmount : null,
+          date: normalizedDate,
+          dueDate: parcelDue,
+          category,
+          subCategory,
+          expenseType,
+          frequency: "parcelado",
+          paymentMethod,
+          reference,
+          notes,
+          attachments,
+          status: i === 0 ? status || "pendente" : "pendente",
+          installmentIndex: i + 1,
+          installmentTotal: totalParts,
+          purchaseGroupId: groupId,
+          parentFinanceId: null,
+          vendor: vendor || null,
+          costCenter: costCenter || null,
+          bankAccountId: bankAccountId || null,
+          createdBy: req.user.id,
+          usersId: req.user.establishment,
+        };
+      });
+
+      const created = await Finance.bulkCreate(rowsPayload, { returning: true });
+      // Vincula parentFinanceId à primeira parcela (compatibilidade com queries que esperam parent)
+      const firstId = created[0]?.id;
+      if (firstId) {
+        await Finance.update(
+          { parentFinanceId: firstId },
+          { where: { purchaseGroupId: groupId } },
+        );
+      }
+
+      logActivity({
+        req,
+        modulo: "financeiro",
+        acao: "finance_installments_created",
+        descricao: `Compra parcelada criada: ${description || "(sem descrição)"} — R$ ${totalAmount.toFixed(2)} em ${totalParts}x`,
+        entidadeTipo: "finance",
+        entidadeId: firstId,
+        metadata: { totalAmount, totalParts, purchaseGroupId: groupId, vendor, costCenter, bankAccountId },
+      });
+
+      return res.status(201).json({
+        message: `Compra parcelada criada — ${totalParts} parcelas`,
+        data: {
+          purchaseGroupId: groupId,
+          installmentTotal: totalParts,
+          totalAmount: Number(totalAmount.toFixed(2)),
+          firstParcelId: firstId,
+          rows: created,
+        },
+      });
+    }
+
     const finance = await Finance.create({
       type,
       description,
       amount,
-      grossAmount,
-      feePercentage,
-      feeAmount,
-      netAmount,
+      grossAmount: finalGross,
+      feePercentage: finalFeePct,
+      feeAmount: finalFeeAmount,
+      netAmount: finalNet,
       date: normalizedDate,
       dueDate: normalizedDueDate,
       category,
@@ -1016,6 +1170,10 @@ router.post("/finance", authenticate, async (req, res) => {
       status,
       installmentIndex: installmentIndex ?? null,
       installmentTotal: installmentTotal ?? null,
+      purchaseGroupId: purchaseGroupId ?? null,
+      vendor: vendor ?? null,
+      costCenter: costCenter ?? null,
+      bankAccountId: bankAccountId ?? null,
       createdBy: req.user.id,
       usersId: req.user.establishment,
     });
@@ -1346,6 +1504,65 @@ router.get("/finance/day/:endDate", authenticate, async (req, res) => {
   }
 });
 
+// Retorna todas as parcelas de uma compra parcelada + resumo (pagas/abertas/saldo)
+router.get("/finance/installments/:purchaseGroupId", authenticate, async (req, res) => {
+  try {
+    const usersId = req.user.establishment;
+    const { purchaseGroupId } = req.params;
+
+    const rows = await Finance.findAll({
+      where: { usersId, purchaseGroupId },
+      order: [["installmentIndex", "ASC"]],
+    });
+
+    if (rows.length === 0) {
+      return res.status(404).json({ message: "Compra parcelada não encontrada" });
+    }
+
+    const first = rows[0];
+    const totalAmount = rows.reduce((acc, r) => acc + (Number(r.amount) || 0), 0);
+    const parcelasPagas = rows.filter((r) => r.status === "pago").length;
+    const parcelasEmAberto = rows.filter((r) => r.status !== "pago" && r.status !== "cancelado").length;
+    const saldoRestante = rows
+      .filter((r) => r.status !== "pago" && r.status !== "cancelado")
+      .reduce((acc, r) => acc + (Number(r.amount) || 0), 0);
+    const valorPago = rows
+      .filter((r) => r.status === "pago")
+      .reduce((acc, r) => acc + (Number(r.amount) || 0), 0);
+
+    res.json({
+      message: "Parcelas listadas",
+      data: {
+        purchaseGroupId,
+        description: String(first.description || "").replace(/\s*\(\d+\/\d+\)$/, ""),
+        vendor: first.vendor || null,
+        category: first.category || null,
+        costCenter: first.costCenter || null,
+        bankAccountId: first.bankAccountId || null,
+        paymentMethod: first.paymentMethod || null,
+        installmentTotal: first.installmentTotal || rows.length,
+        totalAmount: Number(totalAmount.toFixed(2)),
+        valorPago: Number(valorPago.toFixed(2)),
+        saldoRestante: Number(saldoRestante.toFixed(2)),
+        parcelasPagas,
+        parcelasEmAberto,
+        rows: rows.map((r) => ({
+          id: r.id,
+          installmentIndex: r.installmentIndex,
+          amount: Number(r.amount),
+          dueDate: r.dueDate,
+          date: r.date,
+          status: r.status,
+          paymentMethod: r.paymentMethod,
+        })),
+      },
+    });
+  } catch (error) {
+    console.error("Erro ao buscar parcelas:", error);
+    res.status(500).json({ message: "Erro ao buscar parcelas", error: error.message });
+  }
+});
+
 router.get("/finance/list", authenticate, async (req, res) => {
   try {
     const {
@@ -1662,6 +1879,8 @@ router.get("/finance/summary", authenticate, async (req, res) => {
     const summary = {
       entradas: {
         total: 0,
+        bruto: 0,
+        liquido: 0,
         count: 0,
       },
       taxas: {
@@ -1677,14 +1896,23 @@ router.get("/finance/summary", authenticate, async (req, res) => {
         variaveis: 0,
       },
       saldo: 0,
+      saldoBruto: 0,
+      saldoLiquido: 0,
+      lucroLiquidoReal: 0,
     };
 
     currentFinances.forEach((finance) => {
       const amount = parseFloat(finance.amount) || 0;
       const feeAmount = parseFloat(finance.feeAmount) || 0;
+      const gross = parseFloat(finance.grossAmount);
+      const net = parseFloat(finance.netAmount);
+      const grossValue = Number.isFinite(gross) && gross > 0 ? gross : amount;
+      const netValue = Number.isFinite(net) && net > 0 ? net : Math.max(0, amount - feeAmount);
 
       if (finance.type === "entrada") {
         summary.entradas.total += amount;
+        summary.entradas.bruto += grossValue;
+        summary.entradas.liquido += netValue;
         summary.entradas.count++;
         summary.taxas.total += feeAmount;
       } else {
@@ -1703,6 +1931,9 @@ router.get("/finance/summary", authenticate, async (req, res) => {
     });
 
     summary.saldo = summary.entradas.total - summary.saidas.total;
+    summary.saldoBruto = summary.entradas.bruto - summary.saidas.total;
+    summary.saldoLiquido = summary.entradas.liquido - summary.saidas.total;
+    summary.lucroLiquidoReal = summary.saldoLiquido;
     summary.totalSales = summary.entradas.total;
 
     res.json({
@@ -2434,6 +2665,145 @@ router.get("/monthly-stats-detailed/:year/:month", authenticate, async (req, res
     console.error("Erro ao buscar estatísticas mensais detalhadas:", error);
     res.status(500).json({
       message: "Erro ao buscar estatísticas mensais detalhadas",
+      error: error.message,
+    });
+  }
+});
+
+// Demonstrativo mensal com quebra por forma de pagamento
+// Inclui: faturamento bruto, taxas, líquido, despesas, lucro líquido real,
+// detalhado por método (dinheiro/pix/débito/crédito à vista/crédito parcelado/transferência/outros)
+router.get("/finance/monthly-demonstrativo/:year/:month", authenticate, async (req, res) => {
+  try {
+    const year = parseInt(req.params.year, 10);
+    const month = parseInt(req.params.month, 10);
+    if (isNaN(year) || isNaN(month) || month < 1 || month > 12) {
+      return res.status(400).json({ message: "Ano ou mês inválido" });
+    }
+
+    const usersId = req.user.establishment;
+    const startDate = new Date(year, month - 1, 1);
+    const endDate = new Date(year, month, 0, 23, 59, 59);
+
+    let methodConfigs = await PaymentMethodFee.findAll({ where: { usersId } });
+    if (methodConfigs.length === 0) {
+      methodConfigs = await PaymentMethodFee.bulkCreate(
+        DEFAULT_PAYMENT_METHODS.map((d) => ({ ...d, usersId })),
+        { returning: true },
+      );
+    }
+    const configByKey = methodConfigs.reduce((acc, row) => {
+      acc[row.method] = {
+        label: row.label,
+        feePercent: Number(row.feePercent || 0),
+        feeFixed: Number(row.feeFixed || 0),
+        sortOrder: row.sortOrder,
+      };
+      return acc;
+    }, {});
+
+    const finances = await Finance.findAll({
+      where: {
+        usersId,
+        status: { [Op.ne]: "cancelado" },
+        [Op.or]: [
+          { date: { [Op.between]: [startDate, endDate] } },
+          { dueDate: { [Op.between]: [startDate, endDate] } },
+        ],
+      },
+    });
+
+    const byMethod = {};
+    const ensureBucket = (key) => {
+      if (!byMethod[key]) {
+        byMethod[key] = {
+          method: key,
+          label: configByKey[key]?.label || key,
+          sortOrder: configByKey[key]?.sortOrder ?? 99,
+          count: 0,
+          bruto: 0,
+          taxa: 0,
+          liquido: 0,
+        };
+      }
+      return byMethod[key];
+    };
+    DEFAULT_PAYMENT_METHODS.forEach((d) => ensureBucket(d.method));
+
+    let totalBruto = 0;
+    let totalTaxas = 0;
+    let totalLiquido = 0;
+    let totalDespesas = 0;
+    let despesasFixas = 0;
+    let despesasVariaveis = 0;
+    let comissoes = 0;
+
+    finances.forEach((f) => {
+      const amount = parseFloat(f.amount) || 0;
+      const fee = parseFloat(f.feeAmount) || 0;
+      const gross = parseFloat(f.grossAmount) || (f.type === "entrada" ? amount : 0);
+      const net = parseFloat(f.netAmount) || (gross - fee);
+
+      if (f.type === "entrada") {
+        const key = normalizePaymentMethodKey(f.paymentMethod, {
+          hasInstallments: Number(f.installmentTotal || 0) > 1,
+        });
+        const bucket = ensureBucket(key);
+        bucket.count += 1;
+        bucket.bruto += gross;
+        bucket.taxa += fee;
+        bucket.liquido += net;
+
+        totalBruto += gross;
+        totalTaxas += fee;
+        totalLiquido += net;
+      } else {
+        totalDespesas += amount;
+        if (f.expenseType === "fixo") despesasFixas += amount;
+        else despesasVariaveis += amount;
+      }
+
+      if (String(f.category || "").toLowerCase().includes("comiss")) {
+        comissoes += amount;
+      }
+    });
+
+    const roundCents = (v) => Number((v || 0).toFixed(2));
+    const breakdown = Object.values(byMethod)
+      .sort((a, b) => a.sortOrder - b.sortOrder)
+      .map((b) => ({
+        method: b.method,
+        label: b.label,
+        count: b.count,
+        bruto: roundCents(b.bruto),
+        taxa: roundCents(b.taxa),
+        liquido: roundCents(b.liquido),
+        share: totalBruto > 0 ? Number(((b.bruto / totalBruto) * 100).toFixed(2)) : 0,
+      }));
+
+    const lucroLiquidoReal = roundCents(totalLiquido - totalDespesas);
+
+    res.json({
+      message: "Demonstrativo mensal calculado",
+      data: {
+        period: { year, month, startDate, endDate },
+        totals: {
+          totalBruto: roundCents(totalBruto),
+          totalTaxas: roundCents(totalTaxas),
+          totalLiquido: roundCents(totalLiquido),
+          totalDespesas: roundCents(totalDespesas),
+          despesasFixas: roundCents(despesasFixas),
+          despesasVariaveis: roundCents(despesasVariaveis),
+          comissoes: roundCents(comissoes),
+          lucroLiquidoReal,
+        },
+        byMethod: breakdown,
+      },
+    });
+  } catch (error) {
+    console.error("Erro ao calcular demonstrativo mensal:", error);
+    res.status(500).json({
+      message: "Erro ao calcular demonstrativo mensal",
       error: error.message,
     });
   }

@@ -4,6 +4,11 @@ import AppointmentPayment from "../models/AppointmentPayment.js";
 import AppointmentStatusHistory from "../models/AppointmentStatusHistory.js";
 import Custumers from "../models/Custumers.js";
 import Finance from "../models/Finance.js";
+import PaymentMethodFee, {
+  DEFAULT_PAYMENT_METHODS,
+  normalizePaymentMethodKey,
+  computeBreakdown,
+} from "../models/PaymentMethodFee.js";
 import Products from "../models/Products.js";
 import Services from "../models/Services.js";
 import { Op } from "sequelize";
@@ -85,6 +90,65 @@ export const calculateMachineFeeBreakdown = (grossAmount, feePercentage = 0) => 
     netAmount,
   };
 };
+
+const _methodFeeCache = new Map();
+const _METHOD_FEE_CACHE_TTL_MS = 60_000;
+
+async function loadUserMethodFees(usersId) {
+  const cached = _methodFeeCache.get(usersId);
+  if (cached && Date.now() - cached.at < _METHOD_FEE_CACHE_TTL_MS) {
+    return cached.data;
+  }
+
+  let rows = await PaymentMethodFee.findAll({ where: { usersId } });
+  if (rows.length === 0) {
+    rows = await PaymentMethodFee.bulkCreate(
+      DEFAULT_PAYMENT_METHODS.map((d) => ({ ...d, usersId })),
+      { returning: true },
+    );
+  }
+
+  const byKey = rows.reduce((acc, row) => {
+    acc[row.method] = {
+      label: row.label,
+      feePercent: Number(row.feePercent || 0),
+      feeFixed: Number(row.feeFixed || 0),
+      active: Boolean(row.active),
+    };
+    return acc;
+  }, {});
+
+  _methodFeeCache.set(usersId, { at: Date.now(), data: byKey });
+  return byKey;
+}
+
+export function invalidateMethodFeeCache(usersId) {
+  if (usersId) _methodFeeCache.delete(usersId);
+  else _methodFeeCache.clear();
+}
+
+export async function resolveFeeBreakdownForMethod({
+  usersId,
+  grossAmount,
+  paymentMethod,
+  hasInstallments = false,
+  overridePercent,
+  overrideFixed,
+}) {
+  const key = normalizePaymentMethodKey(paymentMethod, { hasInstallments });
+  const map = await loadUserMethodFees(usersId);
+  const cfg = map[key];
+
+  const pct = overridePercent != null ? Number(overridePercent) : cfg?.feePercent ?? 0;
+  const fixed = overrideFixed != null ? Number(overrideFixed) : cfg?.feeFixed ?? 0;
+
+  const breakdown = computeBreakdown(grossAmount, pct, fixed);
+  return {
+    methodKey: key,
+    methodLabel: cfg?.label || key,
+    ...breakdown,
+  };
+}
 
 export const logAppointmentEvent = async ({
   appointmentId,

@@ -71,6 +71,27 @@ const Finance = sequelize.define(
       type: DataTypes.INTEGER,
       allowNull: true,
     },
+    purchaseGroupId: {
+      type: DataTypes.UUID,
+      allowNull: true,
+      comment: "UUID compartilhado por todas as parcelas de uma mesma compra",
+    },
+    parentFinanceId: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+    },
+    vendor: {
+      type: DataTypes.STRING(180),
+      allowNull: true,
+    },
+    costCenter: {
+      type: DataTypes.STRING(120),
+      allowNull: true,
+    },
+    bankAccountId: {
+      type: DataTypes.UUID,
+      allowNull: true,
+    },
     paymentMethod: {
       type: DataTypes.STRING,
       allowNull: false,
@@ -126,6 +147,14 @@ const Finance = sequelize.define(
       {
         name: "idx_finance_category",
         fields: ["category"],
+      },
+      {
+        name: "idx_finance_purchase_group",
+        fields: ["purchaseGroupId"],
+      },
+      {
+        name: "idx_finance_bank_account",
+        fields: ["bankAccountId"],
       },
     ],
   },
