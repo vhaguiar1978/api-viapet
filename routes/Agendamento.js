@@ -724,10 +724,13 @@ router.get("/appointments", auth, async (req, res) => {
       data: filteredAppointments,
     });
   } catch (error) {
-    console.error("Erro ao buscar agendamentos:", error);
+    console.error("Erro ao buscar agendamentos:", error?.stack || error);
+    const underlying = error?.original?.message || error?.parent?.message || error?.message || "";
     return res.status(500).json({
-      message: "Erro ao buscar agendamentos",
-      error: error.message,
+      message: underlying
+        ? `Erro ao buscar agendamentos: ${underlying}`
+        : "Erro ao buscar agendamentos",
+      error: underlying || error?.message || "",
     });
   }
 });

@@ -282,8 +282,10 @@ export const hydrateAppointmentsWithFinancialDetails = async (
       ]
     : [];
 
-  const packageOccurrences = packageGroupIds.length
-    ? await Appointment.findAll({
+  let packageOccurrences = [];
+  if (packageGroupIds.length) {
+    try {
+      packageOccurrences = await Appointment.findAll({
         where: {
           usersId,
           packageGroupId: {
@@ -306,8 +308,12 @@ export const hydrateAppointmentsWithFinancialDetails = async (
           ["date", "ASC"],
           ["time", "ASC"],
         ],
-      })
-    : [];
+      });
+    } catch (error) {
+      console.error("[hydrateAppointments] packageOccurrences falhou:", error?.message || error);
+      packageOccurrences = [];
+    }
+  }
 
   const packageOccurrenceIds = packageOccurrences
     .map((appointment) => appointment?.id)
@@ -316,28 +322,43 @@ export const hydrateAppointmentsWithFinancialDetails = async (
     ...new Set([...appointmentIds, ...packageOccurrenceIds]),
   ];
 
+  const safeFindAll = async (label, runner) => {
+    try {
+      return await runner();
+    } catch (error) {
+      console.error(`[hydrateAppointments] ${label} falhou:`, error?.message || error);
+      return [];
+    }
+  };
+
   const [items, payments, history] = await Promise.all([
-    AppointmentItem.findAll({
-      where: {
-        appointmentId: allRelevantAppointmentIds,
-        usersId,
-      },
-      order: [["createdAt", "ASC"]],
-    }),
-    AppointmentPayment.findAll({
-      where: {
-        appointmentId: allRelevantAppointmentIds,
-        usersId,
-      },
-      order: [["dueDate", "ASC"], ["createdAt", "ASC"]],
-    }),
-    AppointmentStatusHistory.findAll({
-      where: {
-        appointmentId: allRelevantAppointmentIds,
-        usersId,
-      },
-      order: [["createdAt", "DESC"]],
-    }),
+    safeFindAll("AppointmentItem", () =>
+      AppointmentItem.findAll({
+        where: {
+          appointmentId: allRelevantAppointmentIds,
+          usersId,
+        },
+        order: [["createdAt", "ASC"]],
+      }),
+    ),
+    safeFindAll("AppointmentPayment", () =>
+      AppointmentPayment.findAll({
+        where: {
+          appointmentId: allRelevantAppointmentIds,
+          usersId,
+        },
+        order: [["dueDate", "ASC"], ["createdAt", "ASC"]],
+      }),
+    ),
+    safeFindAll("AppointmentStatusHistory", () =>
+      AppointmentStatusHistory.findAll({
+        where: {
+          appointmentId: allRelevantAppointmentIds,
+          usersId,
+        },
+        order: [["createdAt", "DESC"]],
+      }),
+    ),
   ]);
 
   const serviceIds = [
