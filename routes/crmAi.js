@@ -3112,4 +3112,132 @@ router.delete("/knowledge-base/:entryId", auth, async (req, res) => {
   }
 });
 
+// Diagnostico: por que a IA nao esta respondendo / por que o envio falha.
+// Roda todos os checks que canAutoReply faz + status do Baileys + presenca do
+// GROQ_API_KEY. NAO expoe o valor da key, so se existe. Aceita ?conversationId
+// pra incluir status de aiPaused naquela conversa.
+router.get("/diagnose", auth, async (req, res) => {
+  try {
+    const usersId = getEstablishmentId(req);
+    const conversationId = String(req.query.conversationId || "").trim();
+
+    const settings = await Settings.findOne({ where: { usersId } });
+    const conn = settings?.whatsappConnection || {};
+    const aiControl = conn?.crmAiControl || null;
+    const subscription = await CrmAiSubscription.findOne({ where: { user_id: usersId } });
+
+    const groqKeyOnUser = String(aiControl?.groqApiKey || "").trim();
+    const groqKeyOnEnv = String(process.env.GROQ_API_KEY || "").trim();
+    const groqMode = groqKeyOnUser ? "user_panel" : groqKeyOnEnv ? "env_global" : "missing";
+
+    // Baileys: se a instancia ja foi criada em memoria, ve o status real
+    let baileys = {
+      hasSavedCreds: Boolean(conn?.baileys?.authState?.creds),
+      lastKnownStatus: conn?.baileys?.connectionStatus || null,
+      runtimeStatus: null,
+      socketReady: null,
+    };
+    try {
+      const { default: BaileysService } = await import("../service/baileys.js");
+      const inst = BaileysService.getInstance(usersId, "default");
+      baileys.runtimeStatus = inst?.connectionStatus || null;
+      const wsState = inst?.sock?.ws?.readyState;
+      baileys.socketReady = wsState === 1;
+      baileys.wsReadyState = wsState ?? null;
+    } catch (_) {
+      // Sem instancia em memoria — comum em primeiro request apos restart
+    }
+
+    const cloudApiConfigured = Boolean(
+      (conn.phoneNumberId || process.env.WHATSAPP_PHONE_NUMBER_ID) &&
+      (conn.accessToken || process.env.WHATSAPP_TOKEN),
+    );
+
+    let conversation = null;
+    if (conversationId) {
+      const conv = await CrmConversation.findOne({ where: { id: conversationId, usersId } });
+      if (conv) {
+        conversation = {
+          id: conv.id,
+          status: conv.status,
+          channel: conv.channel,
+          aiPaused: Boolean(conv?.metadata?.aiPaused),
+          aiPausedAt: conv?.metadata?.aiPausedAt || null,
+          escalationReason: conv?.metadata?.escalationReason || null,
+        };
+      } else {
+        conversation = { id: conversationId, error: "conversa nao encontrada" };
+      }
+    }
+
+    // Determina o bloqueio principal — mesma logica de canAutoReply.
+    const blocks = [];
+    if (!aiControl) blocks.push({ reason: "ai_control_missing", fix: "Abra o painel da IA e clique em salvar." });
+    if (aiControl && !aiControl.enabled) blocks.push({ reason: "ai_disabled", fix: "Marque 'IA habilitada' no painel." });
+    if (aiControl && !aiControl.autoReplyEnabled) blocks.push({ reason: "auto_reply_disabled", fix: "Marque 'responder automaticamente' no painel." });
+    if (!subscription || subscription.status !== "active") {
+      blocks.push({
+        reason: "no_active_subscription",
+        fix: "Assinatura da IA precisa estar ativa. Renove em /crm-ai/subscribe.",
+        currentStatus: subscription?.status || "inexistente",
+      });
+    }
+    if (conversation?.aiPaused) {
+      blocks.push({
+        reason: "conversation_ai_paused",
+        fix: "A IA foi pausada nesta conversa (escalada ou pausada manualmente). Despause no painel da conversa ou aguarde auto-resume (default 6h).",
+      });
+    }
+    if (groqMode === "missing") {
+      blocks.push({
+        reason: "groq_key_missing",
+        fix: "Sem GROQ_API_KEY a IA cai em respostas curtas e repetitivas (fallback de keywords). Configure no painel OU no env do Render.",
+        severity: "warning",
+      });
+    }
+    if (!baileys.socketReady && baileys.runtimeStatus === "connected") {
+      blocks.push({
+        reason: "baileys_socket_zombie",
+        fix: "Sessao Baileys diz 'connected' mas o socket caiu. Reconecte escaneando o QR de novo.",
+      });
+    }
+    if (!cloudApiConfigured && (!baileys.runtimeStatus || baileys.runtimeStatus !== "connected")) {
+      blocks.push({
+        reason: "no_whatsapp_provider",
+        fix: "Nenhum provedor WhatsApp ativo. Conecte via Baileys (QR) ou configure Cloud API (phoneNumberId + accessToken).",
+      });
+    }
+
+    return res.json({
+      ok: blocks.filter((b) => b.severity !== "warning").length === 0,
+      blocks,
+      ai: {
+        controlPresent: Boolean(aiControl),
+        enabled: Boolean(aiControl?.enabled),
+        autoReplyEnabled: Boolean(aiControl?.autoReplyEnabled),
+        autoExecuteEnabled: Boolean(aiControl?.autoExecuteEnabled),
+        assistantName: aiControl?.assistantName || null,
+        identifyAsAi: Boolean(aiControl?.identifyAsAi),
+      },
+      subscription: {
+        status: subscription?.status || "inexistente",
+        endsAt: subscription?.ends_at || null,
+      },
+      groq: {
+        mode: groqMode,
+        userKeyPresent: Boolean(groqKeyOnUser),
+        envKeyPresent: Boolean(groqKeyOnEnv),
+      },
+      whatsapp: {
+        baileys,
+        cloudApiConfigured,
+      },
+      conversation,
+    });
+  } catch (error) {
+    console.error("[CRM AI Diagnose] erro:", error);
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
 export default router;

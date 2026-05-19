@@ -1112,9 +1112,26 @@ router.post("/crm-conversations/:conversationId/messages", authenticate, enforce
           providerMessageId = result?.key?.id || `baileys_${Date.now()}`;
         } catch (baileysError) {
           console.error("Erro ao enviar via Baileys:", baileysError);
-          if (String(baileysError.message || "").includes("Rate limit")) {
+          const errMsg = String(baileysError.message || "");
+          if (errMsg.includes("Rate limit")) {
             return res.status(429).json({
               message: "Limite de envio por hora atingido. Aguarde alguns minutos.",
+            });
+          }
+          // Sessao morta (sock caiu, WS fechou, timeout). Sinaliza pro frontend
+          // que precisa reconectar o QR — usuario nao deve achar que enviou.
+          if (
+            errMsg.includes("socket caiu") ||
+            errMsg.includes("WhatsApp caiu") ||
+            errMsg.includes("timeout") ||
+            errMsg.includes("expirou") ||
+            errMsg.includes("status: disconnected") ||
+            errMsg.includes("status: error")
+          ) {
+            return res.status(409).json({
+              message: errMsg + " A mensagem NAO foi enviada.",
+              requiresReconnect: true,
+              provider: "baileys",
             });
           }
           return res.status(500).json({

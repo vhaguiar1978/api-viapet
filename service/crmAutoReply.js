@@ -148,7 +148,7 @@ function pickClose() {
 
 // ─── Construtores de resposta ────────────────────────────────────────────
 
-function buildAgendarReply({ greeting, settings, customer, pet, services, text, history }) {
+function buildAgendarReply({ greeting, settings, customer, pet, services, text, history, availableSlots = null }) {
   const servico = detectServico(text);
   const data = detectData(text);
   const hora = detectHora(text);
@@ -159,6 +159,15 @@ function buildAgendarReply({ greeting, settings, customer, pet, services, text, 
   const servicoEncontrado = servico
     ? services.find((s) => normalizeSearchable(s.name).includes(servico.replace("_", " ")))
     : null;
+
+  // Slots reais carregados pelo runtime — se tem, prefere usar em vez de
+  // perguntar genericamente "que horario voce prefere?". Fluxo manha/tarde
+  // OBRIGATORIO no fallback de keywords.
+  const slotsList = Array.isArray(availableSlots?.slots) ? availableSlots.slots : null;
+  const hasPeriod = Boolean(availableSlots?.periodExplicit && availableSlots?.queryPeriod);
+  const dayLabel = availableSlots?.queryPeriod
+    ? `${availableSlots?.dayLabel || data || ""}`.trim()
+    : "";
 
   // tem servico + data + hora → propoe confirmacao
   if (servico && data && hora) {
@@ -173,18 +182,38 @@ function buildAgendarReply({ greeting, settings, customer, pet, services, text, 
     return variants[Math.floor(Math.random() * variants.length)];
   }
 
+  // Cliente deu dia + período → mostrar os slots reais daquele período
+  if (slotsList && slotsList.length > 0 && hasPeriod) {
+    const periodLbl = availableSlots.queryPeriod === "manha" ? "de manhã" : availableSlots.queryPeriod === "tarde" ? "à tarde" : "à noite";
+    const dataLbl = data || "esse dia";
+    const lista = slotsList.length === 1
+      ? `${slotsList[0]}`
+      : `${slotsList.slice(0, -1).join(", ")} e ${slotsList.slice(-1)[0]}`;
+    return `${greeting} Pra ${dataLbl} ${periodLbl} eu tenho ${lista}. Qual desses fica melhor pra você? 🐾`;
+  }
+
+  // Cliente deu dia + período mas não tem horário livre
+  if (slotsList && slotsList.length === 0 && hasPeriod) {
+    const periodLbl = availableSlots.queryPeriod === "manha" ? "de manhã" : availableSlots.queryPeriod === "tarde" ? "à tarde" : "à noite";
+    const outroPeriodo = availableSlots.queryPeriod === "manha" ? "à tarde" : "de manhã";
+    return `${greeting} Poxa, pra ${data || "esse dia"} ${periodLbl} não tenho mais horário livre 😔 Posso ver ${outroPeriodo} ou outro dia pra você?`;
+  }
+
   if (servico && data && !hora) {
+    // Mudou: ANTES perguntava "qual horario das X às Y" — agora pergunta
+    // PERIODO primeiro (manha/tarde), e depois traz os slots reais.
     const variants = [
-      `${greeting} Beleza, ${servico.replace("_", " e ")} no dia ${data}. Que horário fica melhor pra você? A gente atende das ${opening} às ${closing}.`,
-      `${greeting} Anotado, ${servico.replace("_", " e ")} ${data}. Qual horário você prefere? Estamos das ${opening} às ${closing}.`,
+      `${greeting} Beleza, ${servico.replace("_", " e ")} no dia ${data}. Você prefere de manhã ou de tarde? 😊`,
+      `${greeting} Anotado, ${servico.replace("_", " e ")} ${data}. Pra você fica melhor de manhã ou à tarde?`,
+      `${greeting} ${servico.replace("_", " e ")} ${data} — pode ser de manhã ou de tarde?`,
     ];
     return variants[Math.floor(Math.random() * variants.length)];
   }
 
   if (servico && !data) {
     const variants = [
-      `${greeting} Claro! Pra quando você quer marcar o ${servico.replace("_", " e ")}${pet?.name ? ` do ${pet.name}` : ""}?`,
-      `${greeting} Vamos lá! ${servico.replace("_", " e ")}${pet?.name ? ` para o ${pet.name}` : ""}, qual dia e horário fica bom?`,
+      `${greeting} Claro! Pra quando você quer marcar o ${servico.replace("_", " e ")}${pet?.name ? ` do ${pet.name}` : ""}? Pode ser amanhã ou no sábado, por exemplo 😊`,
+      `${greeting} Vamos lá! ${servico.replace("_", " e ")}${pet?.name ? ` para o ${pet.name}` : ""} — qual dia fica melhor pra você?`,
     ];
     return variants[Math.floor(Math.random() * variants.length)];
   }
@@ -287,14 +316,14 @@ function buildIndefinidoReply({ greeting, services, history, pet, customer }) {
 
 // ─── Builder principal: roteia para o construtor certo ───────────────────
 
-function buildReply({ question, services, settings, customer, pet, history, identifyAsAi }) {
+function buildReply({ question, services, settings, customer, pet, history, identifyAsAi, availableSlots = null }) {
   const text = String(question || "");
   const greeting = pickGreeting(customer?.name);
   const intent = detectIntent(text);
 
   switch (intent) {
     case "agendar":
-      return buildAgendarReply({ greeting, settings, customer, pet, services, text, history });
+      return buildAgendarReply({ greeting, settings, customer, pet, services, text, history, availableSlots });
     case "preco":
       return buildPrecoReply({ greeting, services, customer, pet, text });
     case "horario":
@@ -348,6 +377,16 @@ REGRAS DE OURO (nunca quebre):
 
 COLETA DE DADOS PRA AGENDAR (perguntar aos poucos, no fluxo, NUNCA tudo de uma vez):
 nome do tutor, telefone (se faltar), nome do pet, espécie/porte, raça (se relevante), serviço, data, horário, busca e entrega, observações.
+
+🕐 FLUXO OBRIGATÓRIO DE HORÁRIO (NUNCA pule etapas):
+1. Cliente disse que quer agendar (ex.: "quero marcar banho", "tem horário?", "quero agendar"): primeiro confirme o SERVIÇO e o PET se ainda não tem.
+2. Depois pergunte SEMPRE PRIMEIRO O DIA: "Pra qual dia você quer marcar?" (sugira 1-2 opções: "amanhã ou no sábado?").
+3. Em seguida pergunte O PERÍODO: "E prefere DE MANHÃ ou DE TARDE?". Use SEMPRE essas duas palavras — manhã (das 8h às 12h) ou tarde (das 12h às 18h). Só ofereça "noite" se o cliente perguntar.
+4. SÓ DEPOIS de saber dia + período, mostre os horários REAIS que o sistema injetou em "HORÁRIOS LIVRES NA AGENDA". NUNCA invente horários e NUNCA mostre os dois períodos juntos — o cliente escolheu manhã, mostra só manhã.
+5. Se a lista de horários estiver vazia: "Pra esse dia/período não tenho mais horário livre 😔 Quer que eu veja outro dia ou o outro período?" — ofereça alternativa concreta.
+6. Quando cliente escolher o horário, REPITA tudo pra confirmar: "Confere: Pet [X] / Serviço [Y] / [DIA] às [HORA]. Posso confirmar?" — só depois cria o agendamento.
+
+NUNCA faça: oferecer horário antes de saber o período, listar manhã+tarde junto, inventar horário fora da lista, agendar sem confirmação explícita do cliente.
 
 CLIENTE JÁ CADASTRADO:
 - 1 pet → "Encontrei o cadastro do [Nome] 😊 É pra ele mesmo?"
@@ -973,7 +1012,11 @@ async function generateGroqReply({
     // 0.4 deixava a IA previsível demais ("Show!... Posso confirmar?" em loop).
     // 0.7 mantém coerência mas dá espontaneidade humana.
     temperature: 0.7,
-    maxTokens: 600,
+    // 1200 (era 600): com jsonMode=true o envelope {"reply":"...","action":{...}}
+    // estoura facil quando a IA monta um create_appointment com pet/serviço/data.
+    // Resposta cortada no meio = JSON truncado = parse falha = mensagem zumbi
+    // pro cliente. 1200 dá folga sem custo relevante (8B é gratis até 30k/min).
+    maxTokens: 1200,
     jsonMode: true, // forca resposta em JSON valido
   });
   return result.content;
@@ -1006,11 +1049,35 @@ function parseAiReply(rawContent) {
         };
       }
     } catch (_) {
-      // Cai no fallback
+      // JSON truncado por max_tokens — tenta recuperar so a string "reply".
+      // Padrao: "reply"\s*:\s*"...conteudo..."  (com escapes \" e \n no meio).
+      // Pega tudo ate a primeira aspas-nao-escapada de fechamento OU ate o fim
+      // (caso o JSON tenha sido cortado no meio da string da reply).
+      const replyMatch = jsonText.match(/"reply"\s*:\s*"((?:\\.|[^"\\])*)"?/);
+      if (replyMatch && replyMatch[1]) {
+        const recovered = replyMatch[1]
+          .replace(/\\"/g, '"')
+          .replace(/\\n/g, "\n")
+          .replace(/\\\\/g, "\\")
+          .trim();
+        if (recovered) {
+          console.warn(`[CrmAutoReply] JSON truncado recuperado: "${recovered.slice(0, 60)}..."`);
+          return { reply: recovered, action: null };
+        }
+      }
     }
   }
 
-  // Fallback: o texto inteiro e a resposta (sem acao)
+  // Ultimo recurso: o texto vira a resposta — mas se PARECE JSON cru
+  // (comeca com "{"reply":"), nao mostra isso pro cliente. Devolve generico.
+  const looksLikeRawJson = /^\s*\{\s*"reply"/.test(text);
+  if (looksLikeRawJson) {
+    console.warn("[CrmAutoReply] Resposta veio como JSON cru irrecuperavel — devolvendo generico.");
+    return {
+      reply: "Oi! 😊 Pode me confirmar de novo, por favor? Quero garantir que entendi direitinho o que voce precisa.",
+      action: null,
+    };
+  }
   return { reply: text.replace(/```json|```/g, "").trim(), action: null };
 }
 
@@ -1405,11 +1472,23 @@ async function escalateConversation({ conversation, customer, body, trigger, use
 async function canAutoReply(usersId) {
   const settings = await Settings.findOne({ where: { usersId } });
   const aiControl = settings?.whatsappConnection?.crmAiControl;
-  if (!aiControl?.enabled) return { ok: false, reason: "ai_disabled", settings };
-  if (!aiControl?.autoReplyEnabled) return { ok: false, reason: "auto_reply_disabled", settings };
+  const tag = `[CrmAutoReply] user=${String(usersId).slice(0, 8)}`;
+  if (!aiControl) {
+    console.warn(`${tag} BLOQUEIO: aiControl ausente no Settings.whatsappConnection (painel nunca foi salvo). Abra o painel da IA e clique em salvar.`);
+    return { ok: false, reason: "ai_control_missing", settings };
+  }
+  if (!aiControl?.enabled) {
+    console.warn(`${tag} BLOQUEIO: aiControl.enabled=false. Ative a IA no painel.`);
+    return { ok: false, reason: "ai_disabled", settings };
+  }
+  if (!aiControl?.autoReplyEnabled) {
+    console.warn(`${tag} BLOQUEIO: aiControl.autoReplyEnabled=false. Ative "responder automaticamente" no painel.`);
+    return { ok: false, reason: "auto_reply_disabled", settings };
+  }
 
   const sub = await CrmAiSubscription.findOne({ where: { user_id: usersId } });
   if (!sub || sub.status !== "active") {
+    console.warn(`${tag} BLOQUEIO: CrmAiSubscription ${sub ? `status="${sub.status}"` : "inexistente"}. Renove a assinatura da IA.`);
     return { ok: false, reason: "no_active_subscription", settings };
   }
   return { ok: true, settings, aiControl };
@@ -1629,6 +1708,12 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
 
   let executedAction = null;
 
+  if (!groqApiKey) {
+    console.warn(
+      `[CrmAutoReply] user=${String(usersId).slice(0, 8)} SEM GROQ_API_KEY — IA respondendo em modo FALLBACK (keywords). Respostas serao curtas e repetitivas. Configure aiControl.groqApiKey no painel OU defina GROQ_API_KEY no env do Render.`,
+    );
+  }
+
   if (groqApiKey) {
     try {
       const rawContent = await generateGroqReply({
@@ -1715,6 +1800,7 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
       pet,
       history: histForFallback,
       identifyAsAi,
+      availableSlots,
     });
     aiSource = "keywords";
   }

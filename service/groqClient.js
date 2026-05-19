@@ -67,15 +67,26 @@ export async function groqChat({
     }
 
     const data = await response.json();
-    const content = data?.choices?.[0]?.message?.content || "";
+    const choice = data?.choices?.[0] || {};
+    const content = choice?.message?.content || "";
+    const finishReason = choice?.finish_reason || null;
+    // Aviso visivel quando o modelo cortou no meio por limite de tokens.
+    // Isso causa JSON truncado quando jsonMode=true e resposta partida pro
+    // usuario. Quem chamou deve aumentar maxTokens ou encurtar o prompt.
+    if (finishReason === "length") {
+      console.warn(
+        `[Groq] finish_reason=length — resposta CORTADA por max_tokens=${maxTokens} (modelo=${data?.model || model}). Aumente maxTokens ou diminua o contexto.`,
+      );
+    }
     return {
       content: String(content).trim(),
       usage: data?.usage || null,
       model: data?.model || model,
+      finishReason,
     };
   } catch (err) {
     if (err.name === "AbortError") {
-      throw new Error("Groq: timeout (12s)");
+      throw new Error(`Groq: timeout (${Math.round(DEFAULT_TIMEOUT_MS / 1000)}s)`);
     }
     throw err;
   } finally {

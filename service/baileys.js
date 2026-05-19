@@ -660,6 +660,20 @@ class BaileysService {
         `Não conectado ao WhatsApp (status: ${this.connectionStatus})`
       );
     }
+    // Socket pode estar marcado "connected" mas com o WS caido (Baileys nao
+    // dispara connection.update consistente em todos os erros). Detecta esse
+    // estado zumbi antes de enviar.
+    if (!this.sock || typeof this.sock.sendMessage !== "function") {
+      this.connectionStatus = "disconnected";
+      throw new Error("Sessão WhatsApp expirou (socket caiu). Reconecte escaneando o QR de novo.");
+    }
+    const wsState = this.sock?.ws?.readyState;
+    // ws.readyState: 0=CONNECTING, 1=OPEN, 2=CLOSING, 3=CLOSED.
+    if (wsState !== undefined && wsState !== 1) {
+      console.warn(`[Baileys SEND] WS readyState=${wsState} (esperado 1=OPEN). Marcando desconectado e abortando.`);
+      this.connectionStatus = "disconnected";
+      throw new Error("Conexão WhatsApp caiu silenciosamente. Reconecte escaneando o QR.");
+    }
 
     try {
       this.enforceRateLimit();
@@ -690,11 +704,14 @@ class BaileysService {
         }
       }
       console.log(`[Baileys SEND] target=${target} text="${String(text).slice(0, 40)}"`);
-      console.log(`[Baileys SEND] target=${target} text="${String(text).slice(0, 40)}"`);
-      const result = await this.sock.sendMessage(target, {
-        text,
-        ...options,
-      });
+
+      // Timeout duro: se sock.sendMessage ficar penjando (caso conhecido em
+      // sessoes zumbi), aborta em 15s e retorna erro claro pro usuario.
+      const sendPromise = this.sock.sendMessage(target, { text, ...options });
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Envio travou (timeout 15s) — sessão WhatsApp pode ter caído. Reconecte o QR.")), 15000),
+      );
+      const result = await Promise.race([sendPromise, timeoutPromise]);
 
       this.messageTimestamps.push(Date.now());
       await this.updateHealthMetrics();

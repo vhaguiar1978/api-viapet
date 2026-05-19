@@ -178,12 +178,18 @@ export function detectScheduleQuery(message) {
     .replace(/[!?.,;]/g, " ")
     .replace(/\s+/g, " ");
 
-  // Palavras-chave que indicam pedido de horário/disponibilidade
+  // Palavras-chave que indicam pedido de horário/disponibilidade.
+  // Lista intencionalmente AMPLA pra disparar o fluxo de slots/período em
+  // qualquer mensagem que sinalize intenção de agendar — assim a IA SEMPRE
+  // pode oferecer manhã/tarde com horários reais em vez de texto genérico.
   const SCHEDULE_KEYWORDS = [
-    "horario", "horarios", "vaga", "vagas", "agenda", "agendar",
+    "horario", "horarios", "vaga", "vagas", "agenda", "agendar", "agendamento",
     "disponivel", "disponivelidade", "disponibilidade", "disponiveis",
-    "marcar", "marca", "encaixe", "encaixar", "encaixa",
+    "marcar", "marca", "marca pra", "marca pro", "encaixe", "encaixar", "encaixa",
     "tem hoje", "tem amanha", "tem como", "consegue", "tem lugar",
+    "quero agendar", "quero marcar", "queria marcar", "queria agendar",
+    "posso marcar", "posso agendar", "da pra marcar", "da pra agendar",
+    "banho", "tosa", "hidratacao", "pacotinho",
   ];
   const PERIOD_KEYWORDS = ["manha", "tarde", "noite", "manhazinha", "tardinha"];
   const DAY_KEYWORDS = [
@@ -200,14 +206,20 @@ export function detectScheduleQuery(message) {
 
   // Resolve data
   const nowSp = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
-  let targetDate = nowSp;
+  // Default: se cliente não disse dia, usa AMANHÃ (não hoje) — evita propor
+  // horários quase passados e dá uma resposta útil pra IA processar/oferecer.
+  let targetDate = new Date(nowSp.getTime() + 86400000);
+  let dateExplicit = false;
 
   if (m.includes("depois de amanha")) {
     targetDate = new Date(nowSp.getTime() + 2 * 86400000);
+    dateExplicit = true;
   } else if (m.includes("amanha")) {
     targetDate = new Date(nowSp.getTime() + 86400000);
+    dateExplicit = true;
   } else if (m.includes("hoje")) {
     targetDate = nowSp;
+    dateExplicit = true;
   } else {
     // Dia da semana ("sabado", "segunda"…) → próximo dia que cair nesse weekday
     for (const [word, dow] of Object.entries(PT_WEEK_DAYS)) {
@@ -216,6 +228,7 @@ export function detectScheduleQuery(message) {
         let delta = dow - todayDow;
         if (delta <= 0) delta += 7; // sempre próximo, não passado
         targetDate = new Date(nowSp.getTime() + delta * 86400000);
+        dateExplicit = true;
         break;
       }
     }
@@ -232,5 +245,7 @@ export function detectScheduleQuery(message) {
   return {
     date: targetDate.toISOString().slice(0, 10),
     period,
+    dateExplicit,
+    periodExplicit: Boolean(periodHit),
   };
 }
