@@ -393,7 +393,14 @@ router.post("/webhook", async (req, res) => {
   try {
     console.log("🔔 Webhook recebido:", req.body);
 
-    // Validar webhook
+    const body = req.body || {};
+    const isEmptyPing = !body.action && !body.data && !body.type && !body.resource && !body.topic;
+
+    if (isEmptyPing) {
+      console.log("ℹ️ Webhook ping vazio (provavelmente simulacao do painel MP). Respondendo 200 sem processar.");
+      return res.status(200).json({ received: true, processed: false, reason: "empty_payload_ping" });
+    }
+
     if (!(await validateWebhookSignature(req))) {
       console.error("❌ Assinatura inválida");
       return res.status(401).json({ error: "Unauthorized" });

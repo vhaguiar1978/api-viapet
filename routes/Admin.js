@@ -396,11 +396,17 @@ router.get("/public/site-contact", async (_req, res) => {
 router.get("/settings/admin", adminMiddleware, async (req, res) => {
   try {
     const settings = await getOrCreateAdminSettings();
+    const raw = settings.toJSON();
+    const token = raw.mercadoPagoAccessToken || "";
 
-    // Retorna os dados sem a senha
     const settingsData = {
-      ...settings.toJSON(),
-      smtpPassword: settings.smtpPassword ? "********" : null, // Mascara a senha se existir
+      ...raw,
+      smtpPassword: settings.smtpPassword ? "********" : null,
+      mercadoPagoAccessToken: undefined,
+      mercadoPagoAccessTokenSet: Boolean(token),
+      mercadoPagoAccessTokenMasked: token
+        ? `${token.slice(0, 14)}…${token.slice(-6)}`
+        : null,
     };
 
     return res.status(200).json({
@@ -413,6 +419,122 @@ router.get("/settings/admin", adminMiddleware, async (req, res) => {
       message: "Erro no servidor",
       error: error.message,
     });
+  }
+});
+
+async function fetchMercadoPagoOwner(token) {
+  const response = await fetch("https://api.mercadopago.com/users/me", {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(`Token rejeitado pelo Mercado Pago (HTTP ${response.status}): ${body.slice(0, 120)}`);
+  }
+  const j = await response.json();
+  return {
+    id: j.id,
+    nickname: j.nickname,
+    firstName: j.first_name,
+    lastName: j.last_name,
+    email: j.email,
+    countryId: j.country_id,
+    accountType: j?.status?.mercadopago_account_type || null,
+    billingAllowed: Boolean(j?.status?.billing?.allow),
+    confirmedEmail: Boolean(j?.status?.confirmed_email),
+    siteStatus: j?.status?.site_status || null,
+  };
+}
+
+router.get("/admin/mercado-pago/current", adminMiddleware, async (_req, res) => {
+  try {
+    const settings = await getOrCreateAdminSettings();
+    const dbToken = settings.mercadoPagoAccessToken || "";
+    const envToken = process.env.MERCADO_PAGO_ACCESS_TOKEN || "";
+    const activeToken = dbToken || envToken;
+    const source = dbToken ? "database" : envToken ? "env" : "none";
+
+    if (!activeToken) {
+      return res.status(200).json({
+        data: { source, configured: false, owner: null, environment: null, masked: null },
+      });
+    }
+
+    const environment = activeToken.startsWith("TEST-")
+      ? "sandbox"
+      : activeToken.startsWith("APP_USR-")
+        ? "production"
+        : "unknown";
+    const masked = `${activeToken.slice(0, 14)}…${activeToken.slice(-6)}`;
+
+    let owner = null;
+    let error = null;
+    try {
+      owner = await fetchMercadoPagoOwner(activeToken);
+    } catch (err) {
+      error = err.message;
+    }
+
+    return res.status(200).json({
+      data: { source, configured: true, owner, environment, masked, error },
+    });
+  } catch (error) {
+    console.error("Erro ao consultar conta MP atual:", error);
+    return res.status(500).json({ message: "Erro no servidor", error: error.message });
+  }
+});
+
+router.post("/admin/mercado-pago/save-token", adminMiddleware, async (req, res) => {
+  try {
+    const { token } = req.body || {};
+    const trimmed = String(token || "").trim();
+
+    if (!trimmed) {
+      return res.status(400).json({ message: "Token vazio. Cole o Access Token do Mercado Pago." });
+    }
+
+    if (!trimmed.startsWith("APP_USR-") && !trimmed.startsWith("TEST-")) {
+      return res.status(400).json({
+        message: "Formato invalido. O Access Token deve comecar com APP_USR- (producao) ou TEST- (sandbox).",
+      });
+    }
+
+    let owner;
+    try {
+      owner = await fetchMercadoPagoOwner(trimmed);
+    } catch (err) {
+      return res.status(400).json({
+        message: "Mercado Pago rejeitou o token. Verifique se copiou o Access Token correto.",
+        error: err.message,
+      });
+    }
+
+    const settings = await getOrCreateAdminSettings();
+    settings.mercadoPagoAccessToken = trimmed;
+    await settings.save();
+
+    return res.status(200).json({
+      message: "Token Mercado Pago salvo com sucesso.",
+      data: {
+        owner,
+        environment: trimmed.startsWith("TEST-") ? "sandbox" : "production",
+        masked: `${trimmed.slice(0, 14)}…${trimmed.slice(-6)}`,
+      },
+    });
+  } catch (error) {
+    console.error("Erro ao salvar token MP:", error);
+    return res.status(500).json({ message: "Erro no servidor", error: error.message });
+  }
+});
+
+router.delete("/admin/mercado-pago/token", adminMiddleware, async (_req, res) => {
+  try {
+    const settings = await getOrCreateAdminSettings();
+    settings.mercadoPagoAccessToken = null;
+    await settings.save();
+    return res.status(200).json({ message: "Token removido. Sistema voltou ao fallback de variavel de ambiente." });
+  } catch (error) {
+    console.error("Erro ao remover token MP:", error);
+    return res.status(500).json({ message: "Erro no servidor", error: error.message });
   }
 });
 
