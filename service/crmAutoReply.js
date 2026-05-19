@@ -564,10 +564,10 @@ Reposta sugerida: "Poxa, pra ${dateLabel.toLowerCase()}${periodLabel} ${reasonHi
   const playbookSection = playbook.length > 0
     ? "\n📚 PLAYBOOK DO DONO (exemplos de como responder em situacoes especificas):\n" +
       playbook
-        .slice(-15)
+        .slice(-6) // 15 → 6: TPM-aware. Ultimos 6 exemplos sao os mais novos.
         .map((m, i) => {
           const who = m.role === "assistant" ? "VOCE responde" : "Cliente diz";
-          return `[${i + 1}] ${who}: ${String(m.text).slice(0, 300)}`;
+          return `[${i + 1}] ${who}: ${String(m.text).slice(0, 180)}`;
         })
         .join("\n")
     : "";
@@ -615,8 +615,10 @@ Reposta sugerida: "Poxa, pra ${dateLabel.toLowerCase()}${periodLabel} ${reasonHi
   // Lista de servicos da ESPECIALIDADE (banho/tosa/hidratacao) com IDs.
   // A IA SO atende esses. Os outros (clinica/vacinas) sao listados em separado
   // SO para a IA saber que existem — mas ela NAO agenda, encaminha pra humano.
+  // Limite reduzido de 40 → 12 (TPM Groq 6k era estourado por prompts grandes;
+  // services ja vem ordenado por relevancia, top 12 cobrem o caso quase sempre).
   const servicesList = specialtyServices
-    .slice(0, 40)
+    .slice(0, 12)
     .map((s) => {
       const price = s.price != null && Number(s.price) > 0
         ? ` (R$ ${Number(s.price).toFixed(2)})`
@@ -627,12 +629,13 @@ Reposta sugerida: "Poxa, pra ${dateLabel.toLowerCase()}${periodLabel} ${reasonHi
 
   // Servicos fora da especialidade (so para informar que existem, sem ID)
   const nonSpecialtyList = otherServices
-    .slice(0, 15)
+    .slice(0, 5)
     .map((s) => `- ${s.name}`)
     .join("\n");
 
-  // Lista de produtos relevantes (so se a mensagem mencionar algo)
-  const productsList = products.slice(0, 20).map((p) => {
+  // Lista de produtos relevantes (so se a mensagem mencionar algo).
+  // 20 → 6: products ja vem filtrado por score>0 (so com match), top 6 basta.
+  const productsList = products.slice(0, 6).map((p) => {
     const price = p.price != null && Number(p.price) > 0
       ? ` (R$ ${Number(p.price).toFixed(2)})`
       : "";
@@ -744,15 +747,15 @@ ${nonSpecialtyList ? `SERVICOS QUE A LOJA TEM MAS VOCE NAO AGENDA (encaminha pra
 ${productsList ? `PRODUTOS NA LOJA:\n${productsList}\n` : ""}
 ${(Array.isArray(knowledgeBase) && knowledgeBase.length > 0) ? `
 📚 BASE DE CONHECIMENTO DA LOJA (manual oficial do dono — use como VERDADE ABSOLUTA. Cite esses dados quando o cliente perguntar):
-${knowledgeBase.slice(0, 20).map((k, i) => `[${i + 1}] ${String(k.title || "").slice(0, 80)}: ${String(k.content || "").slice(0, 400)}`).join("\n")}
+${knowledgeBase.slice(0, 6).map((k, i) => `[${i + 1}] ${String(k.title || "").slice(0, 60)}: ${String(k.content || "").slice(0, 200)}`).join("\n")}
 ` : ""}
 
 CONTEXTO DO CLIENTE ATUAL:
 - ${customerInfo}
 ${petInfo}
 ${upcomingList ? `\nAgendamentos futuros deste cliente:\n${upcomingList}` : ""}
-${(Array.isArray(customerNotes) && customerNotes.length > 0) ? `\n📌 ANOTACOES SOBRE ESTE CLIENTE (MEMORIA DA IA — leve em conta sempre):\n${customerNotes.slice(0, 10).map((n, i) => `${i + 1}. ${String(n.note || "").slice(0, 300)}`).join("\n")}` : ""}
-${conversationSummary ? `\n📝 RESUMO DA CONVERSA ATE AGORA (mensagens antigas resumidas — use como contexto):\n${String(conversationSummary).slice(0, 1200)}` : ""}
+${(Array.isArray(customerNotes) && customerNotes.length > 0) ? `\n📌 ANOTACOES SOBRE ESTE CLIENTE (MEMORIA DA IA — leve em conta sempre):\n${customerNotes.slice(0, 4).map((n, i) => `${i + 1}. ${String(n.note || "").slice(0, 200)}`).join("\n")}` : ""}
+${conversationSummary ? `\n📝 RESUMO DA CONVERSA ATE AGORA (mensagens antigas resumidas — use como contexto):\n${String(conversationSummary).slice(0, 600)}` : ""}
 
 ${pets && pets.length > 1 ? `🐾 Este cliente tem ${pets.length} pets. ANTES de agendar/remarcar, identifique qual pet pelo NOME (pergunte se nao for claro).` : ""}
 ${pets && pets.length === 1 ? `Cliente tem 1 pet (${pets[0].name}). Pode usar direto, sem perguntar qual.` : ""}
@@ -878,7 +881,9 @@ async function buildHistoryMessages(conversationId, limit = 30) {
       .filter((m) => String(m.body || "").trim().length > 0)
       .map((m) => ({
         role: m.direction === "outbound" ? "assistant" : "user",
-        content: String(m.body || "").slice(0, 800), // mais contexto por mensagem
+        // 800 → 250: economia direta no TPM. Mensagens de WhatsApp tipicamente
+        // tem <100 chars; 250 cobre 99% sem cortar nada util.
+        content: String(m.body || "").slice(0, 250),
       }));
   } catch (_) {
     return [];
@@ -975,27 +980,41 @@ async function generateGroqReply({
   conversation,
   body,
 }) {
-  const systemPrompt = buildSystemPrompt({
+  const buildPrompt = (compact) => buildSystemPrompt({
     settings,
     aiControl,
-    services,
-    products,
+    // Em modo compact, corta agressivo: top 5 services, sem products, sem KB,
+    // sem playbook, sem notes. Usado no retry quando Groq estoura TPM.
+    services: compact ? services.slice(0, 5) : services,
+    products: compact ? [] : products,
     customer,
     pet,
     pets,
-    upcomingAppointments,
-    customerNotes,
-    conversationSummary,
-    knowledgeBase,
+    upcomingAppointments: compact ? [] : upcomingAppointments,
+    customerNotes: compact ? [] : customerNotes,
+    conversationSummary: compact ? null : conversationSummary,
+    knowledgeBase: compact ? [] : knowledgeBase,
     lastVisit,
     availableSlots,
   });
-  const history = await buildHistoryMessages(conversation?.id, 8);
+  let systemPrompt = buildPrompt(false);
+  // History 8 → 4: encaixa no TPM 6k. Conversa longa fica preservada pelo
+  // conversationSummary (gerado quando >20 msgs).
+  const history = await buildHistoryMessages(conversation?.id, 4);
   const lastUserMessage = history[history.length - 1];
   if (!lastUserMessage || lastUserMessage.role !== "user" || lastUserMessage.content !== body) {
-    history.push({ role: "user", content: String(body || "").slice(0, 500) });
+    history.push({ role: "user", content: String(body || "").slice(0, 250) });
   }
-  const messages = [{ role: "system", content: systemPrompt }, ...history];
+  let messages = [{ role: "system", content: systemPrompt }, ...history];
+
+  // Log de tamanho aproximado (1 token ~ 4 chars). Util pra monitorar se
+  // alguma loja com lista de servicos enorme estoura o TPM da conta Groq.
+  const approxTokens = Math.round(
+    messages.reduce((acc, m) => acc + (m.content?.length || 0), 0) / 4,
+  );
+  if (approxTokens > 4500) {
+    console.warn(`[CrmAutoReply] Prompt grande (~${approxTokens} tokens). Risco de 413 se TPM da conta Groq for baixo.`);
+  }
 
   // Híbrido: escolhe 70B em casos sensíveis, 8B no atendimento padrão.
   const useSmart = shouldUseSmartModel({ body, aiControl, history, customer, lastVisit });
@@ -1004,21 +1023,43 @@ async function generateGroqReply({
     console.log(`[CrmAutoReply] Usando modelo SMART (${chosenModel}) — caso sensível detectado`);
   }
 
-  const result = await groqChat({
-    apiKey,
-    model: chosenModel,
-    messages,
-    // Temperature 0.7 (era 0.4) = respostas com mais variação e naturalidade.
-    // 0.4 deixava a IA previsível demais ("Show!... Posso confirmar?" em loop).
-    // 0.7 mantém coerência mas dá espontaneidade humana.
-    temperature: 0.7,
-    // 1200 (era 600): com jsonMode=true o envelope {"reply":"...","action":{...}}
-    // estoura facil quando a IA monta um create_appointment com pet/serviço/data.
-    // Resposta cortada no meio = JSON truncado = parse falha = mensagem zumbi
-    // pro cliente. 1200 dá folga sem custo relevante (8B é gratis até 30k/min).
-    maxTokens: 1200,
-    jsonMode: true, // forca resposta em JSON valido
-  });
+  let result;
+  try {
+    result = await groqChat({
+      apiKey,
+      model: chosenModel,
+      messages,
+      // Temperature 0.7 (era 0.4) = respostas com mais variação e naturalidade.
+      // 0.4 deixava a IA previsível demais ("Show!... Posso confirmar?" em loop).
+      // 0.7 mantém coerência mas dá espontaneidade humana.
+      temperature: 0.7,
+      // 1200 (era 600): com jsonMode=true o envelope {"reply":"...","action":{...}}
+      // estoura facil quando a IA monta um create_appointment com pet/serviço/data.
+      // Resposta cortada no meio = JSON truncado = parse falha = mensagem zumbi
+      // pro cliente. 1200 dá folga sem custo relevante (8B é gratis até 30k/min).
+      maxTokens: 1200,
+      jsonMode: true, // forca resposta em JSON valido
+    });
+  } catch (firstErr) {
+    // Retry com prompt COMPACT em caso de 413 (request too large) ou de TPM.
+    // Conta Groq pode ter TPM baixo (6k em vez de 30k); ai compact corta
+    // services/products/KB/notes e geralmente cabe na metade do budget.
+    const msg = String(firstErr?.message || "");
+    const isTooBig = msg.includes("413") || msg.includes("too large") || msg.includes("tokens per minute");
+    if (!isTooBig) throw firstErr;
+    console.warn(`[CrmAutoReply] Groq estourou TPM/tamanho (${msg.slice(0, 100)}). Tentando de novo em modo COMPACT.`);
+    systemPrompt = buildPrompt(true);
+    messages = [{ role: "system", content: systemPrompt }, ...history];
+    result = await groqChat({
+      apiKey,
+      model: chosenModel,
+      messages,
+      temperature: 0.7,
+      maxTokens: 1200,
+      jsonMode: true,
+    });
+    console.log("[CrmAutoReply] Retry COMPACT funcionou.");
+  }
   return result.content;
 }
 
