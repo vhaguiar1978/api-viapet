@@ -66,8 +66,14 @@ export async function computeMRR() {
 
   // Fallback: IA CRM legado (CrmAiSubscription) — só conta o que não tem
   // contrapartida em client_addons para o mesmo user.
+  // IMPORTANTE: exclui cortesias (manual_free, manual_trial, free) — esses nao
+  // geram receita recorrente, mesmo que tenham amount > 0 por historico.
   const legacyIaActive = await CrmAiSubscription.findAll({
-    where: { status: "active" },
+    where: {
+      status: "active",
+      payment_status: { [Op.notIn]: ["manual_free", "manual_trial", "free"] },
+      amount: { [Op.gt]: 0 },
+    },
     attributes: ["user_id", "amount"],
     raw: true,
   });
