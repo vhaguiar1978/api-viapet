@@ -200,10 +200,28 @@ function buildAgendarReply({ greeting, settings, customer, pet, services, text, 
   }
 
   if (servico && data && !hora) {
-    // Mudou: ANTES perguntava "qual horario das X às Y" — agora pergunta
-    // PERIODO primeiro (manha/tarde), e depois traz os slots reais.
+    // PERIODO-AWARE: se cliente pediu HOJE e a manha ja passou, NAO oferece
+    // manha (seria perguntar algo impossivel). Hora atual em SP.
+    const nowSp = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
+    const hourSp = nowSp.getHours();
+    const isToday = String(data || "").toLowerCase() === "hoje";
+
+    if (isToday && hourSp >= 17) {
+      // Hoje ja encerrou ou ta no fim — pula direto pra amanha
+      return `${greeting} Pra hoje já não consigo mais encaixar 😔 Posso te marcar amanhã de manhã ou à tarde — qual prefere?`;
+    }
+    if (isToday && hourSp >= 11) {
+      // Manha de hoje ja passou — oferece SO tarde
+      const variants = [
+        `${greeting} Beleza, ${servico.replace("_", " e ")} hoje. Pra hoje só consigo à tarde — que horas fica bom pra você?`,
+        `${greeting} ${servico.replace("_", " e ")} hoje à tarde então. Qual horário te atende?`,
+      ];
+      return variants[Math.floor(Math.random() * variants.length)];
+    }
+
+    // Caso geral (dia futuro, ou hoje cedinho): pergunta periodo normal
     const variants = [
-      `${greeting} Beleza, ${servico.replace("_", " e ")} no dia ${data}. Você prefere de manhã ou de tarde? 😊`,
+      `${greeting} Beleza, ${servico.replace("_", " e ")} ${data}. Você prefere de manhã ou de tarde? 😊`,
       `${greeting} Anotado, ${servico.replace("_", " e ")} ${data}. Pra você fica melhor de manhã ou à tarde?`,
       `${greeting} ${servico.replace("_", " e ")} ${data} — pode ser de manhã ou de tarde?`,
     ];
@@ -716,6 +734,10 @@ PERSONA E TOM:
 - Tarde (12h-18h): "${timeGreeting}!" / "Oi, ${timeGreeting.toLowerCase()}!"
 - Noite (18h-5h): "${timeGreeting}!" / "Oi, ${timeGreeting.toLowerCase()}!"
 - AGORA é "${timeGreeting}" — NUNCA diga "Bom dia" à tarde nem "Boa tarde" de manhã. Erro clássico de bot, atendente humana NUNCA faz isso.
+
+🚫 REGRA DE PERÍODO HOJE (CRÍTICA — agora são ${String(hourSp).padStart(2, "0")}h em SP):
+${hourSp < 11 ? `- HOJE pode ser de manhã OU de tarde. Pergunte normalmente "manhã ou tarde?".` : ""}${hourSp >= 11 && hourSp < 17 ? `- HOJE A MANHÃ JÁ PASSOU. Se cliente pediu HOJE, NUNCA ofereça "de manhã ou de tarde" — ofereça SÓ tarde: "Pra hoje só tenho à tarde. Que horas fica bom?". Se cliente insistir em manhã hoje, diga: "Pra manhã hoje já não dá, mas posso ver amanhã de manhã ou hoje à tarde — o que prefere?".` : ""}${hourSp >= 17 ? `- HOJE JÁ ENCERROU/QUASE. Se cliente pediu HOJE, NÃO ofereça nenhum período de hoje — diga: "Pra hoje já não consigo mais, mas posso te encaixar amanhã de manhã ou à tarde — qual prefere?". Pular direto pra amanhã.` : ""}
+- Se cliente disse outro dia (amanhã, sábado, etc.): aí sim pergunte "manhã ou tarde?" normalmente.
 
 🎭 VARIAÇÃO HUMANA (nunca repita a mesma palavra de afirmação 2 vezes seguidas):
 - Pra confirmar: "Show!", "Perfeito!", "Fechou!", "Beleza!", "Tranquilo!", "Ótimo!", "Combinado!", "Que bom!", "Maravilha!"
