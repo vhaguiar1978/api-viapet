@@ -8,7 +8,7 @@ import bcrypt from "bcrypt";
 import LoginHistory from "../../models/LoginHistory.js";
 import jwt from "jsonwebtoken";
 import { Op } from "sequelize";
-import { createPixPayment } from "../../service/mercadopago.js";
+import { createPixPayment, getPaymentInfo, applyApprovedMainPayment } from "../../service/mercadopago.js";
 import { buildBillingProfile, getOrCreateBillingSettings } from "../../service/billingAccess.js";
 const router = express.Router();
 
@@ -277,6 +277,66 @@ router.post("/account/billing/pix", authenticate, async (req, res) => {
       message: "Erro ao gerar cobranca PIX.",
       error: error.message,
     });
+  }
+});
+
+router.get("/account/billing/pix/status/:paymentId", authenticate, async (req, res) => {
+  try {
+    const ownerId =
+      req.user.role === "funcionario" && req.user.establishment
+        ? req.user.establishment
+        : req.user.id;
+
+    const paymentId = String(req.params.paymentId || "").trim();
+    if (!paymentId || !/^\d+$/.test(paymentId)) {
+      return res.status(400).json({ message: "paymentId invalido" });
+    }
+
+    const info = await getPaymentInfo(paymentId);
+    if (!info.success) {
+      return res.status(502).json({ message: "Nao foi possivel consultar status no Mercado Pago.", error: info.error });
+    }
+
+    const payment = info.payment;
+    const meta = payment.metadata || {};
+
+    // Confirma que o pagamento pertence ao usuario logado (seguranca)
+    const externalRefMatch = String(payment.external_reference || "").match(/main_pix_([0-9a-f-]{36})_/i);
+    const paymentOwnerId = meta.user_id || (externalRefMatch ? externalRefMatch[1] : null);
+    if (paymentOwnerId && paymentOwnerId !== ownerId) {
+      return res.status(403).json({ message: "Pagamento nao pertence a este usuario." });
+    }
+
+    let applied = null;
+    if (payment.status === "approved") {
+      try {
+        applied = await applyApprovedMainPayment(payment);
+      } catch (e) {
+        console.error("Erro ao aplicar pagamento via fallback do status:", e);
+      }
+    }
+
+    const refreshedUser = await Users.findByPk(ownerId, { attributes: ["plan", "expirationDate"] });
+
+    return res.json({
+      data: {
+        paymentId,
+        status: payment.status,
+        statusDetail: payment.status_detail,
+        approved: payment.status === "approved",
+        amount: payment.transaction_amount,
+        dateApproved: payment.date_approved,
+        applied: applied?.applied || false,
+        appliedReason: applied?.reason || null,
+        user: {
+          plan: refreshedUser?.plan || false,
+          expirationDate: refreshedUser?.expirationDate || null,
+        },
+      },
+    });
+  } catch (error) {
+    console.error("Erro ao consultar status PIX:", error);
+    return res.status(500).json({ message: "Erro interno ao consultar status.", error: error.message });
   }
 });
 

@@ -610,11 +610,21 @@ export const processWebhookEvent = async (eventData) => {
         status_detail: paymentInfo.payment.status_detail,
       });
 
+      let applied = null;
+      if (paymentInfo.payment.status === "approved") {
+        try {
+          applied = await applyApprovedMainPayment(paymentInfo.payment);
+        } catch (applyError) {
+          console.error("❌ Erro ao aplicar pagamento aprovado:", applyError);
+        }
+      }
+
       return {
         success: true,
         action: action || `${topic}`,
         type: type || topic,
         payment: paymentInfo.payment,
+        applied,
         processed_at: new Date().toISOString(),
         event_data: eventData,
       };
@@ -642,6 +652,150 @@ export const processWebhookEvent = async (eventData) => {
       error: error.message || "Erro interno no processamento do webhook",
     };
   }
+};
+
+/**
+ * Aplicar pagamento aprovado do plano principal:
+ *  - identifica usuario via metadata.user_id ou external_reference
+ *  - estende user.expirationDate em 30 dias
+ *  - liga user.plan
+ *  - atualiza/cria Subscription como active
+ *  - atualiza PaymentHistory para approved (ou cria)
+ * Idempotente: se ja existe PaymentHistory approved com o mesmo payment_id, nao reaplica.
+ */
+export const applyApprovedMainPayment = async (payment) => {
+  const PaymentHistoryModule = await import("../models/PaymentHistory.js");
+  const PaymentHistory = PaymentHistoryModule.default;
+  const SubscriptionModule = await import("../models/Subscription.js");
+  const Subscription = SubscriptionModule.default;
+  const UsersModule = await import("../models/Users.js");
+  const Users = UsersModule.default;
+
+  const paymentId = String(payment.id);
+  const meta = payment.metadata || {};
+  let userId = meta.user_id || null;
+  if (!userId && payment.external_reference) {
+    const m = String(payment.external_reference).match(/main_pix_([0-9a-f-]{36})_/i);
+    if (m) userId = m[1];
+  }
+
+  if (!userId) {
+    console.log(`ℹ️ Pagamento ${paymentId} aprovado mas sem user_id no metadata/external_reference. Ignorando.`);
+    return { applied: false, reason: "no_user_id" };
+  }
+
+  const user = await Users.findByPk(userId);
+  if (!user) {
+    console.log(`❌ Usuario ${userId} nao encontrado para aplicar pagamento ${paymentId}.`);
+    return { applied: false, reason: "user_not_found" };
+  }
+
+  // Busca/cria subscription primeiro porque PaymentHistory.subscription_id eh notNull
+  let subscription = await Subscription.findOne({
+    where: { user_id: userId },
+    order: [["created_at", "DESC"]],
+  });
+  if (!subscription) {
+    subscription = await Subscription.create({
+      user_id: userId,
+      plan_type: meta.plan_type || "monthly",
+      status: "pending",
+      payment_status: "pending",
+      amount: payment.transaction_amount || 0,
+      currency: payment.currency_id || "BRL",
+      payment_method: "pix",
+    });
+  }
+
+  // Idempotencia: 1) PaymentHistory approved com mesmo payment_id, OU
+  //               2) subscription ja com esse payment_id active+approved
+  try {
+    const existingPh = await PaymentHistory.findOne({
+      where: { payment_id: paymentId, status: "approved" },
+    });
+    if (existingPh) {
+      console.log(`ℹ️ Pagamento ${paymentId} ja aplicado (PaymentHistory approved existe).`);
+      return { applied: false, reason: "already_applied", user_id: userId };
+    }
+  } catch (e) {
+    console.log(`⚠️ Erro ao checar PaymentHistory existente (seguindo):`, e.message);
+  }
+  if (
+    subscription.payment_id === paymentId &&
+    subscription.status === "active" &&
+    subscription.payment_status === "approved"
+  ) {
+    console.log(`ℹ️ Pagamento ${paymentId} ja aplicado (Subscription ja active+approved com esse id).`);
+    return { applied: false, reason: "already_applied", user_id: userId };
+  }
+
+  // Estende 30 dias a partir do maior entre hoje e expirationDate atual
+  const now = new Date();
+  const baseDate = user.expirationDate && new Date(user.expirationDate) > now
+    ? new Date(user.expirationDate)
+    : now;
+  const newExpiration = new Date(baseDate);
+  newExpiration.setDate(newExpiration.getDate() + 30);
+
+  await user.update({ plan: true, expirationDate: newExpiration });
+  console.log(`✅ User ${userId} renovado: expirationDate ${newExpiration.toISOString()}`);
+
+  // Atualiza subscription
+  try {
+    await subscription.update({
+      status: "active",
+      payment_status: "approved",
+      payment_id: paymentId,
+      payment_method: "pix",
+      billing_cycle_start: now,
+      billing_cycle_end: newExpiration,
+      next_billing_date: newExpiration,
+    });
+  } catch (e) {
+    console.log(`⚠️ Erro ao atualizar Subscription (continuando):`, e.message);
+  }
+
+  // Atualiza ou cria PaymentHistory com subscription_id correto
+  try {
+    const existing = await PaymentHistory.findOne({ where: { payment_id: paymentId } });
+    if (existing) {
+      await existing.update({
+        status: "approved",
+        date_approved: payment.date_approved ? new Date(payment.date_approved) : now,
+        date_last_updated: now,
+      });
+    } else {
+      await PaymentHistory.create({
+        subscription_id: subscription.id,
+        user_id: userId,
+        payment_id: paymentId,
+        external_reference: payment.external_reference || null,
+        status: "approved",
+        amount: payment.transaction_amount || 0,
+        currency: payment.currency_id || "BRL",
+        payment_method: "pix",
+        payment_type: payment.payment_method_id || "pix",
+        installments: payment.installments || 1,
+        date_created: payment.date_created ? new Date(payment.date_created) : now,
+        date_approved: payment.date_approved ? new Date(payment.date_approved) : now,
+        date_last_updated: now,
+        billing_period_start: now,
+        billing_period_end: newExpiration,
+        plan_type: meta.plan_type || subscription.plan_type || "monthly",
+        is_trial: false,
+        notes: "Renovacao automatica via webhook MP",
+      });
+    }
+  } catch (e) {
+    console.log(`⚠️ Erro ao criar/atualizar PaymentHistory (continuando):`, e.message);
+  }
+
+  return {
+    applied: true,
+    user_id: userId,
+    payment_id: paymentId,
+    new_expiration: newExpiration.toISOString(),
+  };
 };
 
 /**
