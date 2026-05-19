@@ -10,6 +10,21 @@ import CustomerAiNote from "../models/CustomerAiNote.js";
 import KnowledgeBaseEntry from "../models/KnowledgeBaseEntry.js";
 import { groqChat, GROQ_DEFAULT_MODEL, GROQ_SMART_MODEL } from "./groqClient.js";
 
+// Cooldown global por usuario quando Groq retornar 413 (TPM excedido).
+// Map<usersId, timestampUntil>. TPM (tokens per minute) se renova a cada 60s,
+// entao bater no Groq durante esse periodo so queima tokens da janela atual
+// sem sucesso. Limpa entrada quando expira.
+const groqTpmCooldown = new Map();
+const GROQ_TPM_COOLDOWN_MS = 75 * 1000; // 75s — folga acima do 1min do TPM
+function setGroqTpmCooldown(usersId) {
+  groqTpmCooldown.set(usersId, Date.now() + GROQ_TPM_COOLDOWN_MS);
+  // Limpeza tardia pra evitar memory leak em multi-tenant
+  setTimeout(() => {
+    const ts = groqTpmCooldown.get(usersId);
+    if (ts && Date.now() >= ts) groqTpmCooldown.delete(usersId);
+  }, GROQ_TPM_COOLDOWN_MS + 5000);
+}
+
 // Híbrido 8B/70B: decide quando vale a pena chamar o modelo SMART (70B).
 // Critérios: mensagem ambígua/longa, palavra de escalação, conversa já grande,
 // cliente fiel sumido (caso emocional), ou pedido envolvendo dinheiro/saúde.
@@ -69,6 +84,17 @@ const VERBS_CUMPRIMENTO = ["ola", "oi", "ola!", "oi!", "bom dia", "boa tarde", "
 const VERBS_LOCALIZACAO = ["endereco", "onde", "localizacao", "rua", "fica onde"];
 const VERBS_TELEFONE = ["telefone", "contato", "numero"];
 
+// Detector de PERIODO so (ex: "manha", "parte da tarde", "tardezinha") — entra
+// quando o cliente esta respondendo a pergunta "manha ou tarde?". Sem isso
+// o fallback de keywords nao entende a resposta e devolve texto generico.
+function detectPeriodoOnly(text) {
+  const n = normalizeSearchable(text);
+  if (/\b(manha|manhazinha|manhaa)\b/.test(n) || n.includes("de manha") || n.includes("pela manha") || n.includes("parte da manha")) return "manha";
+  if (/\b(tarde|tardinha|tardezinha)\b/.test(n) || n.includes("de tarde") || n.includes("a tarde") || n.includes("parte da tarde")) return "tarde";
+  if (/\b(noite|noitinha)\b/.test(n) || n.includes("a noite") || n.includes("de noite")) return "noite";
+  return null;
+}
+
 function detectIntent(text) {
   const n = normalizeSearchable(text);
   // ORDEM IMPORTA — intencoes mais especificas primeiro
@@ -76,6 +102,10 @@ function detectIntent(text) {
   if (VERBS_CANCELAR.some((v) => n.includes(v))) return "cancelar";
   if (VERBS_PRECO.some((v) => n.includes(v))) return "preco";
   if (VERBS_HORARIO.some((v) => n.includes(v))) return "horario";
+  // Se a mensagem e curta E so contem palavra de periodo, e resposta de
+  // continuacao do fluxo de agendamento — trata como agendar pra cair em
+  // buildAgendarReply (que ja sabe ler availableSlots e mostrar horarios).
+  if (n.length < 30 && detectPeriodoOnly(n)) return "agendar";
   if (VERBS_LOCALIZACAO.some((v) => n.includes(v))) return "localizacao";
   if (VERBS_TELEFONE.some((v) => n.includes(v))) return "telefone";
   if (VERBS_INFO_SERVICO.some((v) => n.includes(v))) return "info_servico";
@@ -1063,24 +1093,12 @@ async function generateGroqReply({
       jsonMode: true, // forca resposta em JSON valido
     });
   } catch (firstErr) {
-    // Retry com prompt COMPACT em caso de 413 (request too large) ou de TPM.
-    // Conta Groq pode ter TPM baixo (6k em vez de 30k); ai compact corta
-    // services/products/KB/notes e geralmente cabe na metade do budget.
-    const msg = String(firstErr?.message || "");
-    const isTooBig = msg.includes("413") || msg.includes("too large") || msg.includes("tokens per minute");
-    if (!isTooBig) throw firstErr;
-    console.warn(`[CrmAutoReply] Groq estourou TPM/tamanho (${msg.slice(0, 100)}). Tentando de novo em modo COMPACT.`);
-    systemPrompt = buildPrompt(true);
-    messages = [{ role: "system", content: systemPrompt }, ...history];
-    result = await groqChat({
-      apiKey,
-      model: chosenModel,
-      messages,
-      temperature: 0.7,
-      maxTokens: 1200,
-      jsonMode: true,
-    });
-    console.log("[CrmAutoReply] Retry COMPACT funcionou.");
+    // 413 ou TPM excedido = nao adianta retry no mesmo minuto. O Groq tem
+    // limite por minuto (TPM=6000 no Free), entao tentar de novo gasta
+    // tokens da janela atual e ainda falha. Sobe pro caller que vai marcar
+    // cooldown e cair em fallback de keywords. Quando TPM renovar (em ~60s)
+    // a proxima mensagem tenta de novo automatic.
+    throw firstErr;
   }
   return result.content;
 }
@@ -1777,7 +1795,17 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
     );
   }
 
-  if (groqApiKey) {
+  // Cooldown global de TPM: se Groq deu 413 pra este user nos ultimos 75s,
+  // pula direto pro fallback. TPM se renova a cada minuto, entao tentar de
+  // novo no meio so piora (gasta tokens da janela atual e ainda falha).
+  const cooldownUntil = groqTpmCooldown.get(usersId) || 0;
+  const inCooldown = Date.now() < cooldownUntil;
+  if (groqApiKey && inCooldown) {
+    const remainingSec = Math.ceil((cooldownUntil - Date.now()) / 1000);
+    console.warn(`[CrmAutoReply] user=${String(usersId).slice(0, 8)} Groq em COOLDOWN TPM por mais ${remainingSec}s — pulando direto pro fallback de keywords pra nao queimar tokens.`);
+  }
+
+  if (groqApiKey && !inCooldown) {
     try {
       const rawContent = await generateGroqReply({
         apiKey: groqApiKey,
@@ -1829,8 +1857,18 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
       // Falha aqui = IA "burra" pra usuario final (cai em keywords pobre).
       // Sobe pra error pra ficar visivel em monitoramento e logs em arquivo.
       const status = groqErr?.response?.status || groqErr?.status || "n/a";
+      const errMsg = String(groqErr?.message || groqErr);
+      // Se for 413/TPM excedido, ativa cooldown global pra este user. Proximas
+      // mensagens nos proximos 75s nem vao tentar o Groq — vao direto pro
+      // fallback de keywords. Economiza tokens da janela e evita rajada de
+      // 413s que estao acontecendo agora na Doghouse.
+      const isTpm = errMsg.includes("413") || errMsg.includes("too large") || errMsg.includes("tokens per minute");
+      if (isTpm) {
+        setGroqTpmCooldown(usersId);
+        console.warn(`[CrmAutoReply] user=${String(usersId).slice(0, 8)} Groq 413/TPM — ativando cooldown ${Math.round(GROQ_TPM_COOLDOWN_MS/1000)}s.`);
+      }
       console.error(
-        `[CrmAutoReply] Groq FALHOU (status=${status}, msg="${groqErr?.message || groqErr}") — caindo em fallback de keywords. Verifique GROQ_API_KEY, rate limit ou timeout.`,
+        `[CrmAutoReply] Groq FALHOU (status=${status}, msg="${errMsg}") — caindo em fallback de keywords. Verifique GROQ_API_KEY, rate limit ou timeout.`,
       );
       try {
         await CrmAiActionLog.create({
