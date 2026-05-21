@@ -24,6 +24,302 @@ function isAppointmentFinanceReference(reference) {
   );
 }
 
+function isAgendaFinanceRow(finance = {}) {
+  const reference = String(finance.reference || "").trim().toLowerCase();
+  const description = String(finance.description || "").trim().toLowerCase();
+  const category = String(finance.category || "").trim().toLowerCase();
+  const subCategory = String(finance.subCategory || "").trim().toLowerCase();
+
+  return (
+    reference === "appointment" ||
+    reference.startsWith("appointment_payment:") ||
+    reference.startsWith("appointment_balance:") ||
+    reference.startsWith("appointment_free:") ||
+    description.startsWith("agendamento") ||
+    description.startsWith("saldo agendamento") ||
+    category.includes("agendamento") ||
+    subCategory.includes("agenda")
+  );
+}
+
+function getAgendaFinanceReferenceKind(reference) {
+  const normalizedReference = String(reference || "").trim().toLowerCase();
+
+  if (normalizedReference.startsWith("appointment_balance:")) return "balance";
+  if (normalizedReference.startsWith("appointment_free:")) return "free";
+  if (normalizedReference.startsWith("appointment_payment:")) return "payment";
+  if (normalizedReference === "appointment") return "legacy";
+  return "other";
+}
+
+function parseAppointmentIdFromFinanceReference(reference) {
+  const normalizedReference = String(reference || "").trim();
+  const [prefix, appointmentId] = normalizedReference.split(":");
+  if ((prefix === "appointment_balance" || prefix === "appointment_free") && appointmentId) {
+    return appointmentId;
+  }
+  return null;
+}
+
+function toComparableTimestamp(value) {
+  if (!value) return 0;
+  const normalizedValue =
+    typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)
+      ? `${value}T12:00:00`
+      : value;
+  const parsedTimestamp = new Date(normalizedValue).getTime();
+  return Number.isFinite(parsedTimestamp) ? parsedTimestamp : 0;
+}
+
+function normalizeAgendaPetName(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function getFinanceDateKey(finance = {}) {
+  const sourceValue = finance.dueDate || finance.date;
+  if (!sourceValue) return "";
+  if (typeof sourceValue === "string" && /^\d{4}-\d{2}-\d{2}/.test(sourceValue)) {
+    return sourceValue.slice(0, 10);
+  }
+  const parsedDate = new Date(sourceValue);
+  if (Number.isNaN(parsedDate.getTime())) return "";
+  return parsedDate.toISOString().slice(0, 10);
+}
+
+function extractLegacyFinancePetName(description) {
+  const parts = String(description || "")
+    .split(" - ")
+    .map((part) => String(part || "").trim())
+    .filter(Boolean);
+  if (parts.length < 3) return "";
+  return normalizeAgendaPetName(parts[parts.length - 1]);
+}
+
+function getAgendaAppointmentDisplayKey(appointment) {
+  if (!appointment) return null;
+
+  const packageGroupId = String(appointment.packageGroupId || "").trim();
+  if (packageGroupId) {
+    return `package|${packageGroupId.toLowerCase()}`;
+  }
+
+  const customerId = String(appointment.customerId || "").trim();
+  const petId = String(appointment.petId || "").trim();
+  const date = String(appointment.date || "").trim();
+  const time = String(appointment.time || "").trim();
+
+  if (!customerId && !petId) {
+    return String(appointment.id || "").trim() || null;
+  }
+
+  return [customerId || "sem-cliente", petId || "sem-pet", date, time]
+    .map((part) => String(part || "").trim().toLowerCase())
+    .join("|");
+}
+
+function getAgendaFinancePriority({ finance, appointment, payment, referenceKind }) {
+  const priorityByType = {
+    balance: 500,
+    free: 450,
+    payment: 400,
+    legacy: 100,
+    other: 50,
+  };
+
+  let score = priorityByType[referenceKind] || 0;
+  if (appointment && Number(appointment.financeId) === Number(finance.id)) {
+    if (referenceKind === "balance" || referenceKind === "free") score += 250;
+    else if (referenceKind === "legacy") score += 80;
+  }
+  if (String(finance.status || "").trim().toLowerCase() === "pago") score += 25;
+  if (String(payment?.status || "").trim().toLowerCase() === "pago") score += 15;
+  return score;
+}
+
+async function keepOnlyCurrentAgendaFinanceRows(finances = [], usersId) {
+  const rows = Array.isArray(finances) ? finances : [];
+  const agendaRows = rows.filter((item) => isAgendaFinanceRow(item));
+  if (!agendaRows.length) return rows;
+
+  const financeIds = agendaRows.map((item) => item?.id).filter(Boolean);
+  if (!financeIds.length) return rows;
+
+  const appointmentIdsFromReferences = [
+    ...new Set(
+      agendaRows
+        .map((item) => parseAppointmentIdFromFinanceReference(item.reference))
+        .filter(Boolean),
+    ),
+  ];
+  const legacyDates = [
+    ...new Set(
+      agendaRows
+        .filter((item) => getAgendaFinanceReferenceKind(item.reference) === "legacy")
+        .map((item) => getFinanceDateKey(item))
+        .filter(Boolean),
+    ),
+  ];
+
+  const appointmentPayments = await AppointmentPayment.findAll({
+    attributes: ["id", "appointmentId", "financeId", "dueDate", "paidAt", "status", "createdAt", "updatedAt"],
+    where: {
+      usersId,
+      financeId: {
+        [Op.in]: financeIds,
+      },
+    },
+  });
+
+  const appointmentIdsFromPayments = [
+    ...new Set(appointmentPayments.map((item) => item?.appointmentId).filter(Boolean)),
+  ];
+
+  const appointmentFilters = [
+    {
+      financeId: {
+        [Op.in]: financeIds,
+      },
+    },
+  ];
+  const mappedAppointmentIds = [
+    ...new Set([...appointmentIdsFromReferences, ...appointmentIdsFromPayments]),
+  ];
+  if (mappedAppointmentIds.length > 0) {
+    appointmentFilters.push({
+      id: {
+        [Op.in]: mappedAppointmentIds,
+      },
+    });
+  }
+
+  const directAppointments = await Appointment.findAll({
+    attributes: ["id", "financeId", "customerId", "petId", "package", "packageGroupId", "packageNumber", "packageMax", "date", "time", "createdAt", "updatedAt"],
+    where: {
+      usersId,
+      [Op.or]: appointmentFilters,
+    },
+  });
+  const legacyDateAppointments = legacyDates.length > 0
+    ? await Appointment.findAll({
+        attributes: ["id", "financeId", "customerId", "petId", "package", "packageGroupId", "packageNumber", "packageMax", "date", "time", "createdAt", "updatedAt"],
+        where: {
+          usersId,
+          date: {
+            [Op.in]: legacyDates,
+          },
+        },
+      })
+    : [];
+  const appointments = [
+    ...new Map(
+      [...directAppointments, ...legacyDateAppointments].map((item) => [String(item.id), item]),
+    ).values(),
+  ];
+  const petIds = [...new Set(appointments.map((item) => item?.petId).filter(Boolean))];
+  const pets = petIds.length > 0
+    ? await Pets.findAll({
+        attributes: ["id", "name"],
+        where: {
+          id: {
+            [Op.in]: petIds,
+          },
+        },
+      })
+    : [];
+
+  const appointmentById = new Map(appointments.map((item) => [String(item.id), item]));
+  const appointmentByLegacyFinanceId = new Map(
+    appointments
+      .filter((item) => item?.financeId)
+      .map((item) => [Number(item.financeId), item]),
+  );
+  const paymentByFinanceId = new Map(
+    appointmentPayments
+      .filter((item) => item?.financeId)
+      .map((item) => [Number(item.financeId), item]),
+  );
+  const petById = new Map(pets.map((item) => [String(item.id), item]));
+  const appointmentsByPetDate = new Map();
+
+  for (const appointment of appointments) {
+    const petName = normalizeAgendaPetName(petById.get(String(appointment.petId))?.name);
+    const dateKey = String(appointment.date || "").slice(0, 10);
+    if (!petName || !dateKey) continue;
+
+    const petDateKey = `${petName}|${dateKey}`;
+    const currentAppointment = appointmentsByPetDate.get(petDateKey);
+    const currentTimestamp = Math.max(
+      toComparableTimestamp(currentAppointment?.updatedAt),
+      toComparableTimestamp(currentAppointment?.createdAt),
+    );
+    const nextTimestamp = Math.max(
+      toComparableTimestamp(appointment.updatedAt),
+      toComparableTimestamp(appointment.createdAt),
+    );
+    if (!currentAppointment || nextTimestamp >= currentTimestamp) {
+      appointmentsByPetDate.set(petDateKey, appointment);
+    }
+  }
+
+  const selectedAgendaFinanceIds = new Set();
+  const selectedRowsByAppointment = new Map();
+
+  for (const finance of agendaRows) {
+    const financeId = Number(finance.id);
+    const referenceKind = getAgendaFinanceReferenceKind(finance.reference);
+    const payment = paymentByFinanceId.get(financeId) || null;
+    const appointmentId =
+      payment?.appointmentId ||
+      parseAppointmentIdFromFinanceReference(finance.reference) ||
+      appointmentByLegacyFinanceId.get(financeId)?.id ||
+      `finance:${financeId}`;
+    let appointment = appointmentById.get(String(appointmentId)) || null;
+    if (!appointment && referenceKind === "legacy") {
+      const petName = extractLegacyFinancePetName(finance.description);
+      const dateKey = getFinanceDateKey(finance);
+      appointment = appointmentsByPetDate.get(`${petName}|${dateKey}`) || null;
+    }
+    const displayGroupKey = getAgendaAppointmentDisplayKey(appointment) || String(appointmentId);
+    const priority = getAgendaFinancePriority({
+      finance,
+      appointment,
+      payment,
+      referenceKind,
+    });
+    const timestamp = Math.max(
+      toComparableTimestamp(finance.updatedAt),
+      toComparableTimestamp(finance.createdAt),
+      toComparableTimestamp(finance.dueDate),
+      toComparableTimestamp(finance.date),
+      toComparableTimestamp(payment?.updatedAt),
+      toComparableTimestamp(payment?.createdAt),
+      toComparableTimestamp(payment?.paidAt),
+      toComparableTimestamp(payment?.dueDate),
+      toComparableTimestamp(appointment?.updatedAt),
+      toComparableTimestamp(appointment?.createdAt),
+      toComparableTimestamp(appointment?.date),
+    );
+    const currentSelection = selectedRowsByAppointment.get(displayGroupKey);
+
+    if (!currentSelection || priority > currentSelection.priority || (priority === currentSelection.priority && timestamp >= currentSelection.timestamp)) {
+      selectedRowsByAppointment.set(displayGroupKey, {
+        financeId,
+        priority,
+        timestamp,
+      });
+    }
+  }
+
+  for (const selection of selectedRowsByAppointment.values()) {
+    selectedAgendaFinanceIds.add(selection.financeId);
+  }
+
+  return rows.filter((finance) => {
+    if (!isAgendaFinanceRow(finance)) return true;
+    return selectedAgendaFinanceIds.has(Number(finance.id));
+  });
+}
+
 router.get("/customers/search", auth, async (req, res) => {
   try {
     const { term } = req.query;
@@ -159,10 +455,16 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
   try {
     const usersId = req.user.establishment;
 
-    const [pendingFinances, pets] = await Promise.all([
+    const [allEntryFinances, pets] = await Promise.all([
       Finance.findAll({
-        where: { usersId, status: "pendente", type: "entrada" },
-        attributes: ["id", "reference", "amount", "grossAmount", "dueDate", "date", "createdAt", "updatedAt"],
+        where: {
+          usersId,
+          type: "entrada",
+          status: {
+            [Op.in]: ["pendente", "atrasado", "pago"],
+          },
+        },
+        attributes: ["id", "reference", "description", "category", "subCategory", "status", "amount", "grossAmount", "dueDate", "date", "createdAt", "updatedAt"],
       }),
       Pets.findAll({
         where: { usersId },
@@ -170,18 +472,18 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
       }),
     ]);
 
-    const pendingAppointmentFinanceIds = pendingFinances
-      .filter((item) => isAppointmentFinanceReference(item.reference))
+    const currentFinances = await keepOnlyCurrentAgendaFinanceRows(allEntryFinances, usersId);
+    const openStatuses = new Set(["pendente", "atrasado"]);
+    const currentAgendaFinances = currentFinances.filter(
+      (item) => isAgendaFinanceRow(item) && openStatuses.has(String(item.status || "").toLowerCase()),
+    );
+    const allSaleFinances = allEntryFinances.filter(
+      (item) => !isAgendaFinanceRow(item) && String(item.reference || "").trim(),
+    );
+
+    const pendingAppointmentFinanceIds = currentAgendaFinances
       .map((item) => item.id)
       .filter(Boolean);
-    const pendingSaleIds = [
-      ...new Set(
-        pendingFinances
-          .filter((item) => !isAppointmentFinanceReference(item.reference))
-          .map((item) => String(item.reference || "").trim())
-          .filter(Boolean),
-      ),
-    ];
     const latestTimestamp = (finance) =>
       Math.max(
         new Date(finance?.updatedAt || 0).getTime() || 0,
@@ -190,7 +492,7 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
       );
 
     const latestPendingSalesByReference = new Map();
-    for (const finance of pendingFinances.filter((item) => !isAppointmentFinanceReference(item.reference))) {
+    for (const finance of allSaleFinances) {
       const referenceKey = String(finance.reference || "").trim();
       if (!referenceKey) continue;
       const current = latestPendingSalesByReference.get(referenceKey);
@@ -199,21 +501,8 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
       }
     }
 
-    const saleReferenceKeys = [...latestPendingSalesByReference.keys()];
-    const allSaleFinanceRows = saleReferenceKeys.length
-      ? await Finance.findAll({
-          where: {
-            usersId,
-            type: "entrada",
-            reference: {
-              [Op.in]: saleReferenceKeys,
-            },
-          },
-          attributes: ["id", "reference", "status", "amount", "grossAmount", "dueDate", "date", "createdAt", "updatedAt"],
-        })
-      : [];
     const latestSaleFinanceByReference = new Map();
-    for (const finance of allSaleFinanceRows) {
+    for (const finance of allSaleFinances) {
       const referenceKey = String(finance.reference || "").trim();
       if (!referenceKey) continue;
       const current = latestSaleFinanceByReference.get(referenceKey);
@@ -231,13 +520,11 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
       pendingAppointmentFinanceIds.length
         ? AppointmentPayment.findAll({
             where: {
-              usersId,
-              status: "pendente",
               financeId: {
                 [Op.in]: pendingAppointmentFinanceIds,
               },
             },
-            attributes: ["appointmentId", "grossAmount", "dueDate"],
+            attributes: ["id", "appointmentId", "financeId", "dueDate", "grossAmount"],
             include: [{
               model: Appointment,
               attributes: ["customerId", "date"],
@@ -261,13 +548,54 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
 
     const summaryMap = {};
     const financeByReference = latestSaleFinanceByReference;
+    const paymentByFinanceId = new Map(
+      pendingPayments
+        .filter((item) => item?.financeId)
+        .map((item) => [Number(item.financeId), item]),
+    );
+    const appointmentsByFinanceId = pendingAppointmentFinanceIds.length
+      ? await Appointment.findAll({
+          where: {
+            usersId,
+            [Op.or]: [
+              {
+                financeId: {
+                  [Op.in]: pendingAppointmentFinanceIds,
+                },
+              },
+              {
+                id: {
+                  [Op.in]: currentAgendaFinances
+                    .map((item) => parseAppointmentIdFromFinanceReference(item.reference))
+                    .filter(Boolean),
+                },
+              },
+            ],
+          },
+          attributes: ["id", "customerId", "date", "financeId"],
+        })
+      : [];
+    const appointmentByFinanceId = new Map(
+      appointmentsByFinanceId
+        .filter((item) => item?.financeId)
+        .map((item) => [Number(item.financeId), item]),
+    );
+    const appointmentById = new Map(
+      appointmentsByFinanceId.map((item) => [String(item.id), item]),
+    );
 
-    for (const payment of pendingPayments) {
-      const customerId = String(payment.Appointment?.customerId || "");
+    for (const finance of currentAgendaFinances) {
+      const payment = paymentByFinanceId.get(Number(finance.id)) || null;
+      const appointment =
+        appointmentByFinanceId.get(Number(finance.id)) ||
+        appointmentById.get(String(parseAppointmentIdFromFinanceReference(finance.reference) || "")) ||
+        payment?.Appointment ||
+        null;
+      const customerId = String(appointment?.customerId || "");
       if (!customerId) continue;
       if (!summaryMap[customerId]) summaryMap[customerId] = { amount: 0, latestPurchaseDate: "", petNames: [] };
-      summaryMap[customerId].amount += Number(payment.grossAmount || 0);
-      const d = payment.dueDate || payment.Appointment?.date || "";
+      summaryMap[customerId].amount += Number(finance.grossAmount || finance.amount || 0);
+      const d = finance.dueDate || finance.date || payment?.dueDate || appointment?.date || "";
       if (d && d > (summaryMap[customerId].latestPurchaseDate || "")) summaryMap[customerId].latestPurchaseDate = d;
     }
 
