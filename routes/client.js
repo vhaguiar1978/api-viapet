@@ -162,7 +162,7 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
     const [pendingFinances, pets] = await Promise.all([
       Finance.findAll({
         where: { usersId, status: "pendente", type: "entrada" },
-        attributes: ["id", "reference", "amount", "grossAmount", "dueDate", "date", "createdAt"],
+        attributes: ["id", "reference", "amount", "grossAmount", "dueDate", "date", "createdAt", "updatedAt"],
       }),
       Pets.findAll({
         where: { usersId },
@@ -181,6 +181,50 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
           .map((item) => String(item.reference || "").trim())
           .filter(Boolean),
       ),
+    ];
+    const latestTimestamp = (finance) =>
+      Math.max(
+        new Date(finance?.updatedAt || 0).getTime() || 0,
+        new Date(finance?.createdAt || 0).getTime() || 0,
+        Number(finance?.id || 0) || 0,
+      );
+
+    const latestPendingSalesByReference = new Map();
+    for (const finance of pendingFinances.filter((item) => !isAppointmentFinanceReference(item.reference))) {
+      const referenceKey = String(finance.reference || "").trim();
+      if (!referenceKey) continue;
+      const current = latestPendingSalesByReference.get(referenceKey);
+      if (!current || latestTimestamp(finance) >= latestTimestamp(current)) {
+        latestPendingSalesByReference.set(referenceKey, finance);
+      }
+    }
+
+    const saleReferenceKeys = [...latestPendingSalesByReference.keys()];
+    const allSaleFinanceRows = saleReferenceKeys.length
+      ? await Finance.findAll({
+          where: {
+            usersId,
+            type: "entrada",
+            reference: {
+              [Op.in]: saleReferenceKeys,
+            },
+          },
+          attributes: ["id", "reference", "status", "amount", "grossAmount", "dueDate", "date", "createdAt", "updatedAt"],
+        })
+      : [];
+    const latestSaleFinanceByReference = new Map();
+    for (const finance of allSaleFinanceRows) {
+      const referenceKey = String(finance.reference || "").trim();
+      if (!referenceKey) continue;
+      const current = latestSaleFinanceByReference.get(referenceKey);
+      if (!current || latestTimestamp(finance) >= latestTimestamp(current)) {
+        latestSaleFinanceByReference.set(referenceKey, finance);
+      }
+    }
+    const confirmedPendingSaleIds = [
+      ...latestSaleFinanceByReference.entries()
+        .filter(([, finance]) => String(finance?.status || "").toLowerCase() === "pendente")
+        .map(([referenceKey]) => referenceKey),
     ];
 
     const [pendingPayments, pendingSales] = await Promise.all([
@@ -202,12 +246,12 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
             }],
           })
         : Promise.resolve([]),
-      pendingSaleIds.length
+      confirmedPendingSaleIds.length
         ? Sales.findAll({
             where: {
               usersId,
               id: {
-                [Op.in]: pendingSaleIds,
+                [Op.in]: confirmedPendingSaleIds,
               },
             },
             attributes: ["id", "custumerId"],
@@ -216,11 +260,7 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
     ]);
 
     const summaryMap = {};
-    const financeByReference = new Map(
-      pendingFinances
-        .filter((item) => !isAppointmentFinanceReference(item.reference))
-        .map((item) => [String(item.reference || "").trim(), item]),
-    );
+    const financeByReference = latestSaleFinanceByReference;
 
     for (const payment of pendingPayments) {
       const customerId = String(payment.Appointment?.customerId || "");
