@@ -184,31 +184,35 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
     ];
 
     const [pendingPayments, pendingSales] = await Promise.all([
-      AppointmentPayment.findAll({
-        where: {
-          usersId,
-          status: "pendente",
-          financeId: {
-            [Op.in]: pendingAppointmentFinanceIds.length ? pendingAppointmentFinanceIds : [0],
-          },
-        },
-        attributes: ["appointmentId", "grossAmount", "dueDate"],
-        include: [{
-          model: Appointment,
-          attributes: ["customerId", "date"],
-          where: { usersId },
-          required: true,
-        }],
-      }),
-      Sales.findAll({
-        where: {
-          usersId,
-          id: {
-            [Op.in]: pendingSaleIds.length ? pendingSaleIds : ["__none__"],
-          },
-        },
-        attributes: ["id", "custumerId"],
-      }),
+      pendingAppointmentFinanceIds.length
+        ? AppointmentPayment.findAll({
+            where: {
+              usersId,
+              status: "pendente",
+              financeId: {
+                [Op.in]: pendingAppointmentFinanceIds,
+              },
+            },
+            attributes: ["appointmentId", "grossAmount", "dueDate"],
+            include: [{
+              model: Appointment,
+              attributes: ["customerId", "date"],
+              where: { usersId },
+              required: true,
+            }],
+          })
+        : Promise.resolve([]),
+      pendingSaleIds.length
+        ? Sales.findAll({
+            where: {
+              usersId,
+              id: {
+                [Op.in]: pendingSaleIds,
+              },
+            },
+            attributes: ["id", "custumerId"],
+          })
+        : Promise.resolve([]),
     ]);
 
     const summaryMap = {};
