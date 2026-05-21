@@ -10,8 +10,19 @@ import Sales from "../models/Sales.js";
 import SaleItem from "../models/SaleItem.js";
 import Product from "../models/Products.js";
 import AppointmentPayment from "../models/AppointmentPayment.js";
+import Finance from "../models/Finance.js";
 import { logActivity } from "../service/activityLogger.js";
 const router = express.Router();
+
+function isAppointmentFinanceReference(reference) {
+  const normalizedReference = String(reference || "").trim().toLowerCase();
+  return (
+    normalizedReference === "appointment" ||
+    normalizedReference.startsWith("appointment_payment:") ||
+    normalizedReference.startsWith("appointment_balance:") ||
+    normalizedReference.startsWith("appointment_free:")
+  );
+}
 
 router.get("/customers/search", auth, async (req, res) => {
   try {
@@ -148,9 +159,39 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
   try {
     const usersId = req.user.establishment;
 
-    const [pendingPayments, pendingSales, pets] = await Promise.all([
+    const [pendingFinances, pets] = await Promise.all([
+      Finance.findAll({
+        where: { usersId, status: "pendente", type: "entrada" },
+        attributes: ["id", "reference", "amount", "grossAmount", "dueDate", "date", "createdAt"],
+      }),
+      Pets.findAll({
+        where: { usersId },
+        attributes: ["custumerId", "name"],
+      }),
+    ]);
+
+    const pendingAppointmentFinanceIds = pendingFinances
+      .filter((item) => isAppointmentFinanceReference(item.reference))
+      .map((item) => item.id)
+      .filter(Boolean);
+    const pendingSaleIds = [
+      ...new Set(
+        pendingFinances
+          .filter((item) => !isAppointmentFinanceReference(item.reference))
+          .map((item) => String(item.reference || "").trim())
+          .filter(Boolean),
+      ),
+    ];
+
+    const [pendingPayments, pendingSales] = await Promise.all([
       AppointmentPayment.findAll({
-        where: { usersId, status: "pendente" },
+        where: {
+          usersId,
+          status: "pendente",
+          financeId: {
+            [Op.in]: pendingAppointmentFinanceIds.length ? pendingAppointmentFinanceIds : [0],
+          },
+        },
         attributes: ["appointmentId", "grossAmount", "dueDate"],
         include: [{
           model: Appointment,
@@ -160,16 +201,22 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
         }],
       }),
       Sales.findAll({
-        where: { usersId, status: "pendente" },
-        attributes: ["custumerId", "total", "createdAt"],
-      }),
-      Pets.findAll({
-        where: { usersId },
-        attributes: ["custumerId", "name"],
+        where: {
+          usersId,
+          id: {
+            [Op.in]: pendingSaleIds.length ? pendingSaleIds : ["__none__"],
+          },
+        },
+        attributes: ["id", "custumerId"],
       }),
     ]);
 
     const summaryMap = {};
+    const financeByReference = new Map(
+      pendingFinances
+        .filter((item) => !isAppointmentFinanceReference(item.reference))
+        .map((item) => [String(item.reference || "").trim(), item]),
+    );
 
     for (const payment of pendingPayments) {
       const customerId = String(payment.Appointment?.customerId || "");
@@ -184,8 +231,9 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
       const customerId = String(sale.custumerId || "");
       if (!customerId) continue;
       if (!summaryMap[customerId]) summaryMap[customerId] = { amount: 0, latestPurchaseDate: "", petNames: [] };
-      summaryMap[customerId].amount += Number(sale.total || 0);
-      const d = sale.createdAt || "";
+      const finance = financeByReference.get(String(sale.id || ""));
+      summaryMap[customerId].amount += Number(finance?.grossAmount || finance?.amount || 0);
+      const d = finance?.dueDate || finance?.date || finance?.createdAt || "";
       if (d && d > (summaryMap[customerId].latestPurchaseDate || "")) summaryMap[customerId].latestPurchaseDate = d;
     }
 
