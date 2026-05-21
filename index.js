@@ -59,6 +59,7 @@ import adminClientDetailRouter from "./routes/adminClientDetail.js";
 import adminAuditRouter from "./routes/adminAudit.js";
 import { adminAuditMiddleware } from "./middlewares/adminAudit.js";
 import adminAlertsRouter from "./routes/adminAlerts.js";
+import adminTutorialsRouter from "./routes/adminTutorials.js";
 import alertEngine from "./service/alertEngine.js";
 import {
   attachActivityHelper,
@@ -192,6 +193,7 @@ app.use(adminAddonsRouter);
 app.use(adminClientDetailRouter);
 app.use(adminAuditRouter);
 app.use(adminAlertsRouter);
+app.use(adminTutorialsRouter);
 // Error handler do activity logger — DEVE vir depois das rotas
 app.use(activityErrorHandler);
 // Configure as associações antes de sincronizar
@@ -719,6 +721,65 @@ async function ensureAddonsSchema() {
   }
 }
 
+async function ensureTutorialsSchema() {
+  const queryInterface = sequelize.getQueryInterface();
+  try {
+    const tables = await queryInterface.showAllTables();
+    const normalized = tables.map((t) => (typeof t === "string" ? t : t.tableName));
+
+    if (!normalized.includes("tutorial_categories")) {
+      await queryInterface.createTable("tutorial_categories", {
+        id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true, allowNull: false },
+        slug: { type: DataTypes.STRING(80), allowNull: false, unique: true },
+        name: { type: DataTypes.STRING(120), allowNull: false },
+        description: { type: DataTypes.TEXT, allowNull: true },
+        color: { type: DataTypes.STRING(20), allowNull: false, defaultValue: "green" },
+        active: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
+        sort_order: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
+        created_at: { type: DataTypes.DATE, allowNull: false, defaultValue: sequelize.literal("CURRENT_TIMESTAMP") },
+        updated_at: { type: DataTypes.DATE, allowNull: false, defaultValue: sequelize.literal("CURRENT_TIMESTAMP") },
+      });
+      console.log("Tabela tutorial_categories criada");
+    }
+
+    if (!normalized.includes("tutorial_videos")) {
+      await queryInterface.createTable("tutorial_videos", {
+        id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true, allowNull: false },
+        category_id: { type: DataTypes.UUID, allowNull: false },
+        title: { type: DataTypes.STRING(160), allowNull: false },
+        youtube_url: { type: DataTypes.TEXT, allowNull: false },
+        description: { type: DataTypes.TEXT, allowNull: true },
+        active: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
+        sort_order: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
+        created_at: { type: DataTypes.DATE, allowNull: false, defaultValue: sequelize.literal("CURRENT_TIMESTAMP") },
+        updated_at: { type: DataTypes.DATE, allowNull: false, defaultValue: sequelize.literal("CURRENT_TIMESTAMP") },
+      });
+      console.log("Tabela tutorial_videos criada");
+    }
+
+    const categoryIndexes = await queryInterface.showIndex("tutorial_categories");
+    if (!categoryIndexes.some((item) => item.name === "idx_tutorial_categories_sort")) {
+      await queryInterface.addIndex("tutorial_categories", ["sort_order"], {
+        name: "idx_tutorial_categories_sort",
+      });
+    }
+
+    const videoIndexes = await queryInterface.showIndex("tutorial_videos");
+    if (!videoIndexes.some((item) => item.name === "idx_tutorial_videos_category")) {
+      await queryInterface.addIndex("tutorial_videos", ["category_id"], {
+        name: "idx_tutorial_videos_category",
+      });
+    }
+    if (!videoIndexes.some((item) => item.name === "idx_tutorial_videos_sort")) {
+      await queryInterface.addIndex("tutorial_videos", ["sort_order"], {
+        name: "idx_tutorial_videos_sort",
+      });
+    }
+  } catch (error) {
+    console.error("Nao foi possivel validar o schema de tutoriais:", error?.message || error);
+  }
+}
+
 async function ensureActivityLogsSchema() {
   const queryInterface = sequelize.getQueryInterface();
   try {
@@ -1024,6 +1085,7 @@ sequelize
     await ensurePaymentMethodFeesSchema();
     await ensureActivityLogsSchema();
     await ensureAddonsSchema();
+    await ensureTutorialsSchema();
     await ensureAdminAuditSchema();
     await ensureAlertsSchema();
     await ensureCrmAiLearningSchema();
