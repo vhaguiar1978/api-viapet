@@ -37,6 +37,7 @@ import bannersRouter from "./routes/banner.js";
 import serviceRoutes from "./routes/Service.js";
 import subscriptionsRouter from "./routes/subscriptions.js";
 import crmAiRouter from "./routes/crmAi.js";
+import crmAiAssistantRouter from "./routes/crmAiAssistant.js";
 import crmWhatsappRouter from "./routes/crmWhatsapp.js";
 import crmWhatsappOauthRouter from "./routes/crmWhatsappOauth.js";
 import crmConversationsRouter from "./routes/crmConversations.js";
@@ -45,6 +46,7 @@ import crmAutomationsRouter from "./routes/crmAutomations.js";
 import crmPlanStatusRouter from "./routes/crmPlanStatus.js";
 import { runAutomationsForAllUsers } from "./service/crmAutomations.js";
 import BaileysService from "./service/baileys.js";
+import { processPendingResponseJobs } from "./service/crmResponseQueue.js";
 import cron from "node-cron";
 import whatsappOfficialRouter from "./routes/whatsappOfficial.js";
 import whatsappHubRouter from "./routes/whatsappHub.js";
@@ -175,6 +177,7 @@ app.use(driversRouter);
 app.use(bannersRouter);
 app.use("/api/subscriptions", subscriptionsRouter);
 app.use("/api/crm-ai", crmAiRouter);
+app.use("/api/crm-ai-assistant", crmAiAssistantRouter);
 app.use(crmWhatsappRouter);
 app.use(crmWhatsappOauthRouter);
 app.use(crmConversationsRouter);
@@ -1092,6 +1095,9 @@ sequelize
     console.log("Conectado ao banco de dados");
     // Reabre sessoes Baileys em background (nao bloqueia startup)
     reinitBaileysSessions();
+    processPendingResponseJobs().catch((error) => {
+      console.error("Erro ao recuperar respostas pendentes do CRM:", error.message);
+    });
   })
   .catch((erro) => {
     console.error("Houve um erro: ", erro);
@@ -1107,6 +1113,14 @@ app.listen(PORT, () => {
   console.log("🔗 API_URL: ", process.env.API_URL);
 
   // Cron de automacoes CRM — roda a cada 5 minutos
+  setInterval(async () => {
+    try {
+      await processPendingResponseJobs();
+    } catch (error) {
+      console.error("Erro na fila de respostas do CRM:", error.message);
+    }
+  }, 15000);
+
   if (process.env.DISABLE_CRM_AUTOMATIONS_CRON !== "true") {
     cron.schedule("*/5 * * * *", async () => {
       try {
