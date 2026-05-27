@@ -455,13 +455,17 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
   try {
     const usersId = req.user.establishment;
 
+    // IMPORTANTE: NÃO incluir "pago" aqui. Já vimos casos em que um Finance
+    // pago "mais recente" sobrescrevia o pendente original na agregação por
+    // reference (fix 2), fazendo a dívida sumir. O ponto de verdade para "está
+    // devendo" é status pendente/atrasado — pago nunca deve entrar neste cálculo.
     const [allEntryFinances, pets] = await Promise.all([
       Finance.findAll({
         where: {
           usersId,
           type: "entrada",
           status: {
-            [Op.in]: ["pendente", "atrasado", "pago"],
+            [Op.in]: ["pendente", "atrasado"],
           },
         },
         attributes: ["id", "reference", "description", "category", "subCategory", "status", "amount", "grossAmount", "dueDate", "date", "createdAt", "updatedAt"],
@@ -491,16 +495,15 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
         Number(finance?.id || 0) || 0,
       );
 
-    const latestPendingSalesByReference = new Map();
-    for (const finance of allSaleFinances) {
-      const referenceKey = String(finance.reference || "").trim();
-      if (!referenceKey) continue;
-      const current = latestPendingSalesByReference.get(referenceKey);
-      if (!current || latestTimestamp(finance) >= latestTimestamp(current)) {
-        latestPendingSalesByReference.set(referenceKey, finance);
-      }
-    }
-
+    // Agregação por reference. Antes pegávamos só o "mais recente" e depois
+    // filtrávamos por status === "pendente", o que tinha DOIS problemas:
+    //   (a) descartava silenciosamente vendas com status "atrasado";
+    //   (b) se uma race condition gerasse duas linhas para a mesma reference,
+    //       a versão pendente podia mascarar uma versão paga (ou vice-versa).
+    // Após o Fix 1, allEntryFinances já só traz pendente/atrasado — então
+    // todo registro aqui representa dívida real. Mantemos um Finance por
+    // reference (o mais recente, para metadados de data) e usamos TODAS as
+    // references como pendentes — não filtramos mais por status === pendente.
     const latestSaleFinanceByReference = new Map();
     for (const finance of allSaleFinances) {
       const referenceKey = String(finance.reference || "").trim();
@@ -510,11 +513,7 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
         latestSaleFinanceByReference.set(referenceKey, finance);
       }
     }
-    const confirmedPendingSaleIds = [
-      ...latestSaleFinanceByReference.entries()
-        .filter(([, finance]) => String(finance?.status || "").toLowerCase() === "pendente")
-        .map(([referenceKey]) => referenceKey),
-    ];
+    const pendingSaleReferences = [...latestSaleFinanceByReference.keys()];
 
     const [pendingPayments, pendingSales] = await Promise.all([
       pendingAppointmentFinanceIds.length
@@ -533,12 +532,12 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
             }],
           })
         : Promise.resolve([]),
-      confirmedPendingSaleIds.length
+      pendingSaleReferences.length
         ? Sales.findAll({
             where: {
               usersId,
               id: {
-                [Op.in]: confirmedPendingSaleIds,
+                [Op.in]: pendingSaleReferences,
               },
             },
             attributes: ["id", "custumerId"],

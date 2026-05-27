@@ -755,10 +755,16 @@ router.delete("/sales/:id", auth, async (req, res) => {
         }),
       );
 
-      // Delete associated finance record if exists
+      // Delete associated finance record if exists.
+      // BUG histórico: este destroy usava `sale_${sale.id}` mas o create em
+      // sales.js (linhas 132 e 357) sempre gravou `reference: sale.id` (cru).
+      // Resultado: vendas deletadas deixavam o Finance "pendente" órfão no
+      // banco, fazendo o cliente aparecer eternamente como devedor na tela
+      // de Pesquisar Devedores. Apagamos os DOIS formatos para limpar tanto
+      // novos registros quanto qualquer zumbi legado.
       await Finance.destroy({
         where: {
-          reference: `sale_${sale.id}`,
+          reference: { [Op.in]: [String(sale.id), `sale_${sale.id}`] },
           usersId: req.user.establishment,
         },
         transaction: t,
