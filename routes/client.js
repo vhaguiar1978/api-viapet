@@ -571,7 +571,7 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
               },
             ],
           },
-          attributes: ["id", "customerId", "date", "financeId"],
+          attributes: ["id", "customerId", "date", "financeId", "status"],
         })
       : [];
     const appointmentByFinanceId = new Map(
@@ -583,6 +583,20 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
       appointmentsByFinanceId.map((item) => [String(item.id), item]),
     );
 
+    // Status de Appointment que indicam que o atendimento NÃO está mais
+    // em aberto — não devem gerar cobrança no relatório de devedores
+    // mesmo que o Finance associado tenha ficado pendente por
+    // dessincronização.
+    //
+    // Diagnóstico em produção (scripts/diagnose-debt-agenda-fantasmas.js)
+    // mostrou ~97 Finance pendentes/atrasados ligados a Appointment já
+    // concluído, totalizando ~R$ 20k em dívida-fantasma na tela
+    // "Pesquisar Devedores". Esta proteção elimina essas linhas no
+    // momento da leitura — sem mexer no banco.
+    const FINALIZED_APPOINTMENT_STATUS = /(conclu[ií]do|pronto|finalizado|entregue|pago|cancelad)/i;
+    const isAppointmentFinalized = (appointment) =>
+      !!appointment && FINALIZED_APPOINTMENT_STATUS.test(String(appointment.status || ""));
+
     for (const finance of currentAgendaFinances) {
       const payment = paymentByFinanceId.get(Number(finance.id)) || null;
       const appointment =
@@ -592,6 +606,9 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
         null;
       const customerId = String(appointment?.customerId || "");
       if (!customerId) continue;
+      // Pula agendamentos já concluídos/cancelados — Finance pendente
+      // ligado a appointment finalizado é dívida-fantasma.
+      if (isAppointmentFinalized(appointment)) continue;
       if (!summaryMap[customerId]) summaryMap[customerId] = { amount: 0, latestPurchaseDate: "", petNames: [] };
       summaryMap[customerId].amount += Number(finance.grossAmount || finance.amount || 0);
       const d = finance.dueDate || finance.date || payment?.dueDate || appointment?.date || "";
