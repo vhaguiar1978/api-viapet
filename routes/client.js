@@ -583,19 +583,51 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
       appointmentsByFinanceId.map((item) => [String(item.id), item]),
     );
 
-    // Status de Appointment que indicam que o atendimento NÃO está mais
-    // em aberto — não devem gerar cobrança no relatório de devedores
-    // mesmo que o Finance associado tenha ficado pendente por
-    // dessincronização.
+    // PROTEÇÃO ANTI-FANTASMA (refinada).
     //
-    // Diagnóstico em produção (scripts/diagnose-debt-agenda-fantasmas.js)
-    // mostrou ~97 Finance pendentes/atrasados ligados a Appointment já
-    // concluído, totalizando ~R$ 20k em dívida-fantasma na tela
-    // "Pesquisar Devedores". Esta proteção elimina essas linhas no
-    // momento da leitura — sem mexer no banco.
-    const FINALIZED_APPOINTMENT_STATUS = /(conclu[ií]do|pronto|finalizado|entregue|pago|cancelad)/i;
-    const isAppointmentFinalized = (appointment) =>
-      !!appointment && FINALIZED_APPOINTMENT_STATUS.test(String(appointment.status || ""));
+    // Contexto: regra de negócio confirmada com o usuário — quando um
+    // agendamento vai para "entregue", o cliente PODE ter pagado ou PODE
+    // estar fiando. Não dá pra inferir só pelo Appointment.status.
+    //
+    // Critério usado aqui: para cada Finance pendente/atrasado cuja
+    // reference é "appointment_payment:<id>", buscamos a AppointmentPayment
+    // correspondente PELO id da reference (não pelo financeId — porque
+    // pode estar dessincronizado). Se essa parcela já está marcada
+    // status="pago" ou tem paidAt definido, o pagamento foi efetivamente
+    // recebido e o Finance ficou pendente por bug de sync — esse SIM é
+    // fantasma comprovado e pode ser ocultado. Caso contrário (parcela
+    // pendente ou ausente), o cliente está realmente devendo (fiou) e
+    // permanece no relatório de devedores.
+    const parseAppointmentPaymentIdFromRef = (reference) => {
+      const raw = String(reference || "").trim();
+      const [prefix, paymentId] = raw.split(":");
+      return prefix === "appointment_payment" && paymentId ? paymentId : null;
+    };
+    const paymentIdsFromFinanceRefs = [
+      ...new Set(
+        currentAgendaFinances
+          .map((finance) => parseAppointmentPaymentIdFromRef(finance.reference))
+          .filter(Boolean),
+      ),
+    ];
+    const paymentsByOwnId = new Map();
+    if (paymentIdsFromFinanceRefs.length) {
+      const realPayments = await AppointmentPayment.findAll({
+        where: {
+          usersId,
+          id: { [Op.in]: paymentIdsFromFinanceRefs },
+        },
+        attributes: ["id", "status", "paidAt"],
+      });
+      for (const p of realPayments) paymentsByOwnId.set(String(p.id), p);
+    }
+    const isPaymentAlreadySettled = (paymentRow) => {
+      if (!paymentRow) return false;
+      const status = String(paymentRow.status || "").trim().toLowerCase();
+      if (status === "pago") return true;
+      if (paymentRow.paidAt) return true;
+      return false;
+    };
 
     for (const finance of currentAgendaFinances) {
       const payment = paymentByFinanceId.get(Number(finance.id)) || null;
@@ -606,9 +638,15 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
         null;
       const customerId = String(appointment?.customerId || "");
       if (!customerId) continue;
-      // Pula agendamentos já concluídos/cancelados — Finance pendente
-      // ligado a appointment finalizado é dívida-fantasma.
-      if (isAppointmentFinalized(appointment)) continue;
+
+      // Anti-fantasma: se este Finance espelha uma AppointmentPayment
+      // específica e essa parcela já está paga, é resíduo de sync — pula.
+      const refPaymentId = parseAppointmentPaymentIdFromRef(finance.reference);
+      if (refPaymentId) {
+        const realPayment = paymentsByOwnId.get(String(refPaymentId));
+        if (isPaymentAlreadySettled(realPayment)) continue;
+      }
+
       if (!summaryMap[customerId]) summaryMap[customerId] = { amount: 0, latestPurchaseDate: "", petNames: [] };
       summaryMap[customerId].amount += Number(finance.grossAmount || finance.amount || 0);
       const d = finance.dueDate || finance.date || payment?.dueDate || appointment?.date || "";
