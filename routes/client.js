@@ -629,6 +629,38 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
       return false;
     };
 
+    // FILTRO DE VENCIMENTO — regra de negócio confirmada com o usuário:
+    // devedor é quem tem dueDate <= HOJE. Agendamentos futuros (mesmo com
+    // Finance criado preventivamente) NÃO são dívida — o cliente nem
+    // recebeu o serviço ainda. Usa timezone America/Sao_Paulo para evitar
+    // off-by-one em chamadas perto da meia-noite.
+    const todayStr = new Intl.DateTimeFormat("sv-SE", {
+      timeZone: "America/Sao_Paulo",
+    }).format(new Date()); // "YYYY-MM-DD"
+    const extractDateOnly = (value) => {
+      if (!value) return "";
+      const raw = String(value);
+      if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10);
+      const parsed = new Date(raw);
+      if (Number.isNaN(parsed.getTime())) return "";
+      return parsed.toISOString().slice(0, 10);
+    };
+    const isOverdueOrDueToday = (rawDueDate) => {
+      const ds = extractDateOnly(rawDueDate);
+      if (!ds) return true; // sem dueDate: assume devido (defensivo)
+      return ds <= todayStr;
+    };
+
+    // DEDUPLICAÇÃO — em produção encontramos Finance duplicados (mesma
+    // reference + valor + dueDate) gerados por re-sync. Aqui só contamos
+    // um Finance por chave canônica: prefere o de maior id (mais recente).
+    const dedupKey = (finance) =>
+      [
+        String(finance.reference || "").trim().toLowerCase(),
+        extractDateOnly(finance.dueDate),
+        Number(finance.grossAmount || finance.amount || 0).toFixed(2),
+      ].join("|");
+
     for (const finance of currentAgendaFinances) {
       const payment = paymentByFinanceId.get(Number(finance.id)) || null;
       const appointment =
@@ -639,6 +671,9 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
       const customerId = String(appointment?.customerId || "");
       if (!customerId) continue;
 
+      // Vencimento futuro não é dívida.
+      if (!isOverdueOrDueToday(finance.dueDate || appointment?.date)) continue;
+
       // Anti-fantasma: se este Finance espelha uma AppointmentPayment
       // específica e essa parcela já está paga, é resíduo de sync — pula.
       const refPaymentId = parseAppointmentPaymentIdFromRef(finance.reference);
@@ -647,7 +682,14 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
         if (isPaymentAlreadySettled(realPayment)) continue;
       }
 
-      if (!summaryMap[customerId]) summaryMap[customerId] = { amount: 0, latestPurchaseDate: "", petNames: [] };
+      if (!summaryMap[customerId]) {
+        summaryMap[customerId] = { amount: 0, latestPurchaseDate: "", petNames: [], _seenKeys: new Set() };
+      }
+      // Deduplicação: ignora Finance com a mesma chave canônica.
+      const key = dedupKey(finance);
+      if (summaryMap[customerId]._seenKeys.has(key)) continue;
+      summaryMap[customerId]._seenKeys.add(key);
+
       summaryMap[customerId].amount += Number(finance.grossAmount || finance.amount || 0);
       const d = finance.dueDate || finance.date || payment?.dueDate || appointment?.date || "";
       if (d && d > (summaryMap[customerId].latestPurchaseDate || "")) summaryMap[customerId].latestPurchaseDate = d;
@@ -656,8 +698,17 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
     for (const sale of pendingSales) {
       const customerId = String(sale.custumerId || "");
       if (!customerId) continue;
-      if (!summaryMap[customerId]) summaryMap[customerId] = { amount: 0, latestPurchaseDate: "", petNames: [] };
       const finance = financeByReference.get(String(sale.id || ""));
+      // Mesma regra para vendas: vencimento futuro não é dívida.
+      if (!isOverdueOrDueToday(finance?.dueDate || finance?.date)) continue;
+
+      if (!summaryMap[customerId]) {
+        summaryMap[customerId] = { amount: 0, latestPurchaseDate: "", petNames: [], _seenKeys: new Set() };
+      }
+      const saleKey = `sale|${String(sale.id || "")}`;
+      if (summaryMap[customerId]._seenKeys.has(saleKey)) continue;
+      summaryMap[customerId]._seenKeys.add(saleKey);
+
       summaryMap[customerId].amount += Number(finance?.grossAmount || finance?.amount || 0);
       const d = finance?.dueDate || finance?.date || finance?.createdAt || "";
       if (d && d > (summaryMap[customerId].latestPurchaseDate || "")) summaryMap[customerId].latestPurchaseDate = d;
@@ -667,6 +718,11 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
       const customerId = String(pet.custumerId || "");
       if (!customerId || !summaryMap[customerId] || !pet.name) continue;
       if (!summaryMap[customerId].petNames.includes(pet.name)) summaryMap[customerId].petNames.push(pet.name);
+    }
+
+    // Remove _seenKeys (Set interno de dedup) antes de responder.
+    for (const k of Object.keys(summaryMap)) {
+      if (summaryMap[k]?._seenKeys) delete summaryMap[k]._seenKeys;
     }
 
     return res.status(200).json({ message: "Sumário calculado com sucesso", data: summaryMap });
