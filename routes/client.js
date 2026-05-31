@@ -11,6 +11,7 @@ import SaleItem from "../models/SaleItem.js";
 import Product from "../models/Products.js";
 import AppointmentPayment from "../models/AppointmentPayment.js";
 import Finance from "../models/Finance.js";
+import sequelize from "../database/config.js";
 import { logActivity } from "../service/activityLogger.js";
 const router = express.Router();
 
@@ -729,6 +730,280 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
   } catch (error) {
     console.error("Erro ao calcular sumário de dívidas:", error);
     return res.status(500).json({ message: "Erro ao calcular sumário de dívidas", error: error.message });
+  }
+});
+
+// =============================================================================
+// BAIXA EM LOTE — listar pendências de um cliente e quitar várias de uma vez
+// =============================================================================
+//
+// Casos de uso resolvidos:
+// - Cliente fiou várias visitas e veio pagar tudo de uma vez em dinheiro.
+// - Operador esqueceu de baixar pagamentos antigos e precisa zerar de uma vez.
+//
+// Endpoints:
+// - GET  /customers/:id/pending-finances  → lista todas as pendências
+//        do cliente (parcelas, saldos, vendas), com dueDate <= hoje
+// - POST /customers/:id/settle-finances   → quita as pendências escolhidas
+
+router.get("/customers/:id/pending-finances", auth, async (req, res) => {
+  try {
+    const usersId = req.user.establishment;
+    const customerId = String(req.params.id || "").trim();
+    if (!customerId) {
+      return res.status(400).json({ message: "customerId é obrigatório" });
+    }
+
+    // 1) Todos Finance pendente/atrasado do tenant
+    const finances = await Finance.findAll({
+      where: {
+        usersId,
+        type: "entrada",
+        status: { [Op.in]: ["pendente", "atrasado"] },
+      },
+      attributes: ["id", "reference", "description", "category", "status", "amount", "grossAmount", "dueDate", "date"],
+      order: [["dueDate", "ASC"], ["id", "ASC"]],
+    });
+
+    if (!finances.length) {
+      return res.status(200).json({ message: "Sem pendências", data: { customerId, items: [], total: 0 } });
+    }
+
+    // 2) Resolvedores: appointment_payment → AppointmentPayment → Appointment.customerId
+    //                 appointment_balance/free:<apptId> → Appointment.customerId
+    //                 sale <uuid> → Sales.custumerId
+    const parsePid = (ref) => {
+      const [p, id] = String(ref || "").trim().split(":");
+      return p === "appointment_payment" && id ? id : null;
+    };
+    const parseAid = (ref) => {
+      const [p, id] = String(ref || "").trim().split(":");
+      return (p === "appointment_balance" || p === "appointment_free") && id ? id : null;
+    };
+
+    const paymentIds = [...new Set(finances.map((f) => parsePid(f.reference)).filter(Boolean))];
+    const payments = paymentIds.length
+      ? await AppointmentPayment.findAll({
+          where: { id: { [Op.in]: paymentIds } },
+          attributes: ["id", "appointmentId", "status", "paidAt"],
+        })
+      : [];
+    const paymentById = new Map(payments.map((p) => [String(p.id), p]));
+
+    const apptIds = [
+      ...new Set([
+        ...finances.map((f) => parseAid(f.reference)).filter(Boolean),
+        ...payments.map((p) => String(p.appointmentId)).filter(Boolean),
+      ]),
+    ];
+    const appts = apptIds.length
+      ? await Appointment.findAll({
+          where: { usersId, id: { [Op.in]: apptIds } },
+          attributes: ["id", "customerId", "date", "status"],
+        })
+      : [];
+    const apptById = new Map(appts.map((a) => [String(a.id), a]));
+
+    // Sales do cliente (mais barato que carregar todas)
+    const sales = await Sales.findAll({
+      where: { usersId, custumerId: customerId },
+      attributes: ["id"],
+    });
+    const saleIds = new Set(sales.map((s) => String(s.id)));
+
+    const todayStr = new Intl.DateTimeFormat("sv-SE", {
+      timeZone: "America/Sao_Paulo",
+    }).format(new Date());
+    const extractDateOnly = (value) => {
+      if (!value) return "";
+      const raw = String(value);
+      if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10);
+      const parsed = new Date(raw);
+      if (Number.isNaN(parsed.getTime())) return "";
+      return parsed.toISOString().slice(0, 10);
+    };
+
+    const items = [];
+    for (const f of finances) {
+      let resolvedCustomerId = null;
+      let kind = "outro";
+      let appointmentId = null;
+      let appointmentDate = null;
+      let paymentRowId = null;
+
+      const pid = parsePid(f.reference);
+      if (pid) {
+        const p = paymentById.get(String(pid));
+        if (p) {
+          // pula parcela já marcada como paga (anti-fantasma)
+          if (String(p.status || "").toLowerCase() === "pago" || p.paidAt) continue;
+          kind = "appointment_payment";
+          paymentRowId = String(p.id);
+          appointmentId = String(p.appointmentId);
+          const a = apptById.get(appointmentId);
+          if (a) {
+            resolvedCustomerId = String(a.customerId);
+            appointmentDate = a.date;
+          }
+        }
+      }
+      if (!resolvedCustomerId) {
+        const aid = parseAid(f.reference);
+        if (aid) {
+          appointmentId = aid;
+          const a = apptById.get(aid);
+          if (a) {
+            kind = String(f.reference).split(":")[0]; // appointment_balance | appointment_free
+            resolvedCustomerId = String(a.customerId);
+            appointmentDate = a.date;
+          }
+        }
+      }
+      if (!resolvedCustomerId && saleIds.has(String(f.reference))) {
+        kind = "sale";
+        resolvedCustomerId = customerId;
+      }
+
+      if (resolvedCustomerId !== customerId) continue;
+
+      const dueDateStr = extractDateOnly(f.dueDate);
+      if (dueDateStr && dueDateStr > todayStr) continue; // futuro não é pendência
+
+      items.push({
+        financeId: f.id,
+        kind,
+        description: f.description,
+        status: f.status,
+        amount: Number(f.amount || 0),
+        grossAmount: Number(f.grossAmount || f.amount || 0),
+        dueDate: dueDateStr || extractDateOnly(f.date),
+        appointmentId,
+        appointmentDate,
+        appointmentPaymentId: paymentRowId,
+        saleId: kind === "sale" ? String(f.reference) : null,
+      });
+    }
+
+    const total = items.reduce((s, i) => s + i.grossAmount, 0);
+    return res.status(200).json({
+      message: "Pendências listadas",
+      data: { customerId, items, total, count: items.length },
+    });
+  } catch (error) {
+    console.error("Erro ao listar pendências:", error);
+    return res.status(500).json({ message: "Erro ao listar pendências", error: error.message });
+  }
+});
+
+router.post("/customers/:id/settle-finances", auth, async (req, res) => {
+  const t = await sequelize.transaction();
+  try {
+    const usersId = req.user.establishment;
+    const customerId = String(req.params.id || "").trim();
+    const { financeIds = [], paymentMethod = "Dinheiro", paidAt = null, notes = "" } = req.body || {};
+
+    if (!customerId) {
+      await t.rollback();
+      return res.status(400).json({ message: "customerId é obrigatório" });
+    }
+    if (!Array.isArray(financeIds) || financeIds.length === 0) {
+      await t.rollback();
+      return res.status(400).json({ message: "Envie financeIds: array de ids a quitar" });
+    }
+
+    const paidAtDate = paidAt ? new Date(paidAt) : new Date();
+    if (Number.isNaN(paidAtDate.getTime())) {
+      await t.rollback();
+      return res.status(400).json({ message: "paidAt inválido" });
+    }
+
+    // 1) Carrega os Finances solicitados, do tenant correto, pendentes ainda
+    const finances = await Finance.findAll({
+      where: {
+        id: { [Op.in]: financeIds.map(Number).filter(Boolean) },
+        usersId,
+        type: "entrada",
+        status: { [Op.in]: ["pendente", "atrasado"] },
+      },
+      transaction: t,
+    });
+
+    if (!finances.length) {
+      await t.rollback();
+      return res.status(404).json({ message: "Nenhum Finance pendente encontrado com esses ids" });
+    }
+
+    // 2) Para cada Finance, identifica e atualiza o pago.
+    let settledCount = 0;
+    let settledAmount = 0;
+    const settledPaymentIds = [];
+    const settledSaleIds = [];
+    const settledFinanceIds = [];
+
+    for (const f of finances) {
+      // Atualiza Finance
+      await f.update(
+        {
+          status: "pago",
+          paymentMethod: paymentMethod || f.paymentMethod || "Dinheiro",
+          date: paidAtDate,
+          ...(notes ? { notes: `${f.notes ? f.notes + " | " : ""}${notes}` } : {}),
+        },
+        { transaction: t },
+      );
+      settledFinanceIds.push(f.id);
+      settledAmount += Number(f.grossAmount || f.amount || 0);
+      settledCount += 1;
+
+      // Se for parcela de agendamento, atualiza AppointmentPayment também
+      const [prefix, refId] = String(f.reference || "").trim().split(":");
+      if (prefix === "appointment_payment" && refId) {
+        const payment = await AppointmentPayment.findByPk(refId, { transaction: t });
+        if (payment) {
+          await payment.update(
+            {
+              status: "pago",
+              paidAt: paidAtDate,
+              paymentMethod: paymentMethod || payment.paymentMethod || "Dinheiro",
+            },
+            { transaction: t },
+          );
+          settledPaymentIds.push(payment.id);
+        }
+      }
+
+      // Se for venda, atualiza Sales
+      const referenceStr = String(f.reference || "").trim();
+      if (referenceStr && !referenceStr.startsWith("appointment")) {
+        const sale = await Sales.findOne({
+          where: { id: referenceStr, usersId, custumerId: customerId },
+          transaction: t,
+        });
+        if (sale) {
+          await sale.update({ status: "pago" }, { transaction: t });
+          settledSaleIds.push(sale.id);
+        }
+      }
+    }
+
+    await t.commit();
+    return res.status(200).json({
+      message: "Baixa em lote concluída",
+      data: {
+        customerId,
+        paymentMethod: paymentMethod || "Dinheiro",
+        paidAt: paidAtDate.toISOString(),
+        settledCount,
+        settledAmount,
+        settledFinanceIds,
+        settledPaymentIds,
+        settledSaleIds,
+      },
+    });
+  } catch (error) {
+    try { await t.rollback(); } catch (_) {}
+    console.error("Erro ao baixar pagamentos em lote:", error);
+    return res.status(500).json({ message: "Erro ao baixar pagamentos em lote", error: error.message });
   }
 });
 
