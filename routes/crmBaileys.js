@@ -4,6 +4,7 @@ import BaileysService from "../service/baileys.js";
 import Settings from "../models/Settings.js";
 import CrmConversation from "../models/CrmConversation.js";
 import CrmConversationMessage from "../models/CrmConversationMessage.js";
+import { markConversationJobsAnswered } from "../service/crmResponseQueue.js";
 import { enforcePlanLimit } from "../service/planLimits.js";
 import { v4 as uuidv4 } from "uuid";
 
@@ -288,7 +289,9 @@ router.post("/crm-baileys/send", authenticate, enforcePlanLimit("messagesPerMont
     // Save to database if conversationId provided
     if (conversationId) {
       try {
-        const conversation = await CrmConversation.findByPk(conversationId);
+        const conversation = await CrmConversation.findOne({
+          where: { id: conversationId, usersId: userId },
+        });
         if (conversation) {
           await CrmConversationMessage.create({
             id: uuidv4(),
@@ -303,6 +306,11 @@ router.post("/crm-baileys/send", authenticate, enforcePlanLimit("messagesPerMont
             status: "sent",
             sentAt: new Date(),
             payload: result,
+          });
+          await markConversationJobsAnswered({
+            usersId: userId,
+            conversationId,
+            answeredAt: new Date(),
           });
 
           // Update conversation last message

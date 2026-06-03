@@ -93,6 +93,7 @@ export const calculateMachineFeeBreakdown = (grossAmount, feePercentage = 0) => 
 
 const _methodFeeCache = new Map();
 const _METHOD_FEE_CACHE_TTL_MS = 60_000;
+const _appointmentFinanceSyncLocks = new Map();
 
 async function loadUserMethodFees(usersId) {
   const cached = _methodFeeCache.get(usersId);
@@ -581,11 +582,15 @@ export const calculateAppointmentSummary = async (appointment, items, payments) 
   };
 };
 
-export const syncAppointmentFinance = async (appointmentId) => {
+const syncAppointmentFinanceUnlocked = async (appointmentId) => {
   const appointment = await Appointment.findByPk(appointmentId);
   if (!appointment) {
     throw new Error("Agendamento não encontrado");
   }
+
+  const isPackageAppointment =
+    Boolean(String(appointment.packageGroupId || "").trim()) ||
+    (Boolean(appointment.package) && Number(appointment.packageMax || 0) > 1);
 
   const currentLinkedFinance = appointment.financeId
     ? await Finance.findByPk(appointment.financeId)
@@ -676,12 +681,31 @@ export const syncAppointmentFinance = async (appointmentId) => {
   }
 
   const balanceReference = `appointment_balance:${appointment.id}`;
-  const existingBalanceFinance = await Finance.findOne({
+  const existingBalanceFinances = await Finance.findAll({
     where: {
       reference: balanceReference,
       usersId: appointment.usersId,
     },
+    order: [["updatedAt", "DESC"], ["id", "DESC"]],
   });
+  const existingBalanceFinance =
+    existingBalanceFinances.find(
+      (finance) => Number(finance.id) === Number(appointment.financeId),
+    ) ||
+    existingBalanceFinances[0] ||
+    null;
+  const duplicateBalanceFinanceIds = existingBalanceFinances
+    .filter((finance) => Number(finance.id) !== Number(existingBalanceFinance?.id))
+    .map((finance) => finance.id);
+
+  if (duplicateBalanceFinanceIds.length) {
+    await Finance.destroy({
+      where: {
+        id: { [Op.in]: duplicateBalanceFinanceIds },
+        usersId: appointment.usersId,
+      },
+    });
+  }
 
   if (summary.balance > 0) {
     const earliestPendingDate =
@@ -690,8 +714,12 @@ export const syncAppointmentFinance = async (appointmentId) => {
     const hasPendingPaymentRows = payments.some(
       (payment) => normalizeStatus(payment.status) === "pendente",
     );
+    const hasAnyPaymentRows = payments.length > 0;
 
-    if (hasPendingPaymentRows) {
+    // Pacotinhos podem ter pagamento menor que o preço cheio do serviço.
+    // Quando já existe payment row, esse payment é a fonte da cobrança e não
+    // devemos gerar um balance extra para a sessão.
+    if (hasPendingPaymentRows || (isPackageAppointment && hasAnyPaymentRows)) {
       if (existingBalanceFinance) {
         await existingBalanceFinance.destroy();
       }
@@ -762,6 +790,95 @@ export const syncAppointmentFinance = async (appointmentId) => {
   }
 
   return summary;
+};
+
+export const syncAppointmentFinance = async (appointmentId) => {
+  const lockKey = String(appointmentId || "");
+  const previousSync = _appointmentFinanceSyncLocks.get(lockKey) || Promise.resolve();
+  const currentSync = previousSync
+    .catch(() => null)
+    .then(() => syncAppointmentFinanceUnlocked(appointmentId));
+
+  _appointmentFinanceSyncLocks.set(lockKey, currentSync);
+
+  try {
+    return await currentSync;
+  } finally {
+    if (_appointmentFinanceSyncLocks.get(lockKey) === currentSync) {
+      _appointmentFinanceSyncLocks.delete(lockKey);
+    }
+  }
+};
+
+// Status que indicam que o pet ja foi entregue/atendido — quando um agendamento
+// chega a um destes, presume-se que a parcela com forma de pagamento registrada
+// foi efetivamente recebida.
+export const DELIVERED_APPOINTMENT_STATUSES = ["entregue", "concluido", "atendido", "pronto"];
+
+// Confirma automaticamente como "pago" as parcelas pendentes de agendamentos ja
+// entregues que tenham forma de pagamento e valor registrados, e ressincroniza o
+// Finance. E a MESMA regra do antigo botao "Recalcular pagamentos", agora
+// reutilizavel: pode rodar para UM agendamento (ao marcar como entregue) ou para
+// TODOS (varredura completa, quando appointmentId nao e informado).
+//
+// REGRA DE SEGURANCA: parcela SEM forma de pagamento nunca e confirmada — essas
+// continuam pendentes (fiado / divida real). So confirma o que tem indicio claro
+// de pagamento, evitando a "divida fantasma" no card da agenda.
+export const repairDeliveredAppointmentPayments = async (usersId, { appointmentId } = {}) => {
+  const paymentWhere = { usersId, status: "pendente" };
+  if (appointmentId) {
+    paymentWhere.appointmentId = String(appointmentId);
+  }
+
+  const candidatePayments = await AppointmentPayment.findAll({ where: paymentWhere });
+
+  const appointmentIdsToCheck = [
+    ...new Set(
+      candidatePayments
+        .map((payment) => String(payment.appointmentId || ""))
+        .filter(Boolean),
+    ),
+  ];
+
+  const appointmentsById = appointmentIdsToCheck.length
+    ? new Map(
+        (
+          await Appointment.findAll({
+            where: { id: appointmentIdsToCheck, usersId },
+          })
+        ).map((appointment) => [String(appointment.id), appointment]),
+      )
+    : new Map();
+
+  const affectedAppointmentIds = new Set();
+  let repairedCount = 0;
+
+  for (const payment of candidatePayments) {
+    const method = String(payment.paymentMethod || "").trim();
+    const amount = Number(payment.grossAmount || payment.amount || 0) || 0;
+    if (!method || amount <= 0) continue;
+
+    const appointment = appointmentsById.get(String(payment.appointmentId));
+    const appointmentStatus = String(appointment?.status || "").trim().toLowerCase();
+    if (!DELIVERED_APPOINTMENT_STATUSES.includes(appointmentStatus)) continue;
+
+    await payment.update({
+      status: "pago",
+      paidAt: payment.paidAt || payment.updatedAt || payment.createdAt || new Date(),
+    });
+    repairedCount += 1;
+    affectedAppointmentIds.add(String(payment.appointmentId));
+  }
+
+  for (const affectedId of affectedAppointmentIds) {
+    try {
+      await syncAppointmentFinance(affectedId);
+    } catch (syncError) {
+      console.error("Erro ao ressincronizar agendamento:", affectedId, syncError);
+    }
+  }
+
+  return { repairedCount, affectedAppointmentIds };
 };
 
 export const getAppointmentComandaDetails = async (appointmentId, usersId) => {

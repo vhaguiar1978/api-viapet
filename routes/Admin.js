@@ -45,6 +45,8 @@ import WhatsappWebhookLog from "../models/WhatsappWebhookLog.js";
 import { createSubscriptionPreference } from "../service/mercadopago.js";
 import emailService from "../service/email.js";
 import { ensureDefaultMedicalCatalog } from "../service/defaultMedicalCatalog.js";
+import { sendSystemWelcomeWhatsapp } from "../service/systemWelcomeWhatsapp.js";
+import { testAiReply } from "../service/crmAutoReply.js";
 const router = express.Router();
 const SYSTEM_GENERATED_USER_EMAIL_PATTERN = "indefinido.%@sistema.com";
 const UUID_REGEX =
@@ -95,6 +97,12 @@ async function getOrCreateAdminSettings() {
   );
   await Admin.sequelize.query(
     'ALTER TABLE "admin" ADD COLUMN IF NOT EXISTS "emailCampaignEnabled" BOOLEAN DEFAULT TRUE',
+  );
+  await Admin.sequelize.query(
+    'ALTER TABLE "admin" ADD COLUMN IF NOT EXISTS "whatsappWelcomeEnabled" BOOLEAN DEFAULT FALSE',
+  );
+  await Admin.sequelize.query(
+    `ALTER TABLE "admin" ADD COLUMN IF NOT EXISTS "whatsappWelcomeTemplate" TEXT DEFAULT 'Ola, {name}! Seja muito bem-vindo(a) ao ViaPet. Sua conta foi criada com sucesso. Se precisar de ajuda para começar, fale com a nossa equipe por aqui.'`,
   );
 
   let settings = await Admin.findOne();
@@ -558,6 +566,8 @@ router.post("/settings/admin", adminMiddleware, async (req, res) => {
       emailEmployeeWelcomeEnabled,
       emailPlanReminderEnabled,
       emailCampaignEnabled,
+      whatsappWelcomeEnabled,
+      whatsappWelcomeTemplate,
     } = req.body;
     let settings = await getOrCreateAdminSettings();
 
@@ -581,6 +591,8 @@ router.post("/settings/admin", adminMiddleware, async (req, res) => {
     if (emailEmployeeWelcomeEnabled !== undefined) settings.emailEmployeeWelcomeEnabled = Boolean(emailEmployeeWelcomeEnabled);
     if (emailPlanReminderEnabled !== undefined) settings.emailPlanReminderEnabled = Boolean(emailPlanReminderEnabled);
     if (emailCampaignEnabled !== undefined) settings.emailCampaignEnabled = Boolean(emailCampaignEnabled);
+    if (whatsappWelcomeEnabled !== undefined) settings.whatsappWelcomeEnabled = Boolean(whatsappWelcomeEnabled);
+    if (whatsappWelcomeTemplate !== undefined) settings.whatsappWelcomeTemplate = String(whatsappWelcomeTemplate || "");
 
     await settings.save();
 
@@ -614,6 +626,55 @@ router.post("/settings/admin/test-email", adminMiddleware, async (req, res) => {
     console.error("Erro ao enviar e-mail de teste SMTP:", error);
     return res.status(500).json({
       message: "Erro ao enviar o e-mail de teste.",
+      error: error.message,
+    });
+  }
+});
+
+router.post("/settings/admin/test-whatsapp", adminMiddleware, async (req, res) => {
+  try {
+    const recipientPhone = String(req.body?.recipientPhone || "").trim();
+    const recipientName = String(req.body?.recipientName || "").trim() || "Cliente teste";
+    const digits = recipientPhone.replace(/\D/g, "");
+
+    if (!digits || digits.length < 10) {
+      return res.status(400).json({
+        message: "Informe um numero de WhatsApp valido para o teste.",
+      });
+    }
+
+    const result = await sendSystemWelcomeWhatsapp({
+      name: recipientName,
+      phone: digits,
+    });
+
+    if (result?.skipped === "disabled") {
+      return res.status(400).json({
+        message: "Ative a automacao de boas-vindas no WhatsApp antes de testar.",
+      });
+    }
+
+    if (result?.skipped === "not_configured") {
+      return res.status(400).json({
+        message: "WhatsApp oficial nao configurado no backend para envio real.",
+      });
+    }
+
+    if (result?.skipped) {
+      return res.status(400).json({
+        message: "Nao foi possivel enviar o teste de WhatsApp.",
+        reason: result.skipped,
+      });
+    }
+
+    return res.status(200).json({
+      message: "WhatsApp de teste enviado com sucesso.",
+      data: result,
+    });
+  } catch (error) {
+    console.error("Erro ao enviar WhatsApp de teste:", error);
+    return res.status(500).json({
+      message: "Erro ao enviar o WhatsApp de teste.",
       error: error.message,
     });
   }
@@ -2732,6 +2793,61 @@ router.post("/admin/crm-ai/:id/block", adminMiddleware, async (req, res) => {
     return res.status(500).json({
       message: "Erro ao bloquear IA CRM",
       error: error.message,
+    });
+  }
+});
+
+router.post("/admin/crm-ai/:id/test-reply", adminMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!isUuid(id)) {
+      return res.status(400).json({
+        success: false,
+        error: "Cliente invalido para teste da IA.",
+      });
+    }
+
+    const user = await Users.findOne({
+      where: { id, role: "proprietario" },
+      attributes: ["id", "name", "email", "phone", "plan", "status"],
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: "Cliente nao encontrado.",
+      });
+    }
+
+    const messages = Array.isArray(req.body?.messages) ? req.body.messages : [];
+    if (messages.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: "Envie ao menos uma mensagem do cliente para testar.",
+      });
+    }
+
+    const result = await testAiReply({ usersId: user.id, messages });
+
+    return res.json({
+      success: true,
+      data: {
+        ...result,
+        client: {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          phone: user.phone,
+          plan: user.plan,
+          status: user.status,
+        },
+      },
+    });
+  } catch (error) {
+    console.error("Erro no teste admin da IA CRM:", error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || "Erro ao gerar resposta de teste da IA.",
     });
   }
 });

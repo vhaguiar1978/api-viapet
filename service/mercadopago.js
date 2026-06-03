@@ -4,6 +4,8 @@ import "../config/env.js"; // Usar configuração centralizada
 import BillingSettings from "../models/BillingSettings.js";
 import Admin from "../models/Admin.js";
 
+const DEFAULT_STATEMENT_DESCRIPTOR = "VIAPET";
+
 // Configuração do cliente do Mercado Pago
 // Determinar o ambiente (development vs production)
 const isProduction = process.env.NODE_ENV === "production";
@@ -48,6 +50,17 @@ async function getMercadoPagoSdk() {
     preference: new Preference(client),
     payment: new Payment(client),
   };
+}
+
+function sanitizeStatementDescriptor(value) {
+  const normalized = String(value || DEFAULT_STATEMENT_DESCRIPTOR)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^A-Za-z0-9 ]+/g, "")
+    .trim()
+    .slice(0, 13);
+
+  return normalized || DEFAULT_STATEMENT_DESCRIPTOR;
 }
 
 function getMercadoPagoNotificationUrl(customUrl) {
@@ -184,7 +197,9 @@ export const createSubscriptionPreference = async (subscriptionData) => {
     const customItemId = subscriptionData.itemId;
     const notificationUrl = subscriptionData.notificationUrl;
     const backUrls = subscriptionData.backUrls;
-    const statementDescriptor = subscriptionData.statementDescriptor;
+    const statementDescriptor = sanitizeStatementDescriptor(
+      subscriptionData.statementDescriptor,
+    );
 
     // Usa o valor passado ou determina baseado no tipo de plano
     const amount =
@@ -277,7 +292,7 @@ export const createSubscriptionPreference = async (subscriptionData) => {
         planType === "payment" || planType === "simple_payment"
           ? undefined
           : "approved",
-      statement_descriptor: statementDescriptor || "VIAPET",
+      statement_descriptor: statementDescriptor,
       expires: false,
       external_reference:
         subscriptionData.externalReference || `sub_${Date.now()}`,
@@ -383,6 +398,9 @@ export const createPixPayment = async (paymentData) => {
     const payerFirstName = payerName.split(" ").filter(Boolean)[0] || "Cliente";
     const externalReference =
       paymentData?.externalReference || `main_pix_${Date.now()}`;
+    const statementDescriptor = sanitizeStatementDescriptor(
+      paymentData?.statementDescriptor,
+    );
 
     const notificationTarget = getMercadoPagoNotificationUrl(
       paymentData?.notificationUrl,
@@ -391,6 +409,7 @@ export const createPixPayment = async (paymentData) => {
     const payload = {
         transaction_amount: amount,
         description: paymentData?.description || "Pagamento ViaPet",
+        statement_descriptor: statementDescriptor,
         payment_method_id: "pix",
         payer: {
           email: paymentData?.user?.email || "financeiro@viapet.app",
@@ -1116,4 +1135,5 @@ export default {
   clearWebhookCache,
   planPrices,
   getBillingConfig,
+  DEFAULT_STATEMENT_DESCRIPTOR,
 };

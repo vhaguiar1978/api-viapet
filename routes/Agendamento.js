@@ -25,6 +25,8 @@ import Drivers from "../models/Drivers.js";
 import {
   hydrateAppointmentsWithFinancialDetails,
   syncAppointmentFinance,
+  repairDeliveredAppointmentPayments,
+  DELIVERED_APPOINTMENT_STATUSES,
 } from "../service/appointmentFinance.js";
 
 const router = express.Router();
@@ -826,6 +828,22 @@ router.patch("/appointments/:id/status", auth, async (req, res) => {
     }
 
     await appointment.update({ status });
+
+    // AUTOMATICO: ao marcar como entregue/concluido/atendido/pronto, confirma
+    // as parcelas pendentes que tem forma de pagamento + valor registrados
+    // (substitui o antigo botao manual "Recalcular pagamentos"). Nunca confirma
+    // parcela sem forma de pagamento (fiado continua pendente). Roda em try/catch
+    // para nunca quebrar a atualizacao de status.
+    const normalizedStatus = String(status || "").trim().toLowerCase();
+    if (DELIVERED_APPOINTMENT_STATUSES.includes(normalizedStatus)) {
+      try {
+        await repairDeliveredAppointmentPayments(req.user.establishment, {
+          appointmentId: id,
+        });
+      } catch (repairError) {
+        console.error("Erro ao confirmar pagamentos do agendamento entregue:", id, repairError);
+      }
+    }
 
     return res.status(200).json({
       message: "Status do agendamento atualizado com sucesso",

@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import WhatsappWebhookLog from "../../models/WhatsappWebhookLog.js";
+import CrmConversationMessage from "../../models/CrmConversationMessage.js";
 import {
   getConnectionByPhoneNumberId,
   resolveVerifyToken,
@@ -197,6 +198,26 @@ export async function processWebhookPayload(payload = {}) {
       });
 
       if (event.kind === "message") {
+        if (event.messageId) {
+          const existingMessage = await CrmConversationMessage.findOne({
+            where: {
+              usersId: companyId,
+              providerMessageId: event.messageId,
+              direction: "inbound",
+            },
+            attributes: ["id"],
+          });
+          if (existingMessage) {
+            processedEvents += 1;
+            await markWebhookLog(webhookLog.id, {
+              processed: true,
+              errorMessage: null,
+              description: "Mensagem duplicada da Meta ignorada com seguranca.",
+            });
+            continue;
+          }
+        }
+
         const { customer, pet } = await resolveCustomerAndPet({
           companyId,
           fromPhone: event.from,
@@ -209,7 +230,7 @@ export async function processWebhookPayload(payload = {}) {
           contactName: event.contactName,
         });
 
-        await appendInboundMessage({
+        const inboundMessage = await appendInboundMessage({
           companyId,
           conversation,
           customer,
@@ -246,9 +267,10 @@ export async function processWebhookPayload(payload = {}) {
         // tipos sem corpo real (image sem caption) caem com body "[image]" e
         // serão filtrados dentro de generateAutoReply.
         try {
-          scheduleMetaAutoReply({
+          await scheduleMetaAutoReply({
             companyId,
             conversation,
+            inboundMessage,
             customer,
             phone: event.from,
           });

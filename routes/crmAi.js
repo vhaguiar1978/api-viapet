@@ -13,6 +13,8 @@ import CrmConversation from "../models/CrmConversation.js";
 import CrmConversationMessage from "../models/CrmConversationMessage.js";
 import CrmAiActionLog from "../models/CrmAiActionLog.js";
 import CrmAiSubscription from "../models/CrmAiSubscription.js";
+import Subscription from "../models/Subscription.js";
+import CrmResponseJob from "../models/CrmResponseJob.js";
 import CustomerAiNote from "../models/CustomerAiNote.js";
 import KnowledgeBaseEntry from "../models/KnowledgeBaseEntry.js";
 import sequelize from "../database/config.js";
@@ -3125,10 +3127,26 @@ router.get("/diagnose", auth, async (req, res) => {
     const conn = settings?.whatsappConnection || {};
     const aiControl = conn?.crmAiControl || null;
     const subscription = await CrmAiSubscription.findOne({ where: { user_id: usersId } });
+    const mainTrial = await Subscription.findOne({
+      where: { user_id: usersId, plan_type: "trial", status: "active" },
+      order: [["created_at", "DESC"]],
+    });
+    const trialActive =
+      Boolean(mainTrial?.trial_end) && new Date(mainTrial.trial_end) > new Date();
 
     const groqKeyOnUser = String(aiControl?.groqApiKey || "").trim();
     const groqKeyOnEnv = String(process.env.GROQ_API_KEY || "").trim();
     const groqMode = groqKeyOnUser ? "user_panel" : groqKeyOnEnv ? "env_global" : "missing";
+    const geminiKeyOnUser = String(aiControl?.geminiApiKey || "").trim();
+    const geminiKeyOnEnv = String(process.env.GEMINI_API_KEY || "").trim();
+    const geminiMode = geminiKeyOnUser ? "user_panel" : geminiKeyOnEnv ? "env_global" : "missing";
+    const aiProviderConfigured = groqMode !== "missing" || geminiMode !== "missing";
+    const queueCounts = await Promise.all(
+      ["pending", "retry", "processing", "waiting_human", "failed"].map(async (status) => [
+        status,
+        await CrmResponseJob.count({ where: { usersId, status } }),
+      ]),
+    ).then((rows) => Object.fromEntries(rows));
 
     // Baileys: se a instancia ja foi criada em memoria, ve o status real
     let baileys = {
@@ -3175,10 +3193,10 @@ router.get("/diagnose", auth, async (req, res) => {
     if (!aiControl) blocks.push({ reason: "ai_control_missing", fix: "Abra o painel da IA e clique em salvar." });
     if (aiControl && !aiControl.enabled) blocks.push({ reason: "ai_disabled", fix: "Marque 'IA habilitada' no painel." });
     if (aiControl && !aiControl.autoReplyEnabled) blocks.push({ reason: "auto_reply_disabled", fix: "Marque 'responder automaticamente' no painel." });
-    if (!subscription || subscription.status !== "active") {
+    if ((!subscription || subscription.status !== "active") && !trialActive) {
       blocks.push({
         reason: "no_active_subscription",
-        fix: "Assinatura da IA precisa estar ativa. Renove em /crm-ai/subscribe.",
+        fix: "Assinatura da IA ou trial principal ativo e necessario. Renove em /crm-ai/subscribe.",
         currentStatus: subscription?.status || "inexistente",
       });
     }
@@ -3188,10 +3206,10 @@ router.get("/diagnose", auth, async (req, res) => {
         fix: "A IA foi pausada nesta conversa (escalada ou pausada manualmente). Despause no painel da conversa ou aguarde auto-resume (default 6h).",
       });
     }
-    if (groqMode === "missing") {
+    if (!aiProviderConfigured) {
       blocks.push({
-        reason: "groq_key_missing",
-        fix: "Sem GROQ_API_KEY a IA cai em respostas curtas e repetitivas (fallback de keywords). Configure no painel OU no env do Render.",
+        reason: "ai_provider_key_missing",
+        fix: "Sem GROQ_API_KEY ou GEMINI_API_KEY a IA cai em respostas simples por palavras-chave. Configure um provedor no servidor.",
         severity: "warning",
       });
     }
@@ -3222,11 +3240,22 @@ router.get("/diagnose", auth, async (req, res) => {
       subscription: {
         status: subscription?.status || "inexistente",
         endsAt: subscription?.ends_at || null,
+        trialActive,
+        trialEndsAt: mainTrial?.trial_end || null,
       },
       groq: {
         mode: groqMode,
         userKeyPresent: Boolean(groqKeyOnUser),
         envKeyPresent: Boolean(groqKeyOnEnv),
+      },
+      gemini: {
+        mode: geminiMode,
+        userKeyPresent: Boolean(geminiKeyOnUser),
+        envKeyPresent: Boolean(geminiKeyOnEnv),
+      },
+      responseQueue: {
+        ...queueCounts,
+        needsAttention: Number(queueCounts.waiting_human || 0) + Number(queueCounts.failed || 0),
       },
       whatsapp: {
         baileys,

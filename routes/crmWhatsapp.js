@@ -5,6 +5,8 @@ import authenticate from "../middlewares/auth.js";
 import Settings from "../models/Settings.js";
 import CrmWhatsappMessage from "../models/CrmWhatsappMessage.js";
 import Custumers from "../models/Custumers.js";
+import CrmConversation from "../models/CrmConversation.js";
+import { markConversationJobsAnswered } from "../service/crmResponseQueue.js";
 
 const router = express.Router();
 
@@ -272,6 +274,22 @@ router.post("/crm-whatsapp/send", authenticate, async (req, res) => {
       receivedAt: new Date(),
       payload: response?.data || {},
     });
+
+    const conversation = await CrmConversation.findOne({
+      where: {
+        usersId: getEstablishmentId(req),
+        phone: destinationPhone,
+        isArchived: false,
+      },
+      order: [["lastMessageAt", "DESC"]],
+    });
+    if (conversation) {
+      await markConversationJobsAnswered({
+        usersId: getEstablishmentId(req),
+        conversationId: conversation.id,
+        answeredAt: new Date(),
+      });
+    }
 
     if (settings) {
       settings.whatsappConnection = {

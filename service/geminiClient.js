@@ -128,4 +128,106 @@ export async function geminiChat({
   }
 }
 
+/**
+ * Chama Gemini com um arquivo inline para tarefas de visao/leitura de documento.
+ *
+ * @param {Object} opts
+ * @param {string} opts.apiKey
+ * @param {Buffer|string} opts.fileData Buffer ou base64 do arquivo
+ * @param {string} opts.mimeType MIME do arquivo
+ * @param {string} opts.prompt Instrucao textual
+ * @param {string} [opts.model]
+ * @param {number} [opts.temperature]
+ * @param {number} [opts.maxTokens]
+ * @param {boolean} [opts.jsonMode]
+ * @returns {Promise<{content: string, usage?: Object, model: string, finishReason: string|null}>}
+ */
+export async function geminiFilePrompt({
+  apiKey,
+  fileData,
+  mimeType,
+  prompt,
+  model = DEFAULT_MODEL,
+  temperature = 0.1,
+  maxTokens = 900,
+  jsonMode = true,
+} = {}) {
+  if (!apiKey) {
+    throw new Error("Gemini: API key ausente");
+  }
+  if (!fileData) {
+    throw new Error("Gemini: fileData obrigatorio");
+  }
+  if (!mimeType) {
+    throw new Error("Gemini: mimeType obrigatorio");
+  }
+  if (!prompt) {
+    throw new Error("Gemini: prompt obrigatorio");
+  }
+
+  const base64Data = Buffer.isBuffer(fileData)
+    ? fileData.toString("base64")
+    : String(fileData || "");
+
+  const body = {
+    contents: [
+      {
+        role: "user",
+        parts: [
+          { text: prompt },
+          {
+            inlineData: {
+              mimeType,
+              data: base64Data,
+            },
+          },
+        ],
+      },
+    ],
+    generationConfig: {
+      temperature,
+      maxOutputTokens: maxTokens,
+      ...(jsonMode ? { responseMimeType: "application/json" } : {}),
+    },
+  };
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+
+  try {
+    const url = `${GEMINI_API_BASE}/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const errBody = await response.text().catch(() => "");
+      throw new Error(`Gemini HTTP ${response.status}: ${errBody.slice(0, 200)}`);
+    }
+
+    const data = await response.json();
+    const candidate = data?.candidates?.[0] || {};
+    const parts = candidate?.content?.parts || [];
+    const content = parts.map((p) => p?.text || "").join("").trim();
+    const finishReason = candidate?.finishReason || null;
+
+    return {
+      content,
+      usage: data?.usageMetadata || null,
+      model,
+      finishReason,
+    };
+  } catch (err) {
+    if (err.name === "AbortError") {
+      throw new Error(`Gemini: timeout (${Math.round(DEFAULT_TIMEOUT_MS / 1000)}s)`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export const GEMINI_DEFAULT_MODEL = DEFAULT_MODEL;

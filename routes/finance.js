@@ -11,7 +11,11 @@ import { Op } from "sequelize";
 import Finance from "../models/Finance.js";
 import CashClosure from "../models/CashClosure.js";
 import sequelize from "sequelize";
-import { hydrateAppointmentsWithFinancialDetails, resolveFeeBreakdownForMethod } from "../service/appointmentFinance.js";
+import {
+  hydrateAppointmentsWithFinancialDetails,
+  resolveFeeBreakdownForMethod,
+  syncAppointmentFinance,
+} from "../service/appointmentFinance.js";
 import PaymentMethodFee, { DEFAULT_PAYMENT_METHODS, normalizePaymentMethodKey } from "../models/PaymentMethodFee.js";
 import { logActivity } from "../service/activityLogger.js";
 const router = express.Router();
@@ -366,6 +370,149 @@ function parseAppointmentIdFromReference(reference) {
   }
 
   return null;
+}
+
+function parseAppointmentPaymentIdFromReference(reference) {
+  const normalizedReference = String(reference || "").trim();
+  const [prefix, paymentId] = normalizedReference.split(":");
+
+  if (prefix === "appointment_payment" && paymentId) {
+    return paymentId;
+  }
+
+  return null;
+}
+
+function normalizeFinanceStatusForAppointment(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+
+  if (normalized === "paid" || normalized === "confirmado") {
+    return "pago";
+  }
+
+  if (normalized === "cancelled") {
+    return "cancelado";
+  }
+
+  return normalized || "pendente";
+}
+
+function toDateOnlyValue(value, fallback = new Date()) {
+  const source = value || fallback;
+
+  if (typeof source === "string" && /^\d{4}-\d{2}-\d{2}$/.test(source)) {
+    return source;
+  }
+
+  const parsed = new Date(source);
+  if (Number.isNaN(parsed.getTime())) {
+    return new Date(fallback).toISOString().slice(0, 10);
+  }
+
+  return parsed.toISOString().slice(0, 10);
+}
+
+async function syncAppointmentFinancialStatusFromFinance(finance, req, nextStatus, nextPaymentMethod) {
+  if (!isAppointmentFinanceReference(finance.reference)) {
+    return null;
+  }
+
+  const usersId = req.user.establishment;
+  const createdBy = req.user.id;
+  const normalizedStatus = normalizeFinanceStatusForAppointment(nextStatus);
+  const nextMethod = nextPaymentMethod || finance.paymentMethod || "Pendente";
+  const paidAtReference = finance.date || finance.updatedAt || new Date();
+  const financeReference = String(finance.reference || "").trim();
+  const paymentReferenceId = parseAppointmentPaymentIdFromReference(financeReference);
+  const balanceAppointmentId = parseAppointmentIdFromReference(financeReference);
+  const referenceKind = getAgendaFinanceReferenceKind(financeReference);
+
+  let appointment = null;
+  let payment = null;
+
+  if (paymentReferenceId) {
+    payment =
+      await AppointmentPayment.findOne({
+        where: {
+          id: paymentReferenceId,
+          usersId,
+        },
+      }) ||
+      await AppointmentPayment.findOne({
+        where: {
+          financeId: finance.id,
+          usersId,
+        },
+      });
+
+    if (payment) {
+      await payment.update({
+        status:
+          normalizedStatus === "cancelado"
+            ? "cancelado"
+            : normalizedStatus === "pago"
+              ? "pago"
+              : "pendente",
+        paymentMethod: nextMethod,
+        paidAt: normalizedStatus === "pago" ? payment.paidAt || paidAtReference || new Date() : null,
+      });
+
+      appointment = await Appointment.findOne({
+        where: {
+          id: payment.appointmentId,
+          usersId,
+        },
+      });
+    }
+  }
+
+  if (!appointment && balanceAppointmentId) {
+    appointment = await Appointment.findOne({
+      where: {
+        id: balanceAppointmentId,
+        usersId,
+      },
+    });
+  }
+
+  if (!appointment && financeReference === "appointment") {
+    appointment = await Appointment.findOne({
+      where: {
+        financeId: finance.id,
+        usersId,
+      },
+    });
+  }
+
+  if (!appointment) {
+    return null;
+  }
+
+  if (!payment && normalizedStatus === "pago" && (referenceKind === "balance" || referenceKind === "legacy")) {
+    payment = await AppointmentPayment.create({
+      appointmentId: appointment.id,
+      usersId,
+      dueDate: toDateOnlyValue(finance.dueDate || finance.date || appointment.date),
+      paymentMethod: nextMethod,
+      details: finance.notes || "Baixa registrada pelo financeiro",
+      amount: Number(finance.grossAmount || finance.amount || 0) || 0,
+      grossAmount: Number(finance.grossAmount || finance.amount || 0) || 0,
+      feePercentage: Number(finance.feePercentage || 0) || 0,
+      feeAmount: Number(finance.feeAmount || 0) || 0,
+      netAmount: Number(finance.netAmount || finance.grossAmount || finance.amount || 0) || 0,
+      status: "pago",
+      paidAt: paidAtReference || new Date(),
+      financeId: finance.id,
+      createdBy,
+    });
+  }
+
+  await syncAppointmentFinance(appointment.id);
+
+  return {
+    appointmentId: appointment.id,
+    paymentId: payment?.id || null,
+  };
 }
 
 function toComparableTimestamp(value) {
@@ -1218,11 +1365,10 @@ router.post("/finance/close-cash", authenticate, async (req, res) => {
     const referenceDate = req.body.referenceDate || new Date().toISOString().slice(0, 10);
     const notes = req.body.notes || null;
 
-    const startDateTime = new Date(referenceDate);
-    startDateTime.setUTCHours(0, 0, 0, 0);
-
-    const endDateTime = new Date(referenceDate);
-    endDateTime.setUTCHours(23, 59, 59, 999);
+    // Janela do dia no horario de Brasilia (UTC-3). Sem isso a query usava UTC
+    // e o "dia" ia das 21h de ontem as 20h59 de hoje, deslocando lancamentos.
+    const startDateTime = new Date(`${referenceDate}T00:00:00.000-03:00`);
+    const endDateTime = new Date(`${referenceDate}T23:59:59.999-03:00`);
 
     const finances = await Finance.findAll({
       where: {
@@ -1231,8 +1377,10 @@ router.post("/finance/close-cash", authenticate, async (req, res) => {
           [Op.gte]: startDateTime,
           [Op.lte]: endDateTime,
         },
+        // Saldo do dia = somente o que foi efetivamente pago/recebido.
+        // Contas a receber/pagar pendentes com vencimento hoje nao entram.
         status: {
-          [Op.ne]: "cancelado",
+          [Op.in]: ["pago", "paid", "confirmado"],
         },
       },
     });
@@ -1791,6 +1939,7 @@ router.patch("/finance/:id/status", authenticate, async (req, res) => {
   try {
     const { id } = req.params;
     const { status, paymentMethod } = req.body;
+    const normalizedStatus = normalizeFinanceStatusForAppointment(status);
 
     const finance = await Finance.findOne({
       where: {
@@ -1805,11 +1954,18 @@ router.patch("/finance/:id/status", authenticate, async (req, res) => {
       });
     }
     const updatedFinance = await finance.update({
-      status,
-      paymentMethod: paymentMethod || "Pendente",
+      status: normalizedStatus,
+      paymentMethod: paymentMethod || finance.paymentMethod || "Pendente",
+      date: normalizedStatus === "pago" ? finance.date || new Date() : finance.date,
     });
+    const appointmentSync = await syncAppointmentFinancialStatusFromFinance(
+      updatedFinance,
+      req,
+      normalizedStatus,
+      paymentMethod,
+    );
 
-    if (status === "pago" || status === "paid" || status === "confirmado") {
+    if (normalizedStatus === "pago") {
       logActivity({
         req,
         modulo: "financeiro",
@@ -1817,17 +1973,25 @@ router.patch("/finance/:id/status", authenticate, async (req, res) => {
         descricao: `Pagamento confirmado: R$ ${updatedFinance.amount}`,
         entidadeTipo: "finance",
         entidadeId: updatedFinance.id,
-        metadata: { paymentMethod: paymentMethod || "Pendente", status },
+        metadata: {
+          paymentMethod: paymentMethod || updatedFinance.paymentMethod || "Pendente",
+          status: normalizedStatus,
+          appointmentId: appointmentSync?.appointmentId || null,
+        },
       });
     } else {
       logActivity({
         req,
         modulo: "financeiro",
         acao: "finance_status_changed",
-        descricao: `Status do lançamento: ${status}`,
+        descricao: `Status do lançamento: ${normalizedStatus}`,
         entidadeTipo: "finance",
         entidadeId: updatedFinance.id,
-        metadata: { status, paymentMethod: paymentMethod || null },
+        metadata: {
+          status: normalizedStatus,
+          paymentMethod: paymentMethod || updatedFinance.paymentMethod || null,
+          appointmentId: appointmentSync?.appointmentId || null,
+        },
       });
     }
 

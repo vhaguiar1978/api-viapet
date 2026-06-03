@@ -94,6 +94,17 @@ const Admin = sequelize.define(
       allowNull: false,
       defaultValue: true,
     },
+    whatsappWelcomeEnabled: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
+    },
+    whatsappWelcomeTemplate: {
+      type: DataTypes.TEXT,
+      allowNull: false,
+      defaultValue:
+        "Ola, {name}! Seja muito bem-vindo(a) ao ViaPet. Sua conta foi criada com sucesso. Se precisar de ajuda para começar, fale com a nossa equipe por aqui.",
+    },
   },
   {
     timestamps: true,

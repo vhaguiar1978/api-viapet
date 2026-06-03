@@ -1094,10 +1094,18 @@ sequelize
     await ensureCrmAiLearningSchema();
     console.log("Conectado ao banco de dados");
     // Reabre sessoes Baileys em background (nao bloqueia startup)
-    reinitBaileysSessions();
-    processPendingResponseJobs().catch((error) => {
-      console.error("Erro ao recuperar respostas pendentes do CRM:", error.message);
-    });
+    if (process.env.DISABLE_BAILEYS_REINIT !== "true") {
+      reinitBaileysSessions();
+    } else {
+      console.log("Baileys auto-reinit desativado por ambiente");
+    }
+    if (process.env.DISABLE_CRM_RESPONSE_QUEUE !== "true") {
+      processPendingResponseJobs().catch((error) => {
+        console.error("Erro ao recuperar respostas pendentes do CRM:", error.message);
+      });
+    } else {
+      console.log("Fila de respostas CRM desativada por ambiente");
+    }
   })
   .catch((erro) => {
     console.error("Houve um erro: ", erro);
@@ -1113,13 +1121,17 @@ app.listen(PORT, () => {
   console.log("🔗 API_URL: ", process.env.API_URL);
 
   // Cron de automacoes CRM — roda a cada 5 minutos
-  setInterval(async () => {
-    try {
-      await processPendingResponseJobs();
-    } catch (error) {
-      console.error("Erro na fila de respostas do CRM:", error.message);
-    }
-  }, 15000);
+  if (process.env.DISABLE_CRM_RESPONSE_QUEUE !== "true") {
+    setInterval(async () => {
+      try {
+        await processPendingResponseJobs();
+      } catch (error) {
+        console.error("Erro na fila de respostas do CRM:", error.message);
+      }
+    }, 15000);
+  } else {
+    console.log("Fila de respostas CRM pausada neste processo");
+  }
 
   if (process.env.DISABLE_CRM_AUTOMATIONS_CRON !== "true") {
     cron.schedule("*/5 * * * *", async () => {

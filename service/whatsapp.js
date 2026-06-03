@@ -10,6 +10,7 @@ import Users from "../models/Users.js";
 import CrmWhatsappMessage from "../models/CrmWhatsappMessage.js";
 import CrmConversation from "../models/CrmConversation.js";
 import CrmConversationMessage from "../models/CrmConversationMessage.js";
+import { enqueueInboundResponseJob } from "./crmResponseQueue.js";
 const router = express.Router();
 import { Op } from "sequelize";
 
@@ -957,7 +958,7 @@ async function syncInboundConversation({
         },
       });
 
-  await CrmConversationMessage.create({
+  const inboundMessage = await CrmConversationMessage.create({
     conversationId: conversation.id,
     usersId: resolvedUsersId,
     customerId: customer?.id || null,
@@ -970,6 +971,14 @@ async function syncInboundConversation({
     status: "received",
     receivedAt: now,
     payload,
+  });
+
+  await enqueueInboundResponseJob({
+    usersId: resolvedUsersId,
+    conversation,
+    inboundMessage,
+    sourceChannel: "legacy",
+    phone: normalizedPhone,
   });
 
   return conversation;
@@ -992,7 +1001,7 @@ cron.schedule(
     }
   },
   {
-    scheduled: true,
+    scheduled: process.env.DISABLE_BIRTHDAY_WHATSAPP_CRON !== "true",
     timezone: "America/Sao_Paulo",
   },
 );

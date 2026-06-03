@@ -6,13 +6,53 @@ import makeWASocket, {
   BufferJSON,
   Browsers,
   fetchLatestBaileysVersion,
+  downloadMediaMessage,
 } from "baileys";
+import fs from "fs/promises";
+import path from "path";
 import qrcode from "qrcode";
 import Settings from "../models/Settings.js";
 import CrmConversation from "../models/CrmConversation.js";
 import CrmConversationMessage from "../models/CrmConversationMessage.js";
 import Custumers from "../models/Custumers.js";
 import { v4 as uuidv4 } from "uuid";
+import { enqueueInboundResponseJob } from "./crmResponseQueue.js";
+
+const UPLOAD_DIR = "uploads";
+const MEDIA_EXTENSIONS = {
+  "image/jpeg": ".jpg",
+  "image/jpg": ".jpg",
+  "image/png": ".png",
+  "image/webp": ".webp",
+  "application/pdf": ".pdf",
+  "audio/ogg": ".ogg",
+  "audio/mpeg": ".mp3",
+  "audio/mp4": ".m4a",
+  "audio/aac": ".aac",
+  "audio/amr": ".amr",
+  "video/mp4": ".mp4",
+};
+
+function getBaileysMediaContent(content = {}, messageType = "") {
+  if (messageType === "image") return content.imageMessage;
+  if (messageType === "document") return content.documentMessage;
+  if (messageType === "audio") return content.audioMessage;
+  if (messageType === "video") return content.videoMessage;
+  return null;
+}
+
+function extensionFromMime(mimeType = "", fallbackName = "") {
+  const cleanMime = String(mimeType || "").split(";")[0].trim().toLowerCase();
+  const known = MEDIA_EXTENSIONS[cleanMime];
+  if (known) return known;
+  const ext = path.extname(String(fallbackName || ""));
+  return ext || ".bin";
+}
+
+function publicUploadUrl(fileName) {
+  const baseUrl = String(process.env.API_URL || process.env.URL || "").replace(/\/+$/, "");
+  return baseUrl ? `${baseUrl}/uploads/${fileName}` : `/uploads/${fileName}`;
+}
 
 /**
  * Database-backed auth state for Baileys.
@@ -388,6 +428,42 @@ class BaileysService {
     console.log("[Baileys] Message reaction received:", reaction);
   }
 
+  async saveInboundMedia(msg, messageType, content = {}) {
+    const mediaContent = getBaileysMediaContent(content, messageType);
+    if (!mediaContent) return null;
+
+    try {
+      await fs.mkdir(UPLOAD_DIR, { recursive: true });
+      const mimeType = String(mediaContent.mimetype || mediaContent.mimeType || "").trim();
+      const originalName = String(mediaContent.fileName || mediaContent.filename || "").trim();
+      const extension = extensionFromMime(mimeType, originalName);
+      const fileName = `${Date.now()}-${uuidv4()}${extension}`;
+      const filePath = path.join(process.cwd(), UPLOAD_DIR, fileName);
+      const buffer = await downloadMediaMessage(
+        msg,
+        "buffer",
+        {},
+        {
+          reuploadRequest: this.sock?.updateMediaMessage?.bind(this.sock),
+        },
+      );
+
+      if (!buffer?.length) return null;
+      await fs.writeFile(filePath, buffer);
+
+      return {
+        mediaUrl: publicUploadUrl(fileName),
+        mimeType,
+        fileName: originalName || fileName,
+        storedName: fileName,
+        size: buffer.length,
+      };
+    } catch (error) {
+      console.warn("[Baileys IN] nao foi possivel salvar midia recebida:", error?.message || error);
+      return null;
+    }
+  }
+
   async processInboundMessage(msg) {
     try {
       const fromJid = msg.key.remoteJid;
@@ -408,15 +484,42 @@ class BaileysService {
       }
 
       const pushName = String(msg.pushName || "").trim();
+      const content = msg.message || {};
+      const messageType = content.audioMessage
+        ? "audio"
+        : content.imageMessage
+          ? "image"
+          : content.documentMessage
+            ? "document"
+            : content.videoMessage
+              ? "video"
+              : "text";
       const messageBody =
-        msg.message?.conversation ||
-        msg.message?.extendedTextMessage?.text ||
-        "";
+        content.conversation ||
+        content.extendedTextMessage?.text ||
+        content.imageMessage?.caption ||
+        content.documentMessage?.caption ||
+        content.videoMessage?.caption ||
+        `[${messageType}]`;
 
-      if (!messageBody) return;
       if (!phone) {
         console.warn(`[Baileys IN] mensagem ignorada (sem phone) jid=${fromJid}`);
         return;
+      }
+
+      if (msg.key.id) {
+        const duplicateMessage = await CrmConversationMessage.findOne({
+          where: {
+            usersId: this.userId,
+            providerMessageId: msg.key.id,
+            direction: "inbound",
+          },
+          attributes: ["id"],
+        });
+        if (duplicateMessage) {
+          console.log(`[Baileys IN] ignorado no banco (duplicado) id=${msg.key.id}`);
+          return;
+        }
       }
 
       // Find or create customer.
@@ -466,13 +569,14 @@ class BaileysService {
           usersId: this.userId,
           customerId: customer.id,
           channel: "baileys",
-          status: "active",
+          status: "pending",
           source: "crm",
           customerName: customer.name,
           phone: phone,
           lastMessagePreview: messageBody.substring(0, 100),
           lastMessageAt: new Date(),
           lastInboundAt: new Date(),
+          unreadCount: 1,
           metadata: { baileysJid: fromJid },
         });
       } else {
@@ -480,6 +584,9 @@ class BaileysService {
         conversation.lastMessageAt = new Date();
         conversation.lastInboundAt = new Date();
         conversation.unreadCount = (conversation.unreadCount || 0) + 1;
+        if (conversation.status === "closed") {
+          conversation.status = "pending";
+        }
         // Garante o JID atualizado (importante para envio @lid)
         const meta = conversation.metadata || {};
         if (meta.baileysJid !== fromJid) {
@@ -489,20 +596,24 @@ class BaileysService {
         await conversation.save();
       }
 
+      const storedMedia = await this.saveInboundMedia(msg, messageType, content);
+
       // Save message
-      await CrmConversationMessage.create({
+      const inboundMessage = await CrmConversationMessage.create({
         id: uuidv4(),
         conversationId: conversation.id,
         usersId: this.userId,
         customerId: customer.id,
         direction: "inbound",
         channel: "baileys",
-        messageType: "text",
+        messageType,
         body: messageBody,
+        mediaUrl: storedMedia?.mediaUrl || null,
+        mimeType: storedMedia?.mimeType || null,
         providerMessageId: msg.key.id,
         status: "received",
         receivedAt: new Date(),
-        payload: msg,
+        payload: storedMedia ? { ...msg, storedMedia } : msg,
       });
 
       console.log(`[Baileys] Inbound from ${phone}: ${messageBody.substring(0, 50)}`);
@@ -518,7 +629,14 @@ class BaileysService {
         // "agendar", "banho"), a IA espera 6s sem nova mensagem antes de
         // responder UMA vez agrupada. Antes ela respondia 5 vezes seguidas.
         try {
-          this._scheduleAiReply({ conversation, customer, fromJid });
+          await enqueueInboundResponseJob({
+            usersId: this.userId,
+            conversation,
+            inboundMessage,
+            sourceChannel: "baileys",
+            phone,
+            targetJid: fromJid,
+          });
         } catch (aiErr) {
           console.warn("[Baileys IA] Erro ao agendar auto-reply:", aiErr?.message);
         }

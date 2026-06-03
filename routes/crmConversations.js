@@ -1,6 +1,6 @@
 import express from "express";
 import axios from "axios";
-import { Op } from "sequelize";
+import { Op, col, where as sequelizeWhere } from "sequelize";
 import authenticate from "../middlewares/auth.js";
 import upload from "../middlewares/fileUpload.js";
 import Settings from "../models/Settings.js";
@@ -10,8 +10,10 @@ import Users from "../models/Users.js";
 import CrmWhatsappMessage from "../models/CrmWhatsappMessage.js";
 import CrmConversation from "../models/CrmConversation.js";
 import CrmConversationMessage from "../models/CrmConversationMessage.js";
+import CrmResponseJob from "../models/CrmResponseJob.js";
 import { enforcePlanLimit } from "../service/planLimits.js";
 import BaileysService from "../service/baileys.js";
+import { markConversationJobsAnswered, retryResponseJob } from "../service/crmResponseQueue.js";
 
 const router = express.Router();
 
@@ -388,6 +390,64 @@ router.get("/crm-conversations/summary", authenticate, async (req, res) => {
       message: "Erro ao carregar resumo das conversas",
       error: error.message,
     });
+  }
+});
+
+router.get("/crm-conversations/response-monitor", authenticate, async (req, res) => {
+  try {
+    const usersId = getEstablishmentId(req);
+    const [pending, retry, waitingHuman, failed, processing, awaitingReply] = await Promise.all([
+      CrmResponseJob.count({ where: { usersId, status: "pending" } }),
+      CrmResponseJob.count({ where: { usersId, status: "retry" } }),
+      CrmResponseJob.count({ where: { usersId, status: "waiting_human" } }),
+      CrmResponseJob.count({ where: { usersId, status: "failed" } }),
+      CrmResponseJob.count({ where: { usersId, status: "processing" } }),
+      CrmConversation.count({
+        where: {
+          usersId,
+          isArchived: false,
+          status: { [Op.ne]: "closed" },
+          lastInboundAt: { [Op.not]: null },
+          [Op.or]: [
+            { lastOutboundAt: null },
+            sequelizeWhere(col("lastInboundAt"), { [Op.gt]: col("lastOutboundAt") }),
+          ],
+        },
+      }),
+    ]);
+
+    return res.status(200).json({
+      message: "Monitor de respostas carregado com sucesso",
+      data: {
+        pending,
+        retry,
+        waitingHuman,
+        failed,
+        processing,
+        needsAttention: waitingHuman + failed,
+        awaitingReply,
+        inProgress: pending + retry + processing,
+      },
+    });
+  } catch (error) {
+    console.error("Erro ao carregar monitor de respostas:", error);
+    return res.status(500).json({
+      message: "Erro ao carregar monitor de respostas",
+      error: error.message,
+    });
+  }
+});
+
+router.post("/crm-conversations/response-jobs/:jobId/retry", authenticate, async (req, res) => {
+  try {
+    const usersId = getEstablishmentId(req);
+    const retried = await retryResponseJob({ usersId, jobId: req.params.jobId });
+    if (!retried) {
+      return res.status(404).json({ message: "Pendencia nao encontrada ou ja processada" });
+    }
+    return res.status(200).json({ message: "Nova tentativa programada com sucesso" });
+  } catch (error) {
+    return res.status(500).json({ message: "Erro ao reprocessar resposta", error: error.message });
   }
 });
 
@@ -1234,6 +1294,14 @@ router.post("/crm-conversations/:conversationId/messages", authenticate, enforce
       receivedAt: normalizedDirection === "inbound" ? now : null,
       payload,
     });
+
+    if (normalizedDirection === "outbound" && messageStatus === "sent") {
+      await markConversationJobsAnswered({
+        usersId,
+        conversationId: conversation.id,
+        answeredAt: now,
+      });
+    }
 
     const nextStatus =
       normalizedDirection === "inbound"

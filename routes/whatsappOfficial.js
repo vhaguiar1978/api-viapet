@@ -35,14 +35,13 @@ router.post("/api/webhooks/whatsapp", async (req, res) => {
     return res.status(403).json({ message: "Assinatura do webhook invalida" });
   }
 
-  res.status(200).json({ received: true });
-  setImmediate(async () => {
-    try {
-      await processWebhookPayload(req.body || {});
-    } catch (error) {
-      console.error("[WHATSAPP WEBHOOK] Erro ao processar payload:", error);
-    }
-  });
+  try {
+    await processWebhookPayload(req.body || {});
+    return res.status(200).json({ received: true });
+  } catch (error) {
+    console.error("[WHATSAPP WEBHOOK] Erro ao processar payload:", error);
+    return res.status(500).json({ message: "Erro ao persistir webhook recebido" });
+  }
 });
 
 router.get("/api/whatsapp/connections/status", authenticate, async (req, res) => {

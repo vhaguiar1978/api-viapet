@@ -6,6 +6,7 @@ import Settings from "../../models/Settings.js";
 import Subscription from "../../models/Subscription.js";
 import EmailService from "../../service/email.js";
 import { ensureDefaultMedicalCatalog } from "../../service/defaultMedicalCatalog.js";
+import { sendSystemWelcomeWhatsapp } from "../../service/systemWelcomeWhatsapp.js";
 
 const router = express.Router();
 
@@ -107,6 +108,9 @@ router.post("/register", async (req, res) => {
 
     EmailService.sendWelcomeEmail(userCreate.id, normalizedEmail).catch((error) => {
       console.error("Email de boas-vindas nao pode ser enviado:", error.message);
+    });
+    sendSystemWelcomeWhatsapp({ name, phone }).catch((error) => {
+      console.error("WhatsApp de boas-vindas nao pode ser enviado:", error.message);
     });
 
     return res.status(201).json({ message: "Conta criada com sucesso!" });

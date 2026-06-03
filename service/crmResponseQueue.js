@@ -7,6 +7,7 @@ import Custumers from "../models/Custumers.js";
 import Pets from "../models/Pets.js";
 import Settings from "../models/Settings.js";
 import { generateAutoReply } from "./crmAutoReply.js";
+import { processPaymentReceiptMessage } from "./crmPaymentReceiptProcessor.js";
 
 const DEBOUNCE_MS = 6000;
 const RETRY_MINUTES = [1, 5, 15];
@@ -233,7 +234,55 @@ async function processResponseJob(job) {
     }
 
     const body = String(inbound.body || "").trim();
-    const needsMediaInterpretation = inbound.messageType !== "text" && (!body || MEDIA_PLACEHOLDER.test(body));
+    const isMediaMessage = inbound.messageType !== "text";
+    const needsMediaInterpretation = isMediaMessage && (!body || MEDIA_PLACEHOLDER.test(body));
+    if (isMediaMessage) {
+      const receiptResult = await processPaymentReceiptMessage({
+        usersId: job.usersId,
+        conversation,
+        inboundMessage: inbound,
+      });
+
+      if (receiptResult?.handled) {
+        if (receiptResult.autoApplied) {
+          if (receiptResult.reply) {
+            const customer = conversation.customerId
+              ? await Custumers.findOne({ where: { id: conversation.customerId, usersId: job.usersId } })
+              : null;
+
+            if (job.sourceChannel === "baileys") {
+              await sendBaileysReply({ job, conversation, customer, reply: receiptResult.reply });
+            } else if (job.sourceChannel === "legacy") {
+              await sendLegacyCloudReply({ job, conversation, customer, reply: receiptResult.reply });
+            } else {
+              await sendOfficialReply({ job, conversation, reply: receiptResult.reply });
+            }
+          }
+
+          await CrmResponseJob.update(
+            { status: "answered", answeredAt: new Date(), lastError: null },
+            { where: { id: job.id, usersId: job.usersId } },
+          );
+          await clearConversationAttention(conversation, job.id);
+          return;
+        }
+
+        await CrmResponseJob.update(
+          {
+            status: "waiting_human",
+            lastError: receiptResult.summary || "Comprovante recebido requer revisao.",
+          },
+          { where: { id: job.id, usersId: job.usersId } },
+        );
+        await flagConversationForAttention(
+          conversation,
+          receiptResult.reason || "payment_receipt_requires_review",
+          job,
+        );
+        return;
+      }
+    }
+
     if (needsMediaInterpretation) {
       await CrmResponseJob.update(
         { status: "waiting_human", lastError: "Midia recebida requer leitura ou transcricao." },

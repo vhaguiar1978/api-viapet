@@ -9,6 +9,7 @@ import CrmConversation from "../models/CrmConversation.js";
 import CustomerAiNote from "../models/CustomerAiNote.js";
 import KnowledgeBaseEntry from "../models/KnowledgeBaseEntry.js";
 import { groqChat, GROQ_DEFAULT_MODEL, GROQ_SMART_MODEL } from "./groqClient.js";
+import { geminiChat, GEMINI_DEFAULT_MODEL } from "./geminiClient.js";
 
 // Cooldown global por usuario quando Groq retornar 413 (TPM excedido).
 // Map<usersId, timestampUntil>. TPM (tokens per minute) se renova a cada 60s,
@@ -1958,25 +1959,21 @@ export async function testAiReply({ usersId, messages = [] }) {
 
   const whatsappConnection = settings.whatsappConnection || {};
   const aiControl = whatsappConnection.crmAiControl || {};
-
   const groqApiKey = String(aiControl.groqApiKey || process.env.GROQ_API_KEY || "").trim();
-  if (!groqApiKey) {
-    throw new Error("Groq API key nao configurada — preencha o campo no painel da IA ou defina GROQ_API_KEY no servidor.");
-  }
+  const geminiApiKey = String(aiControl.geminiApiKey || process.env.GEMINI_API_KEY || "").trim();
 
-  // Carrega servicos da loja (mesmo filtro que o pipeline real)
   const allServices = await Services.findAll({
     where: { establishment: usersId },
     order: [["name", "ASC"]],
     limit: 60,
   });
-  const SPECIALTY_KEYWORDS = [
-    "banho", "tosa", "hidrat", "estetica", "estética",
+  const specialtyKeywords = [
+    "banho", "tosa", "hidrat", "estetica", "estetica",
     "perfume", "unha", "ouvido", "pacote", "pacotinho",
   ];
-  const filteredServices = allServices.filter((s) => {
-    const n = normalizeSearchable(s.name);
-    return SPECIALTY_KEYWORDS.some((k) => n.includes(k));
+  const filteredServices = allServices.filter((service) => {
+    const name = normalizeSearchable(service.name);
+    return specialtyKeywords.some((keyword) => name.includes(keyword));
   });
   const services = filteredServices.length > 0 ? filteredServices : allServices.slice(0, 20);
 
@@ -1991,19 +1988,16 @@ export async function testAiReply({ usersId, messages = [] }) {
     upcomingAppointments: [],
   });
 
-  // Sanitiza historico: so user/assistant, content em string, max 8 turnos
   const cleanMessages = messages
-    .filter((m) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
+    .filter((message) => message && (message.role === "user" || message.role === "assistant") && typeof message.content === "string")
     .slice(-8)
-    .map((m) => ({ role: m.role, content: String(m.content).slice(0, 1500) }));
+    .map((message) => ({ role: message.role, content: String(message.content).slice(0, 1500) }));
 
   if (cleanMessages.length === 0 || cleanMessages[cleanMessages.length - 1].role !== "user") {
     throw new Error("ultima mensagem precisa ser do usuario (role=user)");
   }
 
-  const groqMessages = [{ role: "system", content: systemPrompt }, ...cleanMessages];
-
-  // Híbrido também no chat de teste: detecta caso sensível e troca pro smart.
+  const providerMessages = [{ role: "system", content: systemPrompt }, ...cleanMessages];
   const lastUserBody = cleanMessages[cleanMessages.length - 1]?.content || "";
   const useSmart = shouldUseSmartModel({
     body: lastUserBody,
@@ -2014,34 +2008,67 @@ export async function testAiReply({ usersId, messages = [] }) {
   });
   const chosenModel = useSmart ? GROQ_SMART_MODEL : GROQ_DEFAULT_MODEL;
 
-  const result = await groqChat({
-    apiKey: groqApiKey,
-    model: chosenModel,
-    messages: groqMessages,
-    temperature: 0.4,
-    maxTokens: 600,
-  });
+  const parseTestReply = (rawContent) => {
+    const parsed = parseAiReply(rawContent);
+    return parsed.reply || String(rawContent || "").trim();
+  };
 
-  const rawContent = String(result.content || "").trim();
-  // Se a IA respondeu em JSON (modo padrao do prompt de producao), extrai o reply.
-  // Senao, devolve o texto cru.
-  let reply = rawContent;
-  try {
-    const start = rawContent.indexOf("{");
-    const end = rawContent.lastIndexOf("}");
-    if (start !== -1 && end > start) {
-      const parsed = JSON.parse(rawContent.slice(start, end + 1));
-      if (parsed && typeof parsed.reply === "string" && parsed.reply.trim()) {
-        reply = parsed.reply.trim();
-      }
+  if (groqApiKey) {
+    try {
+      const result = await groqChat({
+        apiKey: groqApiKey,
+        model: chosenModel,
+        messages: providerMessages,
+        temperature: 0.4,
+        maxTokens: 600,
+      });
+      return {
+        reply: parseTestReply(result.content),
+        model: result.model || "groq",
+        provider: "groq",
+        promptLength: systemPrompt.length,
+      };
+    } catch (error) {
+      console.warn("[CrmAutoReply] Chat de teste: Groq falhou, tentando fallback:", error?.message);
     }
-  } catch (_) {
-    // mantem rawContent
   }
+
+  if (geminiApiKey) {
+    try {
+      const result = await geminiChat({
+        apiKey: geminiApiKey,
+        model: GEMINI_DEFAULT_MODEL,
+        messages: providerMessages,
+        temperature: 0.4,
+        maxTokens: 700,
+        jsonMode: true,
+      });
+      return {
+        reply: parseTestReply(result.content),
+        model: result.model || GEMINI_DEFAULT_MODEL,
+        provider: "gemini",
+        promptLength: systemPrompt.length,
+      };
+    } catch (error) {
+      console.warn("[CrmAutoReply] Chat de teste: Gemini falhou, usando fallback simples:", error?.message);
+    }
+  }
+
+  const reply = buildReply({
+    question: lastUserBody,
+    services,
+    settings,
+    customer: null,
+    pet: null,
+    history: [],
+    identifyAsAi: Boolean(aiControl.identifyAsAi),
+  });
 
   return {
     reply,
-    model: result.model || "groq",
+    model: "fallback-keywords",
+    provider: "keywords",
     promptLength: systemPrompt.length,
+    warning: "Nenhuma chave Groq/Gemini configurada. Resposta gerada em modo simples.",
   };
 }

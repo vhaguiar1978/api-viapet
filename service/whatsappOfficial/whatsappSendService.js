@@ -4,6 +4,7 @@ import { normalizePhone } from "./phone.js";
 import { appendOutboundMessage, findOrCreateConversation } from "./crmConversationService.js";
 import { createWhatsappMessage } from "./whatsappMessageService.js";
 import { resolveCustomerAndPet } from "./whatsappContactResolverService.js";
+import { markConversationJobsAnswered } from "../crmResponseQueue.js";
 
 function buildApiBase(phoneNumberId) {
   return `https://graph.facebook.com/v21.0/${phoneNumberId}`;
@@ -67,6 +68,11 @@ export async function sendTextMessage({
     providerMessageId: metaMessageId,
     payload: response.data || {},
     sentAt: new Date(),
+  });
+  await markConversationJobsAnswered({
+    usersId: companyId,
+    conversationId: conversation.id,
+    answeredAt: new Date(),
   });
 
   await createWhatsappMessage({
@@ -147,6 +153,11 @@ export async function sendTemplateMessage({
     providerMessageId: metaMessageId,
     payload: response.data || {},
     sentAt: new Date(),
+  });
+  await markConversationJobsAnswered({
+    usersId: companyId,
+    conversationId: conversation.id,
+    answeredAt: new Date(),
   });
 
   await createWhatsappMessage({
