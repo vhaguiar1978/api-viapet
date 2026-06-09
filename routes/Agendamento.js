@@ -1023,11 +1023,16 @@ router.put("/appointments/:id", auth, async (req, res) => {
       },
     });
 
-    // Só recalcula o valor se algum serviço foi explicitamente alterado na requisição.
-    // Quando apenas horário/data/responsável é editado, preserva o valor financeiro existente.
-    const serviceChanged = serviceId !== undefined;
-    const secondaryChanged = secondaryServiceId !== undefined;
-    const tertiaryChanged = tertiaryServiceId !== undefined;
+    // Só recalcula o valor se o serviço foi REALMENTE alterado (ID diferente do existente).
+    // O frontend sempre envia serviceId, então comparamos com o valor persistido no banco.
+    const serviceChanged =
+      serviceId !== undefined && String(serviceId) !== String(appointment.serviceId || "");
+    const secondaryChanged =
+      secondaryServiceId !== undefined &&
+      String(secondaryServiceId || "") !== String(appointment.secondaryServiceId || "");
+    const tertiaryChanged =
+      tertiaryServiceId !== undefined &&
+      String(tertiaryServiceId || "") !== String(appointment.tertiaryServiceId || "");
     const shouldRecalculateAmount = serviceChanged || secondaryChanged || tertiaryChanged;
 
     let totalAmount;
