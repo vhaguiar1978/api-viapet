@@ -1022,30 +1022,44 @@ router.put("/appointments/:id", auth, async (req, res) => {
         establishment: req.user.establishment,
       },
     });
-    let totalAmount = Number(mainService?.price || 0);
 
-    if (secondaryServiceId) {
-      const secondaryService = await Services.findOne({
-        where: {
-          id: secondaryServiceId,
-          establishment: req.user.establishment,
-        },
-      });
-      if (secondaryService) {
-        totalAmount += Number(secondaryService.price || 0);
-      }
-    }
+    // Só recalcula o valor se algum serviço foi explicitamente alterado na requisição.
+    // Quando apenas horário/data/responsável é editado, preserva o valor financeiro existente.
+    const serviceChanged = serviceId !== undefined;
+    const secondaryChanged = secondaryServiceId !== undefined;
+    const tertiaryChanged = tertiaryServiceId !== undefined;
+    const shouldRecalculateAmount = serviceChanged || secondaryChanged || tertiaryChanged;
 
-    if (tertiaryServiceId) {
-      const tertiaryService = await Services.findOne({
-        where: {
-          id: tertiaryServiceId,
-          establishment: req.user.establishment,
-        },
-      });
-      if (tertiaryService) {
-        totalAmount += Number(tertiaryService.price || 0);
+    let totalAmount;
+
+    if (shouldRecalculateAmount || !linkedFinance) {
+      totalAmount = Number(mainService?.price || 0);
+
+      if (secondaryServiceId) {
+        const secondaryService = await Services.findOne({
+          where: {
+            id: secondaryServiceId,
+            establishment: req.user.establishment,
+          },
+        });
+        if (secondaryService) {
+          totalAmount += Number(secondaryService.price || 0);
+        }
       }
+
+      if (tertiaryServiceId) {
+        const tertiaryService = await Services.findOne({
+          where: {
+            id: tertiaryServiceId,
+            establishment: req.user.establishment,
+          },
+        });
+        if (tertiaryService) {
+          totalAmount += Number(tertiaryService.price || 0);
+        }
+      }
+    } else {
+      totalAmount = Number(linkedFinance.amount || 0);
     }
 
     const financePet = await Pets.findByPk(petId || appointment.petId);
