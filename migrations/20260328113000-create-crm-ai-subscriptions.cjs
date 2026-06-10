@@ -2,7 +2,25 @@
 
 module.exports = {
   async up(queryInterface, Sequelize) {
-    await queryInterface.createTable("crm_ai_subscriptions", {
+    const tableExists = async (tableName) => {
+      try {
+        await queryInterface.describeTable(tableName);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    const addIndexIfMissing = async (tableName, fields, options = {}) => {
+      const indexName = options.name || `${tableName}_${fields.join("_")}`;
+      const indexes = await queryInterface.showIndex(tableName);
+      if (!indexes.some((index) => index.name === indexName)) {
+        await queryInterface.addIndex(tableName, fields, options);
+      }
+    };
+
+    if (!(await tableExists("crm_ai_subscriptions"))) {
+      await queryInterface.createTable("crm_ai_subscriptions", {
       id: {
         type: Sequelize.UUID,
         allowNull: false,
@@ -69,11 +87,12 @@ module.exports = {
         allowNull: false,
         defaultValue: Sequelize.fn("NOW"),
       },
-    });
+      });
+    }
 
-    await queryInterface.addIndex("crm_ai_subscriptions", ["user_id"]);
-    await queryInterface.addIndex("crm_ai_subscriptions", ["status"]);
-    await queryInterface.addIndex("crm_ai_subscriptions", ["external_reference"]);
+    await addIndexIfMissing("crm_ai_subscriptions", ["user_id"]);
+    await addIndexIfMissing("crm_ai_subscriptions", ["status"]);
+    await addIndexIfMissing("crm_ai_subscriptions", ["external_reference"]);
   },
 
   async down(queryInterface) {

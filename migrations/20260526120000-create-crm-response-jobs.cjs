@@ -2,7 +2,35 @@
 
 module.exports = {
   async up(queryInterface, Sequelize) {
-    await queryInterface.createTable("crm_response_jobs", {
+    const tableExists = async (tableName) => {
+      try {
+        await queryInterface.describeTable(tableName);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    const addIndexIfMissing = async (tableName, fields, options = {}) => {
+      const indexName = options.name || `${tableName}_${fields.join("_")}`;
+      const indexes = await queryInterface.showIndex(tableName);
+      if (!indexes.some((index) => index.name === indexName)) {
+        await queryInterface.addIndex(tableName, fields, options);
+      }
+    };
+
+    const addConstraintIfMissing = async (tableName, constraintName, options) => {
+      const [constraints] = await queryInterface.sequelize.query(
+        "SELECT conname FROM pg_constraint WHERE conname = :constraintName",
+        { replacements: { constraintName } },
+      );
+      if (!constraints.length) {
+        await queryInterface.addConstraint(tableName, options);
+      }
+    };
+
+    if (!(await tableExists("crm_response_jobs"))) {
+      await queryInterface.createTable("crm_response_jobs", {
       id: {
         type: Sequelize.UUID,
         allowNull: false,
@@ -84,11 +112,16 @@ module.exports = {
         allowNull: false,
         defaultValue: Sequelize.fn("NOW"),
       },
-    });
+      });
+    }
 
-    await queryInterface.addIndex("crm_response_jobs", ["usersId", "status", "dueAt"]);
-    await queryInterface.addIndex("crm_response_jobs", ["conversationId"]);
-    await queryInterface.addConstraint("crm_response_jobs", {
+    await addIndexIfMissing("crm_response_jobs", ["usersId", "status", "dueAt"], {
+      name: "crm_response_jobs_users_id_status_due_at",
+    });
+    await addIndexIfMissing("crm_response_jobs", ["conversationId"], {
+      name: "crm_response_jobs_conversation_id",
+    });
+    await addConstraintIfMissing("crm_response_jobs", "crm_response_jobs_inbound_message_unique", {
       fields: ["inboundMessageId"],
       type: "unique",
       name: "crm_response_jobs_inbound_message_unique",
