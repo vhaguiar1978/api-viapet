@@ -287,7 +287,7 @@ function buildAgendarReply({ greeting, settings, customer, pet, services, text, 
     const periodPart = periodLbl ? ` ${periodLbl}` : "";
     const isToday = String(availableSlots?.queryDate || "").slice(0, 10) === getSaoPauloDateOnly(0);
     const alternativa = !availableSlots.queryPeriod
-      ? "outro periodo"
+      ? isToday ? "outro dia" : "outro periodo"
       : isToday && availableSlots.queryPeriod !== "manha"
         ? "outro dia"
         : availableSlots.queryPeriod === "manha"
