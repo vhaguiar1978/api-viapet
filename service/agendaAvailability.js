@@ -174,7 +174,7 @@ export function detectScheduleQuery(message) {
   // Normaliza acentos e pontuação leve
   const m = raw
     .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "")
+    .replace(/[\u0300-\u036f]/g, "")
     .replace(/[!?.,;]/g, " ")
     .replace(/\s+/g, " ");
 

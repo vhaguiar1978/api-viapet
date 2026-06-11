@@ -70,7 +70,7 @@ import { getAvailableSlots, detectScheduleQuery } from "./agendaAvailability.js"
 function normalizeSearchable(value) {
   return String(value || "")
     .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "")
+    .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase();
 }
 
@@ -84,6 +84,24 @@ const VERBS_CANCELAR = ["cancelar", "desmarcar", "cancela"];
 const VERBS_CUMPRIMENTO = ["ola", "oi", "ola!", "oi!", "bom dia", "boa tarde", "boa noite", "tudo bem", "td bem"];
 const VERBS_LOCALIZACAO = ["endereco", "onde", "localizacao", "rua", "fica onde"];
 const VERBS_TELEFONE = ["telefone", "contato", "numero"];
+
+function isBusinessHoursQuestion(text) {
+  const n = normalizeSearchable(text);
+  return VERBS_HORARIO.some((v) => n.includes(v)) ||
+    (/\b(que|qual|quais)\s+horas?\b/.test(n) && /\b(abre|abrem|fecha|fecham|funciona|funcionam|atende|atendem)\b/.test(n)) ||
+    /\b(que|qual|quais)\s+horas?\s+(abre|fecha|funciona|atende|atendimento)\b/.test(n) ||
+    /\bhorario\s+(de\s+)?(funcionamento|atendimento|abre|fecha)\b/.test(n);
+}
+
+function isScheduleAvailabilityText(text) {
+  const n = normalizeSearchable(text);
+  if (!n) return false;
+  if (/\b(qual|quais|que)\s+horarios?\b/.test(n)) return true;
+  if (/\bhorarios?\b/.test(n) && /\b(escolher|livre|livres|disponivel|disponiveis|disponibilidade|hoje|amanha|manha|tarde|noite)\b/.test(n)) return true;
+  if (/\b(vaga|vagas|encaixe|encaixar|disponibilidade|disponivel|disponiveis)\b/.test(n) && /\b(agenda|agendar|marcar|banho|tosa|hidratacao|horario|horarios)\b/.test(n)) return true;
+  if (/\btem\b/.test(n) && /\b(horario|horarios|vaga|vagas)\b/.test(n)) return true;
+  return false;
+}
 
 // Detector de PERIODO so (ex: "manha", "parte da tarde", "tardezinha") — entra
 // quando o cliente esta respondendo a pergunta "manha ou tarde?". Sem isso
@@ -99,10 +117,10 @@ function detectPeriodoOnly(text) {
 function detectIntent(text) {
   const n = normalizeSearchable(text);
   // ORDEM IMPORTA — intencoes mais especificas primeiro
-  if (VERBS_AGENDAR.some((v) => n.includes(v))) return "agendar";
   if (VERBS_CANCELAR.some((v) => n.includes(v))) return "cancelar";
+  if (isBusinessHoursQuestion(n)) return "horario";
+  if (isScheduleAvailabilityText(n) || VERBS_AGENDAR.some((v) => n.includes(v))) return "agendar";
   if (VERBS_PRECO.some((v) => n.includes(v))) return "preco";
-  if (VERBS_HORARIO.some((v) => n.includes(v))) return "horario";
   // Se a mensagem e curta E so contem palavra de periodo, e resposta de
   // continuacao do fluxo de agendamento — trata como agendar pra cair em
   // buildAgendarReply (que ja sabe ler availableSlots e mostrar horarios).
@@ -154,6 +172,35 @@ function detectHora(text) {
   return null;
 }
 
+function getSaoPauloDateOnly(addDays = 0) {
+  const nowSp = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
+  nowSp.setDate(nowSp.getDate() + addDays);
+  return nowSp.toISOString().slice(0, 10);
+}
+
+function formatAvailabilityDateLabel(availableSlots, fallbackData = "") {
+  const queryDate = String(availableSlots?.queryDate || "").slice(0, 10);
+  if (queryDate) {
+    if (queryDate === getSaoPauloDateOnly(0)) return "hoje";
+    if (queryDate === getSaoPauloDateOnly(1)) return "amanha";
+    return `${availableSlots?.dayLabel || ""} ${queryDate}`.trim();
+  }
+  return fallbackData || "esse dia";
+}
+
+function formatAvailabilityPeriodLabel(period) {
+  if (period === "manha") return "de manha";
+  if (period === "tarde") return "a tarde";
+  if (period === "noite") return "a noite";
+  return "";
+}
+
+function formatSlotList(slots = []) {
+  const clean = slots.map((slot) => String(slot || "").slice(0, 5)).filter(Boolean);
+  if (clean.length <= 1) return clean[0] || "";
+  return `${clean.slice(0, -1).join(", ")} e ${clean[clean.length - 1]}`;
+}
+
 // ─── Helpers humanizadores ───────────────────────────────────────────────
 
 function pickGreeting(customerName) {
@@ -196,9 +243,11 @@ function buildAgendarReply({ greeting, settings, customer, pet, services, text, 
   // OBRIGATORIO no fallback de keywords.
   const slotsList = Array.isArray(availableSlots?.slots) ? availableSlots.slots : null;
   const hasPeriod = Boolean(availableSlots?.periodExplicit && availableSlots?.queryPeriod);
-  const dayLabel = availableSlots?.queryPeriod
-    ? `${availableSlots?.dayLabel || data || ""}`.trim()
-    : "";
+  const hasDateForSlots = Boolean(availableSlots?.dateExplicit || availableSlots?.contextDateUsed);
+  const shouldOfferSlots =
+    slotsList &&
+    (isScheduleAvailabilityText(text) || hasPeriod) &&
+    hasDateForSlots;
 
   // tem servico + data + hora → propoe confirmacao
   if (servico && data && hora) {
@@ -213,21 +262,38 @@ function buildAgendarReply({ greeting, settings, customer, pet, services, text, 
     return variants[Math.floor(Math.random() * variants.length)];
   }
 
-  // Cliente deu dia + período → mostrar os slots reais daquele período
-  if (slotsList && slotsList.length > 0 && hasPeriod) {
-    const periodLbl = availableSlots.queryPeriod === "manha" ? "de manhã" : availableSlots.queryPeriod === "tarde" ? "à tarde" : "à noite";
-    const dataLbl = data || "esse dia";
-    const lista = slotsList.length === 1
-      ? `${slotsList[0]}`
-      : `${slotsList.slice(0, -1).join(", ")} e ${slotsList.slice(-1)[0]}`;
-    return `${greeting} Pra ${dataLbl} ${periodLbl} eu tenho ${lista}. Qual desses fica melhor pra você? 🐾`;
+  // Cliente pediu disponibilidade de agenda: mostra horarios reais, sem voltar
+  // para pergunta generica. Se nao houver dia claro, pergunta o dia antes.
+  if (slotsList && (isScheduleAvailabilityText(text) || hasPeriod) && !shouldOfferSlots) {
+    return `${greeting} Consigo ver os horarios pra voce. Para qual dia seria o ${servico ? servico.replace("_", " e ") : "atendimento"}?`;
+  }
+
+  if (!slotsList && isScheduleAvailabilityText(text) && !data) {
+    return `${greeting} Consigo ver os horarios pra voce. Para qual dia seria o ${servico ? servico.replace("_", " e ") : "atendimento"}?`;
+  }
+
+  if (slotsList && slotsList.length > 0 && shouldOfferSlots) {
+    const periodLbl = formatAvailabilityPeriodLabel(availableSlots.queryPeriod);
+    const dateLbl = formatAvailabilityDateLabel(availableSlots, data);
+    const periodPart = periodLbl ? ` ${periodLbl}` : "";
+    const lista = formatSlotList(slotsList);
+    return `${greeting} Pra ${dateLbl}${periodPart} eu tenho ${lista}. Qual desses fica melhor pra voce?`;
   }
 
   // Cliente deu dia + período mas não tem horário livre
-  if (slotsList && slotsList.length === 0 && hasPeriod) {
-    const periodLbl = availableSlots.queryPeriod === "manha" ? "de manhã" : availableSlots.queryPeriod === "tarde" ? "à tarde" : "à noite";
-    const outroPeriodo = availableSlots.queryPeriod === "manha" ? "à tarde" : "de manhã";
-    return `${greeting} Poxa, pra ${data || "esse dia"} ${periodLbl} não tenho mais horário livre 😔 Posso ver ${outroPeriodo} ou outro dia pra você?`;
+  if (slotsList && slotsList.length === 0 && shouldOfferSlots) {
+    const periodLbl = formatAvailabilityPeriodLabel(availableSlots.queryPeriod);
+    const dateLbl = formatAvailabilityDateLabel(availableSlots, data);
+    const periodPart = periodLbl ? ` ${periodLbl}` : "";
+    const isToday = String(availableSlots?.queryDate || "").slice(0, 10) === getSaoPauloDateOnly(0);
+    const alternativa = !availableSlots.queryPeriod
+      ? "outro periodo"
+      : isToday && availableSlots.queryPeriod !== "manha"
+        ? "outro dia"
+        : availableSlots.queryPeriod === "manha"
+          ? "a tarde"
+          : "outro periodo";
+    return `${greeting} Poxa, pra ${dateLbl}${periodPart} nao tenho horario livre. Posso ver ${alternativa} pra voce?`;
   }
 
   if (servico && data && !hora) {
@@ -390,6 +456,77 @@ function buildReply({ question, services, settings, customer, pet, history, iden
     default:
       return buildIndefinidoReply({ greeting, services, history, pet, customer });
   }
+}
+
+function resolveScheduleQueryWithContext(body, previousMessages = []) {
+  const currentQuery = detectScheduleQuery(body);
+  if (!currentQuery) return null;
+
+  const resolved = {
+    ...currentQuery,
+    contextDateUsed: false,
+    contextPeriodUsed: false,
+  };
+
+  const currentText = String(body || "").trim();
+  const previousUserTexts = (Array.isArray(previousMessages) ? previousMessages : [])
+    .filter((message) => message && message.role === "user")
+    .map((message) => String(message.content || "").trim())
+    .filter(Boolean)
+    .filter((content) => content !== currentText)
+    .reverse();
+
+  for (const content of previousUserTexts) {
+    const previousQuery = detectScheduleQuery(content);
+    if (!previousQuery) continue;
+
+    if (!resolved.dateExplicit && previousQuery.dateExplicit) {
+      resolved.date = previousQuery.date;
+      resolved.dateExplicit = true;
+      resolved.contextDateUsed = true;
+    }
+
+    if (!resolved.periodExplicit && previousQuery.periodExplicit) {
+      resolved.period = previousQuery.period;
+      resolved.periodExplicit = true;
+      resolved.contextPeriodUsed = true;
+    }
+
+    if (resolved.dateExplicit && resolved.periodExplicit) break;
+  }
+
+  return resolved;
+}
+
+async function loadAvailableSlotsForAi({ usersId, body, previousMessages = [], settings, aiControl }) {
+  const scheduleQuery = resolveScheduleQueryWithContext(body, previousMessages);
+  if (!scheduleQuery) return null;
+
+  const hasUsefulDate = Boolean(scheduleQuery.dateExplicit || scheduleQuery.contextDateUsed);
+  const directAvailabilityQuestion = isScheduleAvailabilityText(body);
+  if (!hasUsefulDate && !directAvailabilityQuestion) {
+    return null;
+  }
+
+  const slotsResult = await getAvailableSlots({
+    usersId,
+    date: scheduleQuery.date,
+    period: scheduleQuery.period,
+    type: "estetica",
+    settings,
+    aiControl,
+    maxSlots: 6,
+  });
+
+  return {
+    ...slotsResult,
+    queryDate: scheduleQuery.date,
+    queryPeriod: scheduleQuery.period,
+    dateExplicit: Boolean(scheduleQuery.dateExplicit),
+    periodExplicit: Boolean(scheduleQuery.periodExplicit),
+    contextDateUsed: Boolean(scheduleQuery.contextDateUsed),
+    contextPeriodUsed: Boolean(scheduleQuery.contextPeriodUsed),
+  };
 }
 
 // ─── Integracao Groq (IA real, gratuita) ─────────────────────────────────
@@ -1705,19 +1842,23 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
   // agenda OU referência de data/período).
   let availableSlots = null;
   try {
-    const scheduleQuery = detectScheduleQuery(body);
+    const scheduleHistory = conversation?.id
+      ? (await buildHistoryMessages(conversation.id, 6)).filter(
+          (message) => !(message.role === "user" && String(message.content || "").trim() === String(body || "").trim()),
+        )
+      : [];
+    const scheduleQuery = resolveScheduleQueryWithContext(body, scheduleHistory);
     if (scheduleQuery) {
-      const slotsResult = await getAvailableSlots({
+      availableSlots = await loadAvailableSlotsForAi({
         usersId,
-        date: scheduleQuery.date,
-        period: scheduleQuery.period,
-        type: "estetica",
+        body,
+        previousMessages: scheduleHistory,
         settings: check.settings,
         aiControl: check.aiControl,
-        maxSlots: 6,
       });
-      availableSlots = { ...slotsResult, queryDate: scheduleQuery.date, queryPeriod: scheduleQuery.period };
-      console.log(`[CrmAutoReply] Slots livres ${scheduleQuery.date}${scheduleQuery.period ? ` (${scheduleQuery.period})` : ""}: ${slotsResult.slots.join(", ") || "nenhum"}`);
+      if (availableSlots) {
+        console.log(`[CrmAutoReply] Slots livres ${availableSlots.queryDate}${availableSlots.queryPeriod ? ` (${availableSlots.queryPeriod})` : ""}: ${availableSlots.slots.join(", ") || "nenhum"}`);
+      }
     }
   } catch (err) {
     console.warn("[CrmAutoReply] Falha buscando slots:", err?.message);
@@ -1790,6 +1931,21 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
 
   let executedAction = null;
 
+  if (isScheduleAvailabilityText(body)) {
+    const histForFallback = await lazyHistory();
+    reply = buildReply({
+      question: body,
+      services,
+      settings: check.settings,
+      customer,
+      pet,
+      history: histForFallback,
+      identifyAsAi,
+      availableSlots,
+    });
+    aiSource = "agenda-availability";
+  }
+
   if (!groqApiKey) {
     console.warn(
       `[CrmAutoReply] user=${String(usersId).slice(0, 8)} SEM GROQ_API_KEY — IA respondendo em modo FALLBACK (keywords). Respostas serao curtas e repetitivas. Configure aiControl.groqApiKey no painel OU defina GROQ_API_KEY no env do Render.`,
@@ -1806,7 +1962,7 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
     console.warn(`[CrmAutoReply] user=${String(usersId).slice(0, 8)} Groq em COOLDOWN TPM por mais ${remainingSec}s — pulando direto pro fallback de keywords pra nao queimar tokens.`);
   }
 
-  if (groqApiKey && !inCooldown) {
+  if (!reply && groqApiKey && !inCooldown) {
     try {
       const rawContent = await generateGroqReply({
         apiKey: groqApiKey,
@@ -1977,17 +2133,6 @@ export async function testAiReply({ usersId, messages = [] }) {
   });
   const services = filteredServices.length > 0 ? filteredServices : allServices.slice(0, 20);
 
-  const systemPrompt = buildSystemPrompt({
-    settings,
-    aiControl,
-    services,
-    products: [],
-    customer: null,
-    pet: null,
-    pets: [],
-    upcomingAppointments: [],
-  });
-
   const cleanMessages = messages
     .filter((message) => message && (message.role === "user" || message.role === "assistant") && typeof message.content === "string")
     .slice(-8)
@@ -1997,8 +2142,33 @@ export async function testAiReply({ usersId, messages = [] }) {
     throw new Error("ultima mensagem precisa ser do usuario (role=user)");
   }
 
-  const providerMessages = [{ role: "system", content: systemPrompt }, ...cleanMessages];
   const lastUserBody = cleanMessages[cleanMessages.length - 1]?.content || "";
+  let availableSlots = null;
+  try {
+    availableSlots = await loadAvailableSlotsForAi({
+      usersId,
+      body: lastUserBody,
+      previousMessages: cleanMessages.slice(0, -1),
+      settings,
+      aiControl,
+    });
+  } catch (error) {
+    console.warn("[CrmAutoReply] Chat de teste: falha buscando slots:", error?.message);
+  }
+
+  const systemPrompt = buildSystemPrompt({
+    settings,
+    aiControl,
+    services,
+    products: [],
+    customer: null,
+    pet: null,
+    pets: [],
+    upcomingAppointments: [],
+    availableSlots,
+  });
+
+  const providerMessages = [{ role: "system", content: systemPrompt }, ...cleanMessages];
   const useSmart = shouldUseSmartModel({
     body: lastUserBody,
     aiControl,
@@ -2012,6 +2182,26 @@ export async function testAiReply({ usersId, messages = [] }) {
     const parsed = parseAiReply(rawContent);
     return parsed.reply || String(rawContent || "").trim();
   };
+
+  if (isScheduleAvailabilityText(lastUserBody)) {
+    const reply = buildReply({
+      question: lastUserBody,
+      services,
+      settings,
+      customer: null,
+      pet: null,
+      history: cleanMessages,
+      identifyAsAi: Boolean(aiControl.identifyAsAi),
+      availableSlots,
+    });
+
+    return {
+      reply,
+      model: "agenda-availability",
+      provider: "rules+agenda",
+      promptLength: systemPrompt.length,
+    };
+  }
 
   if (groqApiKey) {
     try {
@@ -2060,8 +2250,9 @@ export async function testAiReply({ usersId, messages = [] }) {
     settings,
     customer: null,
     pet: null,
-    history: [],
+    history: cleanMessages,
     identifyAsAi: Boolean(aiControl.identifyAsAi),
+    availableSlots,
   });
 
   return {
