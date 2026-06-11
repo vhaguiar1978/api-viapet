@@ -10,6 +10,7 @@ import CustomerAiNote from "../models/CustomerAiNote.js";
 import KnowledgeBaseEntry from "../models/KnowledgeBaseEntry.js";
 import { groqChat, GROQ_DEFAULT_MODEL, GROQ_SMART_MODEL } from "./groqClient.js";
 import { geminiChat, GEMINI_DEFAULT_MODEL } from "./geminiClient.js";
+import { analyzeCrmAiReply } from "./crmAiQuality.js";
 
 // Cooldown global por usuario quando Groq retornar 413 (TPM excedido).
 // Map<usersId, timestampUntil>. TPM (tokens per minute) se renova a cada 60s,
@@ -84,6 +85,8 @@ const VERBS_CANCELAR = ["cancelar", "desmarcar", "cancela"];
 const VERBS_CUMPRIMENTO = ["ola", "oi", "ola!", "oi!", "bom dia", "boa tarde", "boa noite", "tudo bem", "td bem"];
 const VERBS_LOCALIZACAO = ["endereco", "onde", "localizacao", "rua", "fica onde"];
 const VERBS_TELEFONE = ["telefone", "contato", "numero"];
+const VERBS_SAUDE = ["dor", "doente", "vomit", "sangue", "machuc", "ferida", "alerg", "emergencia", "urgente"];
+const VERBS_COMPROVANTE = ["comprovante", "paguei", "pagamento", "pix", "boleto", "transferencia", "recibo"];
 
 function isBusinessHoursQuestion(text) {
   const n = normalizeSearchable(text);
@@ -117,6 +120,8 @@ function detectPeriodoOnly(text) {
 function detectIntent(text) {
   const n = normalizeSearchable(text);
   // ORDEM IMPORTA — intencoes mais especificas primeiro
+  if (VERBS_SAUDE.some((v) => n.includes(v))) return "saude";
+  if (VERBS_COMPROVANTE.some((v) => n.includes(v))) return "pagamento_comprovante";
   if (VERBS_CANCELAR.some((v) => n.includes(v))) return "cancelar";
   if (isBusinessHoursQuestion(n)) return "horario";
   if (isScheduleAvailabilityText(n) || VERBS_AGENDAR.some((v) => n.includes(v))) return "agendar";
@@ -352,7 +357,11 @@ function buildPrecoReply({ greeting, services, customer, pet, text }) {
   if (servico) {
     const found = services.find((s) => normalizeSearchable(s.name).includes(servico.replace("_", " ")));
     if (found) {
-      const preco = found.price != null ? Number(found.price).toFixed(2) : "varia conforme o porte";
+      const priceNumber = Number(found.price || 0);
+      if (!Number.isFinite(priceNumber) || priceNumber <= 0) {
+        return `${greeting} Tenho ${found.name}, mas o valor depende do porte e do detalhe do atendimento. Me fala o porte do pet para eu te passar a opcao certa.`;
+      }
+      const preco = priceNumber.toFixed(2);
       const variants = [
         `${greeting} O ${found.name} sai por R$ ${preco}.${pet?.name ? ` Quer que eu agende para o ${pet.name}?` : " Quer agendar?"}`,
         `${greeting} ${found.name}: R$ ${preco}.${pet?.name ? ` Posso marcar para o ${pet.name}?` : " Posso marcar pra você?"}`,
@@ -363,7 +372,10 @@ function buildPrecoReply({ greeting, services, customer, pet, text }) {
   const list = services.length
     ? services
         .slice(0, 5)
-        .map((s) => `${s.name}${s.price != null ? ` R$ ${Number(s.price).toFixed(2)}` : ""}`)
+        .map((s) => {
+          const priceNumber = Number(s.price || 0);
+          return `${s.name}${Number.isFinite(priceNumber) && priceNumber > 0 ? ` R$ ${priceNumber.toFixed(2)}` : ""}`;
+        })
         .join(", ")
     : "banho e tosa conforme o porte";
   return `${greeting} Olha só nossos valores: ${list}. Quer que eu marque algum?`;
@@ -388,6 +400,14 @@ function buildLocalizacaoReply({ greeting, settings }) {
 
 function buildCancelarReply({ greeting }) {
   return `${greeting} Sem problema. Me confirma a data e o horario do agendamento que voce quer cancelar, por favor.`;
+}
+
+function buildSaudeReply({ greeting }) {
+  return `${greeting} Como envolve saude do pet, vou chamar alguem da equipe para orientar com seguranca. Se tiver vomito, sangue, dor forte ou falta de ar, o ideal e atendimento veterinario o quanto antes.`;
+}
+
+function buildComprovanteReply({ greeting }) {
+  return `${greeting} Recebi o comprovante. Vou conferir o pagamento e vincular ao agendamento correto; se eu nao conseguir confirmar com seguranca, chamo uma pessoa da equipe para revisar.`;
 }
 
 function buildCumprimentoReply({ greeting, settings, pet, services, identifyAsAi }) {
@@ -445,6 +465,10 @@ function buildReply({ question, services, settings, customer, pet, history, iden
       return buildHorarioReply({ greeting, settings });
     case "cancelar":
       return buildCancelarReply({ greeting });
+    case "saude":
+      return buildSaudeReply({ greeting });
+    case "pagamento_comprovante":
+      return buildComprovanteReply({ greeting });
     case "localizacao":
       return buildLocalizacaoReply({ greeting, settings });
     case "cumprimento":
@@ -456,6 +480,52 @@ function buildReply({ question, services, settings, customer, pet, history, iden
     default:
       return buildIndefinidoReply({ greeting, services, history, pet, customer });
   }
+}
+
+function applyReplyQualityGuard({
+  question,
+  reply,
+  services,
+  settings,
+  customer,
+  pet,
+  history,
+  identifyAsAi,
+  availableSlots = null,
+  source = "unknown",
+}) {
+  const initialQuality = analyzeCrmAiReply({ question, reply, availableSlots });
+  if (!initialQuality.shouldRepair) {
+    return { reply, quality: initialQuality, source };
+  }
+
+  const repairedReply = buildReply({
+    question,
+    services,
+    settings,
+    customer,
+    pet,
+    history,
+    identifyAsAi,
+    availableSlots,
+  });
+  const repairedQuality = analyzeCrmAiReply({
+    question,
+    reply: repairedReply,
+    availableSlots,
+  });
+
+  if (repairedQuality.score >= initialQuality.score || initialQuality.shouldRepair) {
+    return {
+      reply: repairedReply,
+      quality: repairedQuality,
+      source: `${source}+quality_guard`,
+      repaired: true,
+      previousQuality: initialQuality,
+    };
+  }
+
+  return { reply, quality: initialQuality, source };
 }
 
 function resolveScheduleQueryWithContext(body, previousMessages = []) {
@@ -2067,9 +2137,36 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
   // No caminho Groq normal, o proprio modelo ja varia naturalmente.
   const histForCheck = history; // null se Groq teve sucesso (nao foi carregado)
   const lastBotBody = String(histForCheck?.[0]?.body || "").trim();
-  const finalReply = lastBotBody && lastBotBody === reply.trim()
+  let finalReply = lastBotBody && lastBotBody === reply.trim()
     ? `Posso te ajudar de outra forma? Tente perguntar sobre: "agendar banho amanha 10h", "quanto custa tosa" ou "que horas funciona".`
     : reply;
+  let replyQuality = analyzeCrmAiReply({
+    question: body,
+    reply: finalReply,
+    availableSlots,
+  });
+
+  if (replyQuality.shouldRepair) {
+    const histForRepair = await lazyHistory();
+    const guarded = applyReplyQualityGuard({
+      question: body,
+      reply: finalReply,
+      services,
+      settings: check.settings,
+      customer,
+      pet,
+      history: histForRepair,
+      identifyAsAi,
+      availableSlots,
+      source: aiSource,
+    });
+    finalReply = guarded.reply;
+    replyQuality = guarded.quality;
+    aiSource = guarded.source;
+    console.warn(
+      `[CrmAutoReply] Quality guard ajustou resposta (score=${guarded.previousQuality?.score ?? "n/a"} -> ${replyQuality.score}, intent=${replyQuality.intent})`,
+    );
+  }
 
   try {
     await CrmAiActionLog.create({
@@ -2085,7 +2182,12 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
       approvalRequired: false,
       approvedByHuman: false,
       executed: true,
-      payload: { question: String(body || "").slice(0, 500), intent: detectIntent(body), aiSource },
+      payload: {
+        question: String(body || "").slice(0, 500),
+        intent: detectIntent(body),
+        aiSource,
+        quality: replyQuality,
+      },
     });
   } catch (err) {
     console.warn("[CrmAutoReply] Falha ao logar acao:", err.message);
@@ -2183,6 +2285,31 @@ export async function testAiReply({ usersId, messages = [] }) {
     return parsed.reply || String(rawContent || "").trim();
   };
 
+  const buildTestResult = ({ reply, model, provider, warning = "" }) => {
+    const guarded = applyReplyQualityGuard({
+      question: lastUserBody,
+      reply,
+      services,
+      settings,
+      customer: null,
+      pet: null,
+      history: cleanMessages,
+      identifyAsAi: Boolean(aiControl.identifyAsAi),
+      availableSlots,
+      source: provider,
+    });
+
+    return {
+      reply: guarded.reply,
+      model,
+      provider: guarded.source,
+      promptLength: systemPrompt.length,
+      quality: guarded.quality,
+      repaired: Boolean(guarded.repaired),
+      ...(warning ? { warning } : {}),
+    };
+  };
+
   if (isScheduleAvailabilityText(lastUserBody)) {
     const reply = buildReply({
       question: lastUserBody,
@@ -2195,12 +2322,11 @@ export async function testAiReply({ usersId, messages = [] }) {
       availableSlots,
     });
 
-    return {
+    return buildTestResult({
       reply,
       model: "agenda-availability",
       provider: "rules+agenda",
-      promptLength: systemPrompt.length,
-    };
+    });
   }
 
   if (groqApiKey) {
@@ -2212,12 +2338,11 @@ export async function testAiReply({ usersId, messages = [] }) {
         temperature: 0.4,
         maxTokens: 600,
       });
-      return {
+      return buildTestResult({
         reply: parseTestReply(result.content),
         model: result.model || "groq",
         provider: "groq",
-        promptLength: systemPrompt.length,
-      };
+      });
     } catch (error) {
       console.warn("[CrmAutoReply] Chat de teste: Groq falhou, tentando fallback:", error?.message);
     }
@@ -2233,12 +2358,11 @@ export async function testAiReply({ usersId, messages = [] }) {
         maxTokens: 700,
         jsonMode: true,
       });
-      return {
+      return buildTestResult({
         reply: parseTestReply(result.content),
         model: result.model || GEMINI_DEFAULT_MODEL,
         provider: "gemini",
-        promptLength: systemPrompt.length,
-      };
+      });
     } catch (error) {
       console.warn("[CrmAutoReply] Chat de teste: Gemini falhou, usando fallback simples:", error?.message);
     }
@@ -2255,11 +2379,10 @@ export async function testAiReply({ usersId, messages = [] }) {
     availableSlots,
   });
 
-  return {
+  return buildTestResult({
     reply,
     model: "fallback-keywords",
     provider: "keywords",
-    promptLength: systemPrompt.length,
     warning: "Nenhuma chave Groq/Gemini configurada. Resposta gerada em modo simples.",
-  };
+  });
 }

@@ -1,5 +1,6 @@
 import express from "express";
 import { v4 as uuidv4 } from "uuid";
+import { Op } from "sequelize";
 import auth from "../middlewares/auth.js";
 import owner from "../middlewares/owner.js";
 import Users from "../models/Users.js";
@@ -92,6 +93,75 @@ const DEFAULT_CONTROL = {
       "A IA pode agendar livremente quando houver servico claro, data, hora e pet identificado. Confirma com o tutor antes de salvar.",
   },
 };
+
+const CRM_AI_QUALITY_TESTS = [
+  {
+    id: "agenda_hoje",
+    title: "Horario para banho hoje",
+    messages: [
+      { role: "user", content: "quero agendar um banho para hoje tem horario" },
+    ],
+    minScore: 80,
+  },
+  {
+    id: "agenda_followup",
+    title: "Continuidade de contexto sobre horario",
+    messages: [
+      { role: "user", content: "quero agendar um banho para hoje tem horario" },
+      { role: "assistant", content: "Consigo ver os horarios. Voce prefere manha ou tarde?" },
+      { role: "user", content: "quais horarios voce tem hoje a tarde" },
+    ],
+    minScore: 80,
+  },
+  {
+    id: "funcionamento",
+    title: "Horario de funcionamento",
+    messages: [
+      { role: "user", content: "que horas voces abrem?" },
+    ],
+    minScore: 75,
+  },
+  {
+    id: "preco",
+    title: "Pergunta de valor",
+    messages: [
+      { role: "user", content: "quanto custa banho e tosa para cachorro pequeno?" },
+    ],
+    minScore: 75,
+  },
+  {
+    id: "comprovante",
+    title: "Comprovante de pagamento",
+    messages: [
+      { role: "user", content: "enviei o comprovante do pix, pode confirmar meu pagamento?" },
+    ],
+    minScore: 80,
+  },
+  {
+    id: "saude",
+    title: "Saude do pet",
+    messages: [
+      { role: "user", content: "meu cachorro esta vomitando e com sangue, o que faco?" },
+    ],
+    minScore: 85,
+  },
+  {
+    id: "cancelamento",
+    title: "Cancelar agendamento",
+    messages: [
+      { role: "user", content: "preciso cancelar o banho de amanha" },
+    ],
+    minScore: 75,
+  },
+  {
+    id: "localizacao",
+    title: "Localizacao da loja",
+    messages: [
+      { role: "user", content: "onde fica o pet shop?" },
+    ],
+    minScore: 70,
+  },
+];
 
 function getEstablishmentId(req) {
   return req.user?.establishment || req.user?.id || null;
@@ -1521,6 +1591,93 @@ router.post("/control/test-reply", auth, async (req, res) => {
     return res.status(500).json({
       success: false,
       error: error.message || "Erro ao gerar resposta de teste",
+    });
+  }
+});
+
+router.post("/control/quality-tests", auth, async (req, res) => {
+  try {
+    const usersId = getEstablishmentId(req);
+    const customTests = Array.isArray(req.body?.tests) ? req.body.tests : [];
+    const tests = (customTests.length ? customTests : CRM_AI_QUALITY_TESTS)
+      .map((test, index) => ({
+        id: String(test?.id || `custom_${index + 1}`).slice(0, 60),
+        title: String(test?.title || `Teste ${index + 1}`).slice(0, 120),
+        messages: Array.isArray(test?.messages) ? test.messages : [],
+        minScore: Number(test?.minScore || 75),
+      }))
+      .filter((test) => test.messages.length > 0)
+      .slice(0, 20);
+
+    const startedAt = Date.now();
+    const results = [];
+
+    for (const test of tests) {
+      try {
+        const result = await testAiReply({ usersId, messages: test.messages });
+        const quality = result?.quality || null;
+        const score = Number(quality?.score ?? 0);
+        const passed = score >= test.minScore && !quality?.shouldRepair;
+
+        results.push({
+          id: test.id,
+          title: test.title,
+          passed,
+          minScore: test.minScore,
+          score,
+          intent: quality?.intent || null,
+          provider: result?.provider || null,
+          model: result?.model || null,
+          repaired: Boolean(result?.repaired),
+          question: test.messages[test.messages.length - 1]?.content || "",
+          reply: result?.reply || "",
+          issues: Array.isArray(quality?.issues) ? quality.issues : [],
+          warning: result?.warning || null,
+        });
+      } catch (error) {
+        results.push({
+          id: test.id,
+          title: test.title,
+          passed: false,
+          minScore: test.minScore,
+          score: 0,
+          question: test.messages[test.messages.length - 1]?.content || "",
+          reply: "",
+          issues: [
+            {
+              code: "test_error",
+              severity: "critical",
+              message: error?.message || "Falha ao executar teste da IA.",
+            },
+          ],
+        });
+      }
+    }
+
+    const passedCount = results.filter((item) => item.passed).length;
+    const total = results.length || 1;
+    const averageScore = Math.round(
+      results.reduce((sum, item) => sum + Number(item.score || 0), 0) / total,
+    );
+
+    return res.json({
+      success: true,
+      data: {
+        ok: passedCount === results.length,
+        passed: passedCount,
+        failed: results.length - passedCount,
+        total: results.length,
+        averageScore,
+        durationMs: Date.now() - startedAt,
+        results,
+      },
+    });
+  } catch (error) {
+    console.error("Erro nos testes de qualidade da IA:", error);
+    return res.status(500).json({
+      success: false,
+      error: "Erro ao rodar testes de qualidade da IA",
+      details: error.message,
     });
   }
 });
@@ -3147,6 +3304,33 @@ router.get("/diagnose", auth, async (req, res) => {
         await CrmResponseJob.count({ where: { usersId, status } }),
       ]),
     ).then((rows) => Object.fromEntries(rows));
+    const recentConversationRows = await CrmConversation.findAll({
+      where: {
+        usersId,
+        isArchived: false,
+        lastInboundAt: { [Op.ne]: null },
+        updatedAt: { [Op.gte]: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+      },
+      attributes: ["id", "customerName", "phone", "lastInboundAt", "lastOutboundAt", "unreadCount", "metadata"],
+      order: [["lastInboundAt", "DESC"]],
+      limit: 200,
+    }).catch(() => []);
+    const unansweredConversations = recentConversationRows
+      .filter((conv) => {
+        const inboundAt = conv.lastInboundAt ? new Date(conv.lastInboundAt).getTime() : 0;
+        const outboundAt = conv.lastOutboundAt ? new Date(conv.lastOutboundAt).getTime() : 0;
+        return inboundAt && (!outboundAt || outboundAt < inboundAt);
+      })
+      .slice(0, 20)
+      .map((conv) => ({
+        id: conv.id,
+        customerName: conv.customerName || "",
+        phone: conv.phone || "",
+        lastInboundAt: conv.lastInboundAt,
+        lastOutboundAt: conv.lastOutboundAt,
+        unreadCount: conv.unreadCount || 0,
+        aiPaused: Boolean(conv?.metadata?.aiPaused),
+      }));
 
     // Baileys: se a instancia ja foi criada em memoria, ve o status real
     let baileys = {
@@ -3256,6 +3440,17 @@ router.get("/diagnose", auth, async (req, res) => {
       responseQueue: {
         ...queueCounts,
         needsAttention: Number(queueCounts.waiting_human || 0) + Number(queueCounts.failed || 0),
+      },
+      unanswered: {
+        last24h: unansweredConversations.length,
+        items: unansweredConversations.slice(0, 8),
+      },
+      paymentReceipts: {
+        enabled: true,
+        geminiConfigured: geminiMode !== "missing",
+        autoApplyThreshold: 0.92,
+        reviewStatuses: ["waiting_human", "failed"],
+        note: "Comprovantes em imagem/PDF sao lidos antes da IA comum. Se houver baixa segura, o pagamento do agendamento e marcado automaticamente; se houver duvida, a conversa fica para revisao humana.",
       },
       whatsapp: {
         baileys,
