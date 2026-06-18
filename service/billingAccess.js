@@ -1,4 +1,5 @@
 import BillingSettings from "../models/BillingSettings.js";
+import { DEFAULT_PUBLIC_PLANS, normalizePublicPlans } from "./publicPlans.js";
 
 const DEFAULT_BILLING_VALUES = {
   monthlyPrice: 69.9,
@@ -46,7 +47,11 @@ export async function getOrCreateBillingSettings() {
       promotionalMonths: DEFAULT_BILLING_VALUES.promotionalMonths,
       reminderDays: DEFAULT_BILLING_VALUES.reminderDays,
       mercadoPagoEnabled: true,
+      publicPlans: DEFAULT_PUBLIC_PLANS,
+      fiscalModuleEnabled: false,
     });
+  } else if (!Array.isArray(settings.publicPlans) || !settings.publicPlans.length) {
+    settings.publicPlans = normalizePublicPlans(DEFAULT_PUBLIC_PLANS);
   }
 
   return settings;
@@ -59,6 +64,15 @@ export function buildBillingProfile(user, subscription, settings) {
   const reminderDays = Number(settings?.reminderDays || DEFAULT_BILLING_VALUES.reminderDays) || DEFAULT_BILLING_VALUES.reminderDays;
   const promotionalMonths = Number(settings?.promotionalMonths || DEFAULT_BILLING_VALUES.promotionalMonths) || DEFAULT_BILLING_VALUES.promotionalMonths;
   const planType = String(subscription?.plan_type || "").toLowerCase();
+  const selectedPlanId =
+    String(subscription?.notes || "").match(/plano escolhido:\s*(essential|professional|premium)/i)?.[1]?.toLowerCase() ||
+    (["essential", "professional", "premium"].includes(planType) ? planType : "essential");
+  const availablePlans = normalizePublicPlans(settings?.publicPlans);
+  const selectedPublicPlan =
+    availablePlans.find((plan) => plan.id === selectedPlanId) || availablePlans[0];
+  const selectedMonthlyPrice =
+    Number(selectedPublicPlan?.monthlyPrice || settings?.monthlyPrice || DEFAULT_BILLING_VALUES.monthlyPrice) ||
+    DEFAULT_BILLING_VALUES.monthlyPrice;
   const isFree =
     String(subscription?.notes || "").toLowerCase().includes("sem custo") ||
     (subscription?.amount != null &&
@@ -66,7 +80,7 @@ export function buildBillingProfile(user, subscription, settings) {
       planType !== "trial");
 
   let stage = "monthly";
-  let nextChargeAmount = Number(settings?.monthlyPrice || DEFAULT_BILLING_VALUES.monthlyPrice) || DEFAULT_BILLING_VALUES.monthlyPrice;
+  let nextChargeAmount = selectedMonthlyPrice;
   let nextChargePlanType = "monthly";
 
   if (isFree) {
@@ -74,8 +88,8 @@ export function buildBillingProfile(user, subscription, settings) {
     nextChargeAmount = 0;
   } else if (planType === "trial") {
     stage = "trial";
-    nextChargeAmount = Number(settings?.promotionalPrice || DEFAULT_BILLING_VALUES.promotionalPrice) || DEFAULT_BILLING_VALUES.promotionalPrice;
-    nextChargePlanType = "promotional";
+    nextChargeAmount = selectedMonthlyPrice;
+    nextChargePlanType = "monthly";
   } else if (
     planType === "promotional" &&
     Number(subscription?.promotional_months_used || 0) < promotionalMonths
@@ -102,6 +116,8 @@ export function buildBillingProfile(user, subscription, settings) {
   return {
     stage,
     planType,
+    selectedPlanId,
+    selectedPlanName: selectedPublicPlan?.name || "ViaPet Essencial",
     expirationDate: expirationDate ? expirationDate.toISOString() : null,
     daysUntilExpiry,
     reminderDays,

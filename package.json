@@ -16,6 +16,7 @@
     "check-subscriptions:dev": "cross-env NODE_ENV=development node scripts/check-subscriptions.js",
     "check-subscriptions:prod": "cross-env NODE_ENV=production node scripts/check-subscriptions.js",
     "test:ai": "node scripts/test-ai-chat.js",
+    "test:whatsapp-ia": "node scripts/test-admin-whatsapp-ia-rules.js",
     "backfill:doghouse-addresses": "node backfill-doghouse-addresses.js"
   },
   "keywords": [],

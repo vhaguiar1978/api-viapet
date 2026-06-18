@@ -3,6 +3,7 @@ import Settings from "../models/Settings.js";
 import Services from "../models/Services.js";
 import Products from "../models/Products.js";
 import CrmAiSubscription from "../models/CrmAiSubscription.js";
+import Subscription from "../models/Subscription.js";
 import CrmAiActionLog from "../models/CrmAiActionLog.js";
 import CrmConversationMessage from "../models/CrmConversationMessage.js";
 import CrmConversation from "../models/CrmConversation.js";
@@ -10,6 +11,7 @@ import CustomerAiNote from "../models/CustomerAiNote.js";
 import KnowledgeBaseEntry from "../models/KnowledgeBaseEntry.js";
 import { groqChat, GROQ_DEFAULT_MODEL, GROQ_SMART_MODEL } from "./groqClient.js";
 import { geminiChat, GEMINI_DEFAULT_MODEL } from "./geminiClient.js";
+import { openaiChat, OPENAI_DEFAULT_MODEL } from "./openaiClient.js";
 import { analyzeCrmAiReply } from "./crmAiQuality.js";
 
 // Cooldown global por usuario quando Groq retornar 413 (TPM excedido).
@@ -139,6 +141,9 @@ function detectIntent(text) {
 
 function detectServico(text) {
   const n = normalizeSearchable(text);
+  const hasTosaHigienica = /\btosa\b/.test(n) && /\bhigienic[ao]?\b|\bhigiene\b|\bhigienizacao\b/.test(n);
+  if (hasTosaHigienica && n.includes("banho")) return "banho_tosa_higienica";
+  if (hasTosaHigienica) return "tosa_higienica";
   if (n.includes("banho e tosa") || n.includes("completo")) return "banho_tosa";
   if (n.includes("tosa")) return "tosa";
   if (n.includes("banho")) return "banho";
@@ -174,6 +179,60 @@ function detectHora(text) {
   if (m3) return `${m3[1]}:00`;
   const m4 = n.match(/\b(\d{1,2})\s+horas?\b/);
   if (m4) return `${m4[1]}:00`;
+  return null;
+}
+
+function formatServicoLabel(servico) {
+  const labels = {
+    banho_tosa_higienica: "banho e tosa higienica",
+    tosa_higienica: "tosa higienica",
+    banho_tosa: "banho e tosa",
+    hidratacao: "hidratacao",
+    vacina: "vacina",
+    consulta: "consulta",
+    banho: "banho",
+    tosa: "tosa",
+  };
+  return labels[servico] || String(servico || "atendimento").replaceAll("_", " ");
+}
+
+function serviceMatchesTokens(serviceName, tokens = []) {
+  const n = normalizeSearchable(serviceName);
+  return tokens.every((token) => n.includes(token));
+}
+
+function findServiceByDetectedIntent(services = [], servico = "") {
+  if (!servico) return null;
+  const list = Array.isArray(services) ? services : [];
+  const priorityByIntent = {
+    banho_tosa_higienica: [
+      ["banho", "tosa", "higien"],
+      ["tosa", "higien"],
+      ["banho", "tosa"],
+      ["banho"],
+    ],
+    tosa_higienica: [
+      ["tosa", "higien"],
+      ["higien"],
+      ["tosa"],
+    ],
+    banho_tosa: [
+      ["banho", "tosa"],
+      ["banho"],
+      ["tosa"],
+    ],
+    hidratacao: [["hidrat"]],
+    vacina: [["vacina"]],
+    consulta: [["consulta"]],
+    banho: [["banho"]],
+    tosa: [["tosa"]],
+  };
+
+  const priorities = priorityByIntent[servico] || [[formatServicoLabel(servico)]];
+  for (const tokens of priorities) {
+    const found = list.find((service) => serviceMatchesTokens(service?.name || "", tokens));
+    if (found) return found;
+  }
   return null;
 }
 
@@ -233,15 +292,14 @@ function pickClose() {
 
 function buildAgendarReply({ greeting, settings, customer, pet, services, text, history, availableSlots = null }) {
   const servico = detectServico(text);
+  const servicoLabel = formatServicoLabel(servico);
   const data = detectData(text);
   const hora = detectHora(text);
 
   const opening = String(settings?.openingTime || "08:00:00").slice(0, 5);
   const closing = String(settings?.closingTime || "18:00:00").slice(0, 5);
 
-  const servicoEncontrado = servico
-    ? services.find((s) => normalizeSearchable(s.name).includes(servico.replace("_", " ")))
-    : null;
+  const servicoEncontrado = findServiceByDetectedIntent(services, servico);
 
   // Slots reais carregados pelo runtime — se tem, prefere usar em vez de
   // perguntar genericamente "que horario voce prefere?". Fluxo manha/tarde
@@ -260,9 +318,9 @@ function buildAgendarReply({ greeting, settings, customer, pet, services, text, 
       ? ` Fica R$ ${Number(servicoEncontrado.price).toFixed(2)}.`
       : "";
     const variants = [
-      `${greeting} Perfeito! Anotei aqui: ${servico.replace("_", " e ")}${pet?.name ? ` para o ${pet.name}` : ""} no dia ${data} às ${hora}.${precoTxt} Confirmo o agendamento? 🐾`,
-      `${greeting} Ótimo! Então fica ${servico.replace("_", " e ")}${pet?.name ? ` do ${pet.name}` : ""} ${data} às ${hora}.${precoTxt} Pode confirmar?`,
-      `${greeting} Show! ${servico.replace("_", " e ")}${pet?.name ? ` para o ${pet.name}` : ""} ${data} às ${hora}.${precoTxt} Tudo certo? 😊`,
+      `${greeting} Perfeito! Anotei aqui: ${servicoLabel}${pet?.name ? ` para o ${pet.name}` : ""} no dia ${data} às ${hora}.${precoTxt} Confirmo o agendamento? 🐾`,
+      `${greeting} Ótimo! Então fica ${servicoLabel}${pet?.name ? ` do ${pet.name}` : ""} ${data} às ${hora}.${precoTxt} Pode confirmar?`,
+      `${greeting} Show! ${servicoLabel}${pet?.name ? ` para o ${pet.name}` : ""} ${data} às ${hora}.${precoTxt} Tudo certo? 😊`,
     ];
     return variants[Math.floor(Math.random() * variants.length)];
   }
@@ -270,11 +328,11 @@ function buildAgendarReply({ greeting, settings, customer, pet, services, text, 
   // Cliente pediu disponibilidade de agenda: mostra horarios reais, sem voltar
   // para pergunta generica. Se nao houver dia claro, pergunta o dia antes.
   if (slotsList && (isScheduleAvailabilityText(text) || hasPeriod) && !shouldOfferSlots) {
-    return `${greeting} Consigo ver os horarios pra voce. Para qual dia seria o ${servico ? servico.replace("_", " e ") : "atendimento"}?`;
+    return `${greeting} Consigo ver os horarios pra voce. Para qual dia seria o ${servico ? servicoLabel : "atendimento"}?`;
   }
 
   if (!slotsList && isScheduleAvailabilityText(text) && !data) {
-    return `${greeting} Consigo ver os horarios pra voce. Para qual dia seria o ${servico ? servico.replace("_", " e ") : "atendimento"}?`;
+    return `${greeting} Consigo ver os horarios pra voce. Para qual dia seria o ${servico ? servicoLabel : "atendimento"}?`;
   }
 
   if (slotsList && slotsList.length > 0 && shouldOfferSlots) {
@@ -315,25 +373,25 @@ function buildAgendarReply({ greeting, settings, customer, pet, services, text, 
     if (isToday && hourSp >= 11) {
       // Manha de hoje ja passou — oferece SO tarde
       const variants = [
-        `${greeting} Beleza, ${servico.replace("_", " e ")} hoje. Pra hoje só consigo à tarde — que horas fica bom pra você?`,
-        `${greeting} ${servico.replace("_", " e ")} hoje à tarde então. Qual horário te atende?`,
+        `${greeting} Beleza, ${servicoLabel} hoje. Pra hoje só consigo à tarde — que horas fica bom pra você?`,
+        `${greeting} ${servicoLabel} hoje à tarde então. Qual horário te atende?`,
       ];
       return variants[Math.floor(Math.random() * variants.length)];
     }
 
     // Caso geral (dia futuro, ou hoje cedinho): pergunta periodo normal
     const variants = [
-      `${greeting} Beleza, ${servico.replace("_", " e ")} ${data}. Você prefere de manhã ou de tarde? 😊`,
-      `${greeting} Anotado, ${servico.replace("_", " e ")} ${data}. Pra você fica melhor de manhã ou à tarde?`,
-      `${greeting} ${servico.replace("_", " e ")} ${data} — pode ser de manhã ou de tarde?`,
+      `${greeting} Beleza, ${servicoLabel} ${data}. Você prefere de manhã ou de tarde? 😊`,
+      `${greeting} Anotado, ${servicoLabel} ${data}. Pra você fica melhor de manhã ou à tarde?`,
+      `${greeting} ${servicoLabel} ${data} — pode ser de manhã ou de tarde?`,
     ];
     return variants[Math.floor(Math.random() * variants.length)];
   }
 
   if (servico && !data) {
     const variants = [
-      `${greeting} Claro! Pra quando você quer marcar o ${servico.replace("_", " e ")}${pet?.name ? ` do ${pet.name}` : ""}? Pode ser amanhã ou no sábado, por exemplo 😊`,
-      `${greeting} Vamos lá! ${servico.replace("_", " e ")}${pet?.name ? ` para o ${pet.name}` : ""} — qual dia fica melhor pra você?`,
+      `${greeting} Claro! Pra quando você quer marcar o ${servicoLabel}${pet?.name ? ` do ${pet.name}` : ""}? Pode ser amanhã ou no sábado, por exemplo 😊`,
+      `${greeting} Vamos lá! ${servicoLabel}${pet?.name ? ` para o ${pet.name}` : ""} — qual dia fica melhor pra você?`,
     ];
     return variants[Math.floor(Math.random() * variants.length)];
   }
@@ -355,7 +413,7 @@ function buildAgendarReply({ greeting, settings, customer, pet, services, text, 
 function buildPrecoReply({ greeting, services, customer, pet, text }) {
   const servico = detectServico(text);
   if (servico) {
-    const found = services.find((s) => normalizeSearchable(s.name).includes(servico.replace("_", " ")));
+    const found = findServiceByDetectedIntent(services, servico);
     if (found) {
       const priceNumber = Number(found.price || 0);
       if (!Number.isFinite(priceNumber) || priceNumber <= 0) {
@@ -673,6 +731,12 @@ SEMPRE prefira inferir e perguntar 1 detalhe específico em vez de pedir reformu
 
 SAUDAÇÃO INICIAL (cliente abriu conversa sem contexto):
 "Oi, tudo bem? 😊 Seja bem-vindo(a)! Você gostaria de agendar um banho e tosa, saber valores ou tirar uma dúvida? 🐾"
+
+PERGUNTAS GERAIS:
+Se o cliente perguntar algo fora do pet shop, responda de forma util, curta e educada em portugues brasileiro.
+Nao diga "nao entendi" nem mande reformular. Ajude no que for seguro.
+Se depender de dados da loja que nao estao no contexto, explique isso e peca apenas o dado necessario.
+Nunca invente preco, horario livre, regra da loja, pagamento confirmado ou agendamento.
 
 Sua missão: fazer o cliente se sentir bem atendido, entendido e seguro.`;
 
@@ -1311,6 +1375,59 @@ async function generateGroqReply({
   return result.content;
 }
 
+async function generateOpenAiReply({
+  apiKey,
+  settings,
+  aiControl,
+  services,
+  products,
+  customer,
+  pet,
+  pets,
+  upcomingAppointments = [],
+  customerNotes = [],
+  conversationSummary = null,
+  knowledgeBase = [],
+  lastVisit = null,
+  availableSlots = null,
+  conversation,
+  body,
+}) {
+  const systemPrompt = buildSystemPrompt({
+    settings,
+    aiControl,
+    services,
+    products,
+    customer,
+    pet,
+    pets,
+    upcomingAppointments,
+    customerNotes,
+    conversationSummary,
+    knowledgeBase,
+    lastVisit,
+    availableSlots,
+  });
+  const history = await buildHistoryMessages(conversation?.id, 8);
+  const lastUserMessage = history[history.length - 1];
+  if (!lastUserMessage || lastUserMessage.role !== "user" || lastUserMessage.content !== body) {
+    history.push({ role: "user", content: String(body || "").slice(0, 1200) });
+  }
+
+  const useSmart = shouldUseSmartModel({ body, aiControl, history, customer, lastVisit });
+  const result = await openaiChat({
+    apiKey,
+    model: process.env.OPENAI_CRM_MODEL || OPENAI_DEFAULT_MODEL,
+    messages: [{ role: "system", content: systemPrompt }, ...history],
+    temperature: 0.65,
+    maxTokens: 1400,
+    jsonMode: true,
+    reasoningEffort: useSmart ? "medium" : "low",
+  });
+
+  return result.content;
+}
+
 // Parser robusto: tenta varias formas de extrair { reply, action } da resposta.
 function parseAiReply(rawContent) {
   if (!rawContent) return { reply: "", action: null };
@@ -1776,8 +1893,14 @@ async function canAutoReply(usersId) {
   }
 
   const sub = await CrmAiSubscription.findOne({ where: { user_id: usersId } });
-  if (!sub || sub.status !== "active") {
-    console.warn(`${tag} BLOQUEIO: CrmAiSubscription ${sub ? `status="${sub.status}"` : "inexistente"}. Renove a assinatura da IA.`);
+  const mainTrial = await Subscription.findOne({
+    where: { user_id: usersId, plan_type: "trial", status: "active" },
+    order: [["created_at", "DESC"]],
+  }).catch(() => null);
+  const trialActive =
+    Boolean(mainTrial?.trial_end) && new Date(mainTrial.trial_end) > new Date();
+  if ((!sub || sub.status !== "active") && !trialActive) {
+    console.warn(`${tag} BLOQUEIO: CrmAiSubscription ${sub ? `status="${sub.status}"` : "inexistente"} e trial principal inativo. Renove a assinatura da IA.`);
     return { ok: false, reason: "no_active_subscription", settings };
   }
   return { ok: true, settings, aiControl };
@@ -1993,9 +2116,10 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
   // Toggle: por default a IA NAO se identifica como IA (mais humano)
   const identifyAsAi = Boolean(check.aiControl?.identifyAsAi);
 
-  // PRIORIDADE 1: Groq (IA real). Se tem key configurada, usa.
-  // PRIORIDADE 2: Fallback para resposta por keywords (sempre funciona).
+  // Prioridade do modo real: OpenAI premium -> Groq -> Gemini -> keywords.
+  const openaiApiKey = String(check.aiControl?.openaiApiKey || process.env.OPENAI_API_KEY || "").trim();
   const groqApiKey = String(check.aiControl?.groqApiKey || process.env.GROQ_API_KEY || "").trim();
+  const geminiApiKey = String(check.aiControl?.geminiApiKey || process.env.GEMINI_API_KEY || "").trim();
   let reply = null;
   let aiSource = "keywords";
 
@@ -2016,9 +2140,9 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
     aiSource = "agenda-availability";
   }
 
-  if (!groqApiKey) {
+  if (!openaiApiKey && !groqApiKey && !geminiApiKey) {
     console.warn(
-      `[CrmAutoReply] user=${String(usersId).slice(0, 8)} SEM GROQ_API_KEY — IA respondendo em modo FALLBACK (keywords). Respostas serao curtas e repetitivas. Configure aiControl.groqApiKey no painel OU defina GROQ_API_KEY no env do Render.`,
+      `[CrmAutoReply] user=${String(usersId).slice(0, 8)} sem OPENAI/GROQ/GEMINI API key - usando fallback por keywords.`,
     );
   }
 
@@ -2030,6 +2154,52 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
   if (groqApiKey && inCooldown) {
     const remainingSec = Math.ceil((cooldownUntil - Date.now()) / 1000);
     console.warn(`[CrmAutoReply] user=${String(usersId).slice(0, 8)} Groq em COOLDOWN TPM por mais ${remainingSec}s — pulando direto pro fallback de keywords pra nao queimar tokens.`);
+  }
+
+  if (!reply && openaiApiKey) {
+    try {
+      const rawContent = await generateOpenAiReply({
+        apiKey: openaiApiKey,
+        settings: check.settings,
+        aiControl: check.aiControl,
+        services,
+        products,
+        customer,
+        pet,
+        pets,
+        upcomingAppointments,
+        customerNotes,
+        conversationSummary,
+        knowledgeBase,
+        lastVisit,
+        availableSlots,
+        conversation,
+        body,
+      });
+      const parsed = parseAiReply(rawContent);
+      reply = parsed.reply;
+      aiSource = "openai";
+      console.log(`[CrmAutoReply] OpenAI respondeu: "${reply.slice(0, 60)}..."`);
+      if (parsed.action) {
+        executedAction = await executeAiAction({
+          action: parsed.action,
+          usersId,
+          conversation,
+          customer,
+          pet,
+          pets,
+          aiControl: check.aiControl,
+        });
+        console.log(`[CrmAutoReply] Action OpenAI: ${JSON.stringify(executedAction)}`);
+        if (executedAction.message && !executedAction.executed) {
+          reply = executedAction.message;
+        } else if (executedAction.reason === "capability_disabled") {
+          reply = reply + " (Voce ainda precisa habilitar essa acao no controle da IA.)";
+        }
+      }
+    } catch (openaiErr) {
+      console.error(`[CrmAutoReply] OpenAI falhou: ${String(openaiErr?.message || openaiErr).slice(0, 240)}. Tentando fallback.`);
+    }
   }
 
   if (!reply && groqApiKey && !inCooldown) {
@@ -2117,7 +2287,62 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
     }
   }
 
-  // Fallback se Groq nao foi configurado ou falhou
+  if (!reply && geminiApiKey) {
+    try {
+      const systemPrompt = buildSystemPrompt({
+        settings: check.settings,
+        aiControl: check.aiControl,
+        services,
+        products,
+        customer,
+        pet,
+        pets,
+        upcomingAppointments,
+        customerNotes,
+        conversationSummary,
+        knowledgeBase,
+        lastVisit,
+        availableSlots,
+      });
+      const providerHistory = await buildHistoryMessages(conversation?.id, 6);
+      const lastUserMessage = providerHistory[providerHistory.length - 1];
+      if (!lastUserMessage || lastUserMessage.role !== "user" || lastUserMessage.content !== body) {
+        providerHistory.push({ role: "user", content: String(body || "").slice(0, 800) });
+      }
+      const result = await geminiChat({
+        apiKey: geminiApiKey,
+        model: GEMINI_DEFAULT_MODEL,
+        messages: [{ role: "system", content: systemPrompt }, ...providerHistory],
+        temperature: 0.55,
+        maxTokens: 1200,
+        jsonMode: true,
+      });
+      const parsed = parseAiReply(result.content);
+      reply = parsed.reply;
+      aiSource = "gemini";
+      console.log(`[CrmAutoReply] Gemini respondeu: "${reply.slice(0, 60)}..."`);
+      if (parsed.action) {
+        executedAction = await executeAiAction({
+          action: parsed.action,
+          usersId,
+          conversation,
+          customer,
+          pet,
+          pets,
+          aiControl: check.aiControl,
+        });
+        if (executedAction.message && !executedAction.executed) {
+          reply = executedAction.message;
+        } else if (executedAction.reason === "capability_disabled") {
+          reply = reply + " (Voce ainda precisa habilitar essa acao no controle da IA.)";
+        }
+      }
+    } catch (geminiErr) {
+      console.error(`[CrmAutoReply] Gemini falhou: ${String(geminiErr?.message || geminiErr).slice(0, 240)}. Usando fallback simples.`);
+    }
+  }
+
+  // Fallback se nenhum provedor foi configurado ou todos falharam
   if (!reply || !reply.trim()) {
     const histForFallback = await lazyHistory();
     reply = buildReply({
@@ -2217,6 +2442,7 @@ export async function testAiReply({ usersId, messages = [] }) {
 
   const whatsappConnection = settings.whatsappConnection || {};
   const aiControl = whatsappConnection.crmAiControl || {};
+  const openaiApiKey = String(aiControl.openaiApiKey || process.env.OPENAI_API_KEY || "").trim();
   const groqApiKey = String(aiControl.groqApiKey || process.env.GROQ_API_KEY || "").trim();
   const geminiApiKey = String(aiControl.geminiApiKey || process.env.GEMINI_API_KEY || "").trim();
 
@@ -2327,6 +2553,27 @@ export async function testAiReply({ usersId, messages = [] }) {
       model: "agenda-availability",
       provider: "rules+agenda",
     });
+  }
+
+  if (openaiApiKey) {
+    try {
+      const result = await openaiChat({
+        apiKey: openaiApiKey,
+        model: process.env.OPENAI_CRM_MODEL || OPENAI_DEFAULT_MODEL,
+        messages: providerMessages,
+        temperature: 0.55,
+        maxTokens: 1200,
+        jsonMode: true,
+        reasoningEffort: useSmart ? "medium" : "low",
+      });
+      return buildTestResult({
+        reply: parseTestReply(result.content),
+        model: result.model || OPENAI_DEFAULT_MODEL,
+        provider: "openai",
+      });
+    } catch (error) {
+      console.warn("[CrmAutoReply] Chat de teste: OpenAI falhou, tentando fallback:", error?.message);
+    }
   }
 
   if (groqApiKey) {

@@ -17,6 +17,7 @@ import {
   updateMessageDeliveryStatus,
 } from "./whatsappMessageService.js";
 import { scheduleMetaAutoReply } from "./whatsappOfficialAutoReply.js";
+import { registerInboundWhatsappIaMessage } from "../adminWhatsappIa.js";
 
 function getNested(payload, path, fallback = undefined) {
   const segments = Array.isArray(path) ? path : String(path || "").split(".");
@@ -261,6 +262,16 @@ export async function processWebhookPayload(payload = {}) {
           status: "received",
           rawPayload: event.payload || {},
           sentAt: null,
+        });
+
+        await registerInboundWhatsappIaMessage({
+          companyId,
+          phone: event.from,
+          body: event.body,
+          metaMessageId: event.messageId,
+          eventDate: event.timestamp || new Date(),
+        }).catch((adminIaErr) => {
+          console.warn("[WhatsApp IA Admin] Erro ao registrar entrada:", adminIaErr?.message);
         });
 
         // Dispara IA do CRM com debounce (igual Baileys). Só responde texto;

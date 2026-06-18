@@ -62,6 +62,8 @@ import adminAuditRouter from "./routes/adminAudit.js";
 import { adminAuditMiddleware } from "./middlewares/adminAudit.js";
 import adminAlertsRouter from "./routes/adminAlerts.js";
 import adminTutorialsRouter from "./routes/adminTutorials.js";
+import adminWhatsappIaRouter from "./routes/adminWhatsappIa.js";
+import { processDueInactiveAutomations, scanInactiveUsers } from "./service/adminWhatsappIa.js";
 import alertEngine from "./service/alertEngine.js";
 import {
   attachActivityHelper,
@@ -197,6 +199,7 @@ app.use(adminClientDetailRouter);
 app.use(adminAuditRouter);
 app.use(adminAlertsRouter);
 app.use(adminTutorialsRouter);
+app.use(adminWhatsappIaRouter);
 // Error handler do activity logger — DEVE vir depois das rotas
 app.use(activityErrorHandler);
 // Configure as associações antes de sincronizar
@@ -1163,6 +1166,28 @@ app.listen(PORT, () => {
   }
 
   // Keep-alive: ping próprio a cada 14 minutos para evitar hibernação no Render
+  if (process.env.WHATSAPP_IA_CRON_ENABLED === "true") {
+    cron.schedule("10 9 * * *", async () => {
+      try {
+        const result = await scanInactiveUsers({
+          days: process.env.WHATSAPP_IA_INACTIVITY_DAYS || 10,
+        });
+        if (result.scanned > 0) {
+          console.log(`WhatsApp IA: ${result.scanned} usuarios inativos revisados`);
+        }
+        const processed = await processDueInactiveAutomations({ limit: 30 });
+        if (processed.processed > 0) {
+          console.log(`WhatsApp IA: ${processed.sent} mensagens enviadas, ${processed.blocked} bloqueadas`);
+        }
+      } catch (error) {
+        console.error("Erro no cron do WhatsApp IA:", error.message);
+      }
+    });
+    console.log("Cron do WhatsApp IA ativado (diario 09:10)");
+  } else {
+    console.log("Cron do WhatsApp IA desativado. Ative somente apos os testes controlados.");
+  }
+
   if (process.env.NODE_ENV === "production" && process.env.API_URL) {
     const keepAliveUrl = `${process.env.API_URL}/health`;
     setInterval(async () => {

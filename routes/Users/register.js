@@ -7,6 +7,7 @@ import Subscription from "../../models/Subscription.js";
 import EmailService from "../../service/email.js";
 import { ensureDefaultMedicalCatalog } from "../../service/defaultMedicalCatalog.js";
 import { sendSystemWelcomeWhatsapp } from "../../service/systemWelcomeWhatsapp.js";
+import { getOrCreateBillingSettings } from "../../service/billingAccess.js";
 
 const router = express.Router();
 
@@ -34,8 +35,11 @@ router.post("/register", async (req, res) => {
     });
   }
 
-  const { name, email, password, phone } = req.body;
+  const { name, email, password, phone, requestedPlan } = req.body;
   const normalizedEmail = String(email || "").trim().toLowerCase();
+  const selectedPlan = ["essential", "professional", "premium"].includes(String(requestedPlan || "").toLowerCase())
+    ? String(requestedPlan).toLowerCase()
+    : "essential";
 
   if (!name || !normalizedEmail || !password || !phone) {
     return res.status(400).json({ message: "Preencha todos os campos" });
@@ -57,8 +61,10 @@ router.post("/register", async (req, res) => {
 
     const passHash = await bcrypt.hash(password, 10);
 
+    const billingSettings = await getOrCreateBillingSettings();
+    const trialDays = Math.max(1, Number(billingSettings?.trialDays || 30) || 30);
     const expirationDate = new Date();
-    expirationDate.setMonth(expirationDate.getMonth() + 1);
+    expirationDate.setDate(expirationDate.getDate() + trialDays);
 
     const userCreate = await Users.create({
       name,
@@ -91,7 +97,7 @@ router.post("/register", async (req, res) => {
 
     const trialStartDate = new Date();
     const trialEndDate = new Date();
-    trialEndDate.setMonth(trialEndDate.getMonth() + 1);
+    trialEndDate.setDate(trialEndDate.getDate() + trialDays);
 
     await Subscription.create({
       user_id: userCreate.id,
@@ -103,7 +109,7 @@ router.post("/register", async (req, res) => {
       trial_end: trialEndDate,
       billing_cycle_start: trialEndDate,
       next_billing_date: trialEndDate,
-      notes: "Assinatura trial criada automaticamente no registro",
+      notes: `Assinatura trial criada automaticamente no registro. Plano escolhido: ${selectedPlan}.`,
     });
 
     EmailService.sendWelcomeEmail(userCreate.id, normalizedEmail).catch((error) => {
