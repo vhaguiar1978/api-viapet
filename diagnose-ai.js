@@ -97,18 +97,30 @@ function fail(label, msg = "") {
       ok(`active`, sub.ends_at ? `expira ${new Date(sub.ends_at).toLocaleDateString("pt-BR")}` : "");
     }
 
-    // 3) Groq
-    console.log(`\n[3] GROQ API key`);
+    // 3) Provedor de IA
+    console.log(`\n[3] Provedor de IA`);
+    const openaiOnUser = String(aiControl?.openaiApiKey || "").trim();
+    const openaiOnEnv = String(process.env.OPENAI_API_KEY || "").trim();
     const groqOnUser = String(aiControl?.groqApiKey || "").trim();
     const groqOnEnv = String(process.env.GROQ_API_KEY || "").trim();
-    if (groqOnUser) {
-      ok("key no painel do user", `prefixo ${groqOnUser.slice(0, 6)}...`);
+    const geminiOnUser = String(aiControl?.geminiApiKey || "").trim();
+    const geminiOnEnv = String(process.env.GEMINI_API_KEY || "").trim();
+    if (openaiOnUser) {
+      ok("OpenAI no painel do user", `prefixo ${openaiOnUser.slice(0, 7)}...`);
+    } else if (openaiOnEnv) {
+      ok("OpenAI no env GLOBAL", `prefixo ${openaiOnEnv.slice(0, 7)}...`);
+    } else if (groqOnUser) {
+      ok("Groq no painel do user", `prefixo ${groqOnUser.slice(0, 6)}...`);
     } else if (groqOnEnv) {
-      ok("key no env GLOBAL", `prefixo ${groqOnEnv.slice(0, 6)}...`);
+      ok("Groq no env GLOBAL", `prefixo ${groqOnEnv.slice(0, 6)}...`);
+    } else if (geminiOnUser) {
+      ok("Gemini no painel do user", "configurada");
+    } else if (geminiOnEnv) {
+      ok("Gemini no env GLOBAL", "configurada");
     } else {
       warn(
-        "SEM GROQ_API_KEY",
-        "IA vai cair em fallback de keywords (curtas e repetitivas). Pegue em console.groq.com (gratis) e coloque em GROQ_API_KEY no env do Render OU no painel da IA.",
+        "SEM OPENAI/GROQ/GEMINI API KEY",
+        "IA vai cair em fallback por palavras-chave. Configure OPENAI_API_KEY no Render ou no painel da IA.",
       );
     }
 

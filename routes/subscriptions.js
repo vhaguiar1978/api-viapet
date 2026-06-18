@@ -11,6 +11,8 @@ import {
   getBillingConfig,
 } from "../service/mercadopago.js";
 import auth from "../middlewares/auth.js";
+import { getOrCreateBillingSettings } from "../service/billingAccess.js";
+import { buildPublicPlansPayload } from "../service/publicPlans.js";
 
 const router = express.Router();
 
@@ -18,92 +20,15 @@ const router = express.Router();
  * GET /api/subscriptions/plans
  * Retorna informações dos planos disponíveis (endpoint público)
  */
-router.get("/plans", (req, res) => {
+router.get("/plans", async (req, res) => {
   try {
-    const plans = {
-      monthly: {
-        id: "monthly",
-        name: "Plano Mensal",
-        price: planPrices.monthly,
-        currency: "BRL",
-        description: "Acesso completo ao ViaPet",
-        benefits: [
-          "Agendamento ilimitado de consultas",
-          "Histórico completo dos pets",
-          "Lembretes automáticos",
-          "Suporte prioritário",
-          "Acesso ao app móvel",
-          "Backup automático dos dados",
-        ],
-        billing_cycle: "monthly",
-        trial_period: {
-          enabled: false,
-          duration_days: 0,
-          description: "Pagamento imediato necessário",
-        },
-      },
-      promotional: {
-        id: "promotional",
-        name: "Promoção Especial",
-        price: planPrices.promotional,
-        original_price: planPrices.monthly,
-        currency: "BRL",
-        description: "Oferta especial por tempo limitado",
-        benefits: [
-          "Agendamento ilimitado de consultas",
-          "Histórico completo dos pets",
-          "Lembretes automáticos",
-          "Suporte prioritário",
-          "Acesso ao app móvel",
-          "Backup automático dos dados",
-          "⭐ OFERTA: R$ 39,90 nos 3 primeiros meses!",
-        ],
-        billing_cycle: "monthly",
-        promotional_period: {
-          enabled: true,
-          duration_months: 3,
-          price: planPrices.promotional,
-          description: "R$ 39,90 nos 3 primeiros meses, depois R$ 69,90/mês",
-        },
-        trial_period: {
-          enabled: false,
-          duration_days: 0,
-          description: "Pagamento imediato necessário",
-        },
-      },
-      trial: {
-        id: "trial",
-        name: "Período Trial",
-        price: 0.00,
-        currency: "BRL",
-        description: "1 mês gratuito para novos usuários",
-        benefits: [
-          "Agendamento ilimitado de consultas",
-          "Histórico completo dos pets",
-          "Lembretes automáticos",
-          "Suporte prioritário",
-          "Acesso ao app móvel",
-          "Backup automático dos dados",
-          "🎁 Completamente gratuito por 30 dias!",
-        ],
-        billing_cycle: "trial",
-        trial_period: {
-          enabled: true,
-          duration_days: 30,
-          description: "1 mês completamente grátis",
-        },
-      },
-    };
+    const settings = await getOrCreateBillingSettings();
+    const catalog = buildPublicPlansPayload(settings);
 
     res.json({
       success: true,
-      plans,
-      current_promotion: {
-        enabled: true,
-        title: "Oferta Especial de Lançamento!",
-        subtitle: "Escolha o melhor plano para seus pets",
-        expires_at: "2025-12-31T23:59:59.000Z",
-      },
+      data: catalog,
+      ...catalog,
     });
   } catch (error) {
     console.error("Erro ao buscar planos:", error);

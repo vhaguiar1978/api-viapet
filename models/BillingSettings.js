@@ -48,6 +48,16 @@ const BillingSettings = sequelize.define(
       type: DataTypes.TEXT,
       allowNull: true,
     },
+    publicPlans: {
+      type: DataTypes.JSON,
+      allowNull: false,
+      defaultValue: [],
+    },
+    fiscalModuleEnabled: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
+    },
   },
   {
     tableName: "billing_settings",

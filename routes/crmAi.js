@@ -44,7 +44,7 @@ const DEFAULT_CONTROL = {
   autoReplyEnabled: true,
   autoExecuteEnabled: true,
   assistantName: "ViaPet IA",
-  provider: "Groq",
+  provider: "OpenAI GPT-5.5",
   instructions:
     "Atende clientes do pet shop com simpatia e profissionalismo. Pode agendar, remarcar, cancelar, cotar servicos e produtos, cadastrar clientes e pets novos. Confirma dados importantes antes de criar agendamento. Encaminha pra humano em caso de emergencia veterinaria, reclamacao ou pedido explicito de atendente.",
   playbookMessages: [],
@@ -328,7 +328,9 @@ function sanitizeControlSettings(value) {
       DEFAULT_CONTROL.autoExecuteEnabled,
     ),
     identifyAsAi: normalizeBoolean(source.identifyAsAi, false),
+    openaiApiKey: String(source.openaiApiKey || "").trim(),
     groqApiKey: String(source.groqApiKey || "").trim(),
+    geminiApiKey: String(source.geminiApiKey || "").trim(),
     assistantName: String(
       source.assistantName || DEFAULT_CONTROL.assistantName,
     ).trim(),
@@ -3291,13 +3293,16 @@ router.get("/diagnose", auth, async (req, res) => {
     const trialActive =
       Boolean(mainTrial?.trial_end) && new Date(mainTrial.trial_end) > new Date();
 
+    const openaiKeyOnUser = String(aiControl?.openaiApiKey || "").trim();
+    const openaiKeyOnEnv = String(process.env.OPENAI_API_KEY || "").trim();
+    const openaiMode = openaiKeyOnUser ? "user_panel" : openaiKeyOnEnv ? "env_global" : "missing";
     const groqKeyOnUser = String(aiControl?.groqApiKey || "").trim();
     const groqKeyOnEnv = String(process.env.GROQ_API_KEY || "").trim();
     const groqMode = groqKeyOnUser ? "user_panel" : groqKeyOnEnv ? "env_global" : "missing";
     const geminiKeyOnUser = String(aiControl?.geminiApiKey || "").trim();
     const geminiKeyOnEnv = String(process.env.GEMINI_API_KEY || "").trim();
     const geminiMode = geminiKeyOnUser ? "user_panel" : geminiKeyOnEnv ? "env_global" : "missing";
-    const aiProviderConfigured = groqMode !== "missing" || geminiMode !== "missing";
+    const aiProviderConfigured = openaiMode !== "missing" || groqMode !== "missing" || geminiMode !== "missing";
     const queueCounts = await Promise.all(
       ["pending", "retry", "processing", "waiting_human", "failed"].map(async (status) => [
         status,
@@ -3393,7 +3398,7 @@ router.get("/diagnose", auth, async (req, res) => {
     if (!aiProviderConfigured) {
       blocks.push({
         reason: "ai_provider_key_missing",
-        fix: "Sem GROQ_API_KEY ou GEMINI_API_KEY a IA cai em respostas simples por palavras-chave. Configure um provedor no servidor.",
+        fix: "Sem OPENAI_API_KEY, GROQ_API_KEY ou GEMINI_API_KEY a IA cai em respostas simples por palavras-chave. Configure OpenAI para o modo premium.",
         severity: "warning",
       });
     }
@@ -3431,6 +3436,12 @@ router.get("/diagnose", auth, async (req, res) => {
         mode: groqMode,
         userKeyPresent: Boolean(groqKeyOnUser),
         envKeyPresent: Boolean(groqKeyOnEnv),
+      },
+      openai: {
+        mode: openaiMode,
+        userKeyPresent: Boolean(openaiKeyOnUser),
+        envKeyPresent: Boolean(openaiKeyOnEnv),
+        model: process.env.OPENAI_CRM_MODEL || process.env.OPENAI_MODEL || "gpt-5.5",
       },
       gemini: {
         mode: geminiMode,

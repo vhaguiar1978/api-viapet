@@ -13,6 +13,7 @@
 
 import { groqChat, GROQ_SMART_MODEL, GROQ_FAST_MODEL } from "./groqClient.js";
 import { geminiChat } from "./geminiClient.js";
+import { openaiChat, OPENAI_DEFAULT_MODEL } from "./openaiClient.js";
 import CrmConversation from "../models/CrmConversation.js";
 import CrmConversationMessage from "../models/CrmConversationMessage.js";
 import Custumers from "../models/Custumers.js";
@@ -38,7 +39,7 @@ const TEMPERATURE_BUCKETS = {
 };
 
 // ============================================================
-// Helper: chama Groq com fallback automatico pra Gemini
+// Helper: chama OpenAI premium com fallback automatico para Groq e Gemini
 // ============================================================
 async function callAiWithFallback({
   apiKeys,
@@ -50,8 +51,27 @@ async function callAiWithFallback({
   label = "ai",
 }) {
   const errors = [];
+  const openaiKey = String(apiKeys?.openai || process.env.OPENAI_API_KEY || "").trim();
   const groqKey = String(apiKeys?.groq || process.env.GROQ_API_KEY || "").trim();
   const geminiKey = String(apiKeys?.gemini || process.env.GEMINI_API_KEY || "").trim();
+
+  if (openaiKey) {
+    try {
+      const result = await openaiChat({
+        apiKey: openaiKey,
+        messages,
+        model: process.env.OPENAI_CRM_MODEL || OPENAI_DEFAULT_MODEL,
+        temperature,
+        maxTokens,
+        jsonMode,
+        reasoningEffort: "low",
+      });
+      return { ...result, provider: "openai" };
+    } catch (err) {
+      errors.push(`openai: ${err.message}`);
+      console.warn(`[crmAiAssistant:${label}] OpenAI falhou, tentando Groq: ${err.message}`);
+    }
+  }
 
   if (groqKey) {
     try {

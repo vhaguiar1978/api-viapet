@@ -35,18 +35,20 @@ function getEstablishmentId(req) {
   return req.user?.establishment || req.user?.id || null;
 }
 
-// Recupera as API keys do dono (Settings.whatsappConnection.aiControl tem groqApiKey/geminiApiKey)
+// Recupera as API keys do dono (Settings.whatsappConnection.crmAiControl)
 async function loadApiKeys(usersId) {
   try {
     const settings = await Settings.findOne({ where: { usersId } });
     const wc = settings?.whatsappConnection || {};
-    const ai = wc.aiControl || {};
+    const ai = wc.crmAiControl || wc.aiControl || {};
     return {
+      openai: ai.openaiApiKey || process.env.OPENAI_API_KEY || "",
       groq: ai.groqApiKey || process.env.GROQ_API_KEY || "",
       gemini: ai.geminiApiKey || process.env.GEMINI_API_KEY || "",
     };
   } catch {
     return {
+      openai: process.env.OPENAI_API_KEY || "",
       groq: process.env.GROQ_API_KEY || "",
       gemini: process.env.GEMINI_API_KEY || "",
     };

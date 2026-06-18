@@ -31,6 +31,7 @@ import FinancialRecords from "../models/FinancialRecords.js";
 import CashClosure from "../models/CashClosure.js";
 import jwt from "jsonwebtoken";
 import BillingSettings from "../models/BillingSettings.js";
+import { DEFAULT_PUBLIC_PLANS, normalizePublicPlans } from "../service/publicPlans.js";
 import ClientAccessControl from "../models/ClientAccessControl.js";
 import CrmAiActionLog from "../models/CrmAiActionLog.js";
 import CrmConversation from "../models/CrmConversation.js";
@@ -262,7 +263,11 @@ async function getOrCreateBillingSettings() {
       promotionalMonths: 3,
       reminderDays: 7,
       mercadoPagoEnabled: true,
+      publicPlans: DEFAULT_PUBLIC_PLANS,
+      fiscalModuleEnabled: false,
     });
+  } else if (!Array.isArray(settings.publicPlans) || !settings.publicPlans.length) {
+    settings.publicPlans = normalizePublicPlans(DEFAULT_PUBLIC_PLANS);
   }
 
   return settings;
@@ -275,12 +280,18 @@ function getBillingProfile(user, subscription, settings) {
     ? Math.ceil((expirationDate - now) / (1000 * 60 * 60 * 24))
     : null;
   const planType = String(subscription?.plan_type || "").toLowerCase();
+  const selectedPlanId =
+    String(subscription?.notes || "").match(/plano escolhido:\s*(essential|professional|premium)/i)?.[1]?.toLowerCase() ||
+    (["essential", "professional", "premium"].includes(planType) ? planType : "essential");
+  const availablePlans = normalizePublicPlans(settings?.publicPlans);
+  const selectedPublicPlan =
+    availablePlans.find((plan) => plan.id === selectedPlanId) || availablePlans[0];
   const isFree =
     String(subscription?.notes || "").toLowerCase().includes("sem custo") ||
     (subscription?.amount != null && Number(subscription.amount) === 0 && planType !== "trial");
 
   let stage = "monthly";
-  let nextChargeAmount = Number(settings.monthlyPrice || 69.9);
+  let nextChargeAmount = Number(selectedPublicPlan?.monthlyPrice || settings.monthlyPrice || 69.9);
   let nextChargePlanType = "monthly";
   let reminderDue = false;
 
@@ -290,8 +301,8 @@ function getBillingProfile(user, subscription, settings) {
     nextChargePlanType = "monthly";
   } else if (planType === "trial") {
     stage = "trial";
-    nextChargeAmount = Number(settings.promotionalPrice || 39.9);
-    nextChargePlanType = "promotional";
+    nextChargeAmount = Number(selectedPublicPlan?.monthlyPrice || settings.monthlyPrice || 69.9);
+    nextChargePlanType = "monthly";
   } else if (
     planType === "promotional" &&
     Number(subscription?.promotional_months_used || 0) < Number(settings.promotionalMonths || 3)
@@ -312,6 +323,8 @@ function getBillingProfile(user, subscription, settings) {
     reminderDue,
     nextChargeAmount,
     nextChargePlanType,
+    selectedPlanId,
+    selectedPlanName: selectedPublicPlan?.name || "ViaPet Essencial",
   };
 }
 
@@ -1316,6 +1329,8 @@ router.post("/admin/billing/settings", adminMiddleware, async (req, res) => {
       mercadoPagoEnabled,
       mercadoPagoPublicKey,
       notes,
+      publicPlans,
+      fiscalModuleEnabled,
     } = req.body;
 
     await settings.update({
@@ -1327,6 +1342,8 @@ router.post("/admin/billing/settings", adminMiddleware, async (req, res) => {
       mercadoPagoEnabled: mercadoPagoEnabled ?? settings.mercadoPagoEnabled,
       mercadoPagoPublicKey: mercadoPagoPublicKey ?? settings.mercadoPagoPublicKey,
       notes: notes ?? settings.notes,
+      publicPlans: publicPlans === undefined ? settings.publicPlans : normalizePublicPlans(publicPlans),
+      fiscalModuleEnabled: fiscalModuleEnabled ?? settings.fiscalModuleEnabled,
     });
 
     return res.json({
