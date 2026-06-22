@@ -69,6 +69,7 @@ import {
   attachActivityHelper,
   activityErrorHandler,
 } from "./middlewares/activityCapture.js";
+import { planFeatureAccess } from "./middlewares/planFeatureAccess.js";
 import net from "node:net";
 process.env.TZ = "America/Sao_Paulo";
 const app = express();
@@ -157,6 +158,7 @@ app.use(settingsRouter);
 app.use(establishmentGetRouter);
 app.use(employeesGetRouter);
 app.use(editFuncRouter);
+app.use(planFeatureAccess);
 app.use(ProductRouter);
 app.use(servicesRouter);
 app.use(accountRouter);

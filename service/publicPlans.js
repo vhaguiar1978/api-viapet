@@ -11,6 +11,9 @@ const sharedFeatures = [
   { key: "whatsapp", label: "WhatsApp integrado", included: true, status: "beta" },
   { key: "ia", label: "IA para atendimento e automações", included: true, status: "beta" },
   { key: "multiusuario", label: "Equipe e permissões", included: true, status: "available" },
+  { key: "exames", label: "Exames e diagnósticos", included: true, status: "available" },
+  { key: "fila", label: "Fila de atendimento", included: true, status: "available" },
+  { key: "internacao", label: "Gestão de internações", included: true, status: "available" },
   { key: "fiscal", label: "NFS-e, NFC-e e NF-e integradas", included: false, status: "soon" },
 ];
 
@@ -40,7 +43,7 @@ export const DEFAULT_PUBLIC_PLANS = [
     order: 2,
     features: sharedFeatures.map((feature) => ({
       ...feature,
-      included: !["ia", "fiscal"].includes(feature.key),
+      included: !["ia", "internacao", "fiscal"].includes(feature.key),
     })),
   },
   {
@@ -66,24 +69,47 @@ export function normalizePublicPlans(value) {
   const source = Array.isArray(value) && value.length ? value : DEFAULT_PUBLIC_PLANS;
 
   return source
-    .map((plan, index) => ({
-      id: String(plan?.id || `plan-${index + 1}`),
-      name: String(plan?.name || `Plano ${index + 1}`),
-      monthlyPrice: safeNumber(plan?.monthlyPrice, 0),
-      annualPrice: safeNumber(plan?.annualPrice, null),
-      description: String(plan?.description || ""),
-      recommended: plan?.recommended === true,
-      active: plan?.active !== false,
-      order: safeNumber(plan?.order, index + 1),
-      features: (Array.isArray(plan?.features) ? plan.features : []).map((feature, featureIndex) => ({
-        key: String(feature?.key || `feature-${featureIndex + 1}`),
-        label: String(feature?.label || "Recurso"),
-        included: feature?.included === true,
-        status: ["available", "beta", "soon"].includes(feature?.status)
-          ? feature.status
-          : "available",
-      })),
-    }))
+    .map((plan, index) => {
+      const id = String(plan?.id || `plan-${index + 1}`);
+      const defaultPlan = DEFAULT_PUBLIC_PLANS.find((item) => item.id === id);
+      const storedFeatures = Array.isArray(plan?.features) ? plan.features : [];
+      const featureSource = defaultPlan
+        ? [
+            ...defaultPlan.features.map((defaultFeature) => {
+              const storedFeature = storedFeatures.find(
+                (item) => String(item?.key || "") === defaultFeature.key,
+              );
+              return storedFeature ? { ...defaultFeature, ...storedFeature } : defaultFeature;
+            }),
+            ...storedFeatures.filter(
+              (storedFeature) =>
+                !defaultPlan.features.some(
+                  (defaultFeature) =>
+                    defaultFeature.key === String(storedFeature?.key || ""),
+                ),
+            ),
+          ]
+        : storedFeatures;
+
+      return {
+        id,
+        name: String(plan?.name || `Plano ${index + 1}`),
+        monthlyPrice: safeNumber(plan?.monthlyPrice, 0),
+        annualPrice: safeNumber(plan?.annualPrice, null),
+        description: String(plan?.description || ""),
+        recommended: plan?.recommended === true,
+        active: plan?.active !== false,
+        order: safeNumber(plan?.order, index + 1),
+        features: featureSource.map((feature, featureIndex) => ({
+          key: String(feature?.key || `feature-${featureIndex + 1}`),
+          label: String(feature?.label || "Recurso"),
+          included: feature?.included === true,
+          status: ["available", "beta", "soon"].includes(feature?.status)
+            ? feature.status
+            : "available",
+        })),
+      };
+    })
     .sort((a, b) => a.order - b.order);
 }
 
