@@ -10,6 +10,7 @@ import jwt from "jsonwebtoken";
 import { Op } from "sequelize";
 import { createPixPayment, getPaymentInfo, applyApprovedMainPayment } from "../../service/mercadopago.js";
 import { buildBillingProfile, getOrCreateBillingSettings } from "../../service/billingAccess.js";
+import { resolvePlanAccess } from "../../service/planAccess.js";
 const router = express.Router();
 
 router.get("/account", authenticate, async (req, res) => {
@@ -27,12 +28,13 @@ router.get("/account", authenticate, async (req, res) => {
     const establishment = await Settings.findOne({
       where: { usersId: ownerId },
     });
-    const [billingSettings, latestSubscription] = await Promise.all([
+    const [billingSettings, latestSubscription, planAccess] = await Promise.all([
       getOrCreateBillingSettings(),
       Subscription.findOne({
         where: { user_id: ownerId },
         order: [["created_at", "DESC"]],
       }),
+      resolvePlanAccess(req.user),
     ]);
 
     if (establishmentUser) {
@@ -66,6 +68,7 @@ router.get("/account", authenticate, async (req, res) => {
       billingSettings,
     );
     user.setDataValue("billingProfile", billingProfile);
+    user.setDataValue("planAccess", planAccess);
     return res.status(200).json(user);
   } catch (error) {
     console.error(error);
