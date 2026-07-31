@@ -1365,6 +1365,22 @@ router.post("/finance/close-cash", authenticate, async (req, res) => {
     const referenceDate = req.body.referenceDate || new Date().toISOString().slice(0, 10);
     const notes = req.body.notes || null;
 
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(referenceDate)) {
+      return res.status(400).json({
+        message: "Informe uma data valida para fechar o caixa.",
+      });
+    }
+
+    const referenceDateCheck = new Date(`${referenceDate}T12:00:00.000Z`);
+    if (
+      Number.isNaN(referenceDateCheck.getTime()) ||
+      referenceDateCheck.toISOString().slice(0, 10) !== referenceDate
+    ) {
+      return res.status(400).json({
+        message: "Informe uma data valida para fechar o caixa.",
+      });
+    }
+
     // Janela do dia no horario de Brasilia (UTC-3). Sem isso a query usava UTC
     // e o "dia" ia das 21h de ontem as 20h59 de hoje, deslocando lancamentos.
     const startDateTime = new Date(`${referenceDate}T00:00:00.000-03:00`);
