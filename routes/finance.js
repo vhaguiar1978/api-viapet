@@ -1395,9 +1395,7 @@ router.post("/finance/close-cash", authenticate, async (req, res) => {
         },
         // Saldo do dia = somente o que foi efetivamente pago/recebido.
         // Contas a receber/pagar pendentes com vencimento hoje nao entram.
-        status: {
-          [Op.in]: ["pago", "paid", "confirmado"],
-        },
+        status: "pago",
       },
     });
     const currentFinances = await keepOnlyCurrentAgendaFinanceRows(
