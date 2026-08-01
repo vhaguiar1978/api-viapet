@@ -454,7 +454,7 @@ router.delete("/customers/batch", auth, async (req, res) => {
 // Sumário de dívidas por cliente — uma única query em vez de N*M requisições
 router.get("/customers/debt-summary", auth, async (req, res) => {
   try {
-    const usersId = req.user.establishment;
+    const usersId = req.user.establishment || req.user.id;
 
     // IMPORTANTE: NÃO incluir "pago" aqui. Já vimos casos em que um Finance
     // pago "mais recente" sobrescrevia o pendente original na agregação por
