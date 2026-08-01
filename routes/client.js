@@ -721,6 +721,20 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
       if (!summaryMap[customerId].petNames.includes(pet.name)) summaryMap[customerId].petNames.push(pet.name);
     }
 
+    const debtorIds = Object.keys(summaryMap);
+    if (debtorIds.length) {
+      const debtors = await Custumers.findAll({
+        where: { id: { [Op.in]: debtorIds }, usersId },
+        attributes: ["id", "name", "phone"],
+      });
+      for (const customer of debtors) {
+        const key = String(customer.id);
+        if (!summaryMap[key]) continue;
+        summaryMap[key].customerName = customer.name || "Tutor sem nome";
+        summaryMap[key].phone = customer.phone || "";
+      }
+    }
+
     // Remove _seenKeys (Set interno de dedup) antes de responder.
     for (const k of Object.keys(summaryMap)) {
       if (summaryMap[k]?._seenKeys) delete summaryMap[k]._seenKeys;
