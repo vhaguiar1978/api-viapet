@@ -331,6 +331,8 @@ function sanitizeControlSettings(value) {
     ),
     identifyAsAi: normalizeBoolean(source.identifyAsAi, false),
     openaiApiKey: String(source.openaiApiKey || "").trim(),
+    anthropicApiKey: String(source.anthropicApiKey || "").trim(),
+    anthropicModel: ["claude-sonnet-5", "claude-haiku-4-5", "claude-opus-5"].includes(String(source.anthropicModel || "")) ? String(source.anthropicModel) : "claude-sonnet-5",
     groqApiKey: String(source.groqApiKey || "").trim(),
     geminiApiKey: String(source.geminiApiKey || "").trim(),
     assistantName: String(
@@ -3265,13 +3267,16 @@ router.get("/diagnose", auth, async (req, res) => {
     const openaiKeyOnUser = String(aiControl?.openaiApiKey || "").trim();
     const openaiKeyOnEnv = String(process.env.OPENAI_API_KEY || "").trim();
     const openaiMode = openaiKeyOnUser ? "user_panel" : openaiKeyOnEnv ? "env_global" : "missing";
+    const anthropicKeyOnUser = String(aiControl?.anthropicApiKey || "").trim();
+    const anthropicKeyOnEnv = String(process.env.ANTHROPIC_API_KEY || "").trim();
+    const anthropicMode = anthropicKeyOnUser ? "user_panel" : anthropicKeyOnEnv ? "env_global" : "missing";
     const groqKeyOnUser = String(aiControl?.groqApiKey || "").trim();
     const groqKeyOnEnv = String(process.env.GROQ_API_KEY || "").trim();
     const groqMode = groqKeyOnUser ? "user_panel" : groqKeyOnEnv ? "env_global" : "missing";
     const geminiKeyOnUser = String(aiControl?.geminiApiKey || "").trim();
     const geminiKeyOnEnv = String(process.env.GEMINI_API_KEY || "").trim();
     const geminiMode = geminiKeyOnUser ? "user_panel" : geminiKeyOnEnv ? "env_global" : "missing";
-    const aiProviderConfigured = openaiMode !== "missing" || groqMode !== "missing" || geminiMode !== "missing";
+    const aiProviderConfigured = anthropicMode !== "missing" || openaiMode !== "missing" || groqMode !== "missing" || geminiMode !== "missing";
     const queueCounts = await Promise.all(
       ["pending", "retry", "processing", "waiting_human", "failed"].map(async (status) => [
         status,
@@ -3367,7 +3372,7 @@ router.get("/diagnose", auth, async (req, res) => {
     if (!aiProviderConfigured) {
       blocks.push({
         reason: "ai_provider_key_missing",
-        fix: "Sem OPENAI_API_KEY, GROQ_API_KEY ou GEMINI_API_KEY a IA cai em respostas simples por palavras-chave. Configure OpenAI para o modo premium.",
+        fix: "Sem ANTHROPIC_API_KEY, OPENAI_API_KEY, GROQ_API_KEY ou GEMINI_API_KEY a IA cai em respostas simples. Configure Claude para o modo recomendado.",
         severity: "warning",
       });
     }
@@ -3400,6 +3405,12 @@ router.get("/diagnose", auth, async (req, res) => {
         endsAt: subscription?.ends_at || null,
         trialActive,
         trialEndsAt: mainTrial?.trial_end || null,
+      },
+      anthropic: {
+        mode: anthropicMode,
+        userKeyPresent: Boolean(anthropicKeyOnUser),
+        envKeyPresent: Boolean(anthropicKeyOnEnv),
+        model: aiControl?.anthropicModel || process.env.ANTHROPIC_MODEL || "claude-sonnet-5",
       },
       groq: {
         mode: groqMode,

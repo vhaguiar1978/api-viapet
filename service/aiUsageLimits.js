@@ -16,6 +16,7 @@ const PRICE_PER_MILLION_USD = {
   openai: { input: 5, output: 30 },
   groq: { input: 0, output: 0 },
   gemini: { input: 0, output: 0 },
+  anthropic: { input: 3, output: 15 },
   keywords: { input: 0, output: 0 },
   "agenda-availability": { input: 0, output: 0 },
 };
@@ -115,9 +116,9 @@ export async function assertAiUsageAllowed(userId) {
   return status;
 }
 
-export function estimateAiUsageCost({ source, promptText, completionText }) {
-  const promptTokens = estimateTokens(promptText);
-  const completionTokens = estimateTokens(completionText);
+export function estimateAiUsageCost({ source, promptText, completionText, promptTokens: actualPromptTokens, completionTokens: actualCompletionTokens }) {
+  const promptTokens = Number(actualPromptTokens) > 0 ? Number(actualPromptTokens) : estimateTokens(promptText);
+  const completionTokens = Number(actualCompletionTokens) > 0 ? Number(actualCompletionTokens) : estimateTokens(completionText);
   const totalTokens = promptTokens + completionTokens;
   const price = PRICE_PER_MILLION_USD[source] || PRICE_PER_MILLION_USD.keywords;
   const estimatedCost =
@@ -142,8 +143,10 @@ export async function logAiUsage({
   completionText = "",
   success = true,
   errorMessage = null,
+  promptTokens = null,
+  completionTokens = null,
 }) {
-  const usage = estimateAiUsageCost({ source, promptText, completionText });
+  const usage = estimateAiUsageCost({ source, promptText, completionText, promptTokens, completionTokens });
   return AiUsageLog.create({
     organizationId,
     conversationId,

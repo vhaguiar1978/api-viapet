@@ -12,6 +12,7 @@ import KnowledgeBaseEntry from "../models/KnowledgeBaseEntry.js";
 import { groqChat, GROQ_DEFAULT_MODEL, GROQ_SMART_MODEL } from "./groqClient.js";
 import { geminiChat, GEMINI_DEFAULT_MODEL } from "./geminiClient.js";
 import { openaiChat, OPENAI_DEFAULT_MODEL } from "./openaiClient.js";
+import { anthropicChat, ANTHROPIC_DEFAULT_MODEL } from "./anthropicClient.js";
 import { analyzeCrmAiReply } from "./crmAiQuality.js";
 import { evaluateCrmAiActionPolicy } from "./crmAiActionPolicy.js";
 import { checkAiPermission } from "./aiPermissionService.js";
@@ -2287,12 +2288,16 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
   // Toggle: por default a IA NAO se identifica como IA (mais humano)
   const identifyAsAi = Boolean(check.aiControl?.identifyAsAi);
 
-  // Prioridade do modo real: OpenAI premium -> Groq -> Gemini -> keywords.
+  // O provedor selecionado tem prioridade; os demais permanecem como fallback.
+  const anthropicApiKey = String(check.aiControl?.anthropicApiKey || process.env.ANTHROPIC_API_KEY || "").trim();
+  const anthropicModel = String(check.aiControl?.anthropicModel || process.env.ANTHROPIC_MODEL || ANTHROPIC_DEFAULT_MODEL).trim();
+  const claudeSelected = /claude|anthropic/i.test(String(check.aiControl?.provider || ""));
   const openaiApiKey = String(check.aiControl?.openaiApiKey || process.env.OPENAI_API_KEY || "").trim();
   const groqApiKey = String(check.aiControl?.groqApiKey || process.env.GROQ_API_KEY || "").trim();
   const geminiApiKey = String(check.aiControl?.geminiApiKey || process.env.GEMINI_API_KEY || "").trim();
   let reply = null;
   let aiSource = "keywords";
+  let providerUsage = null;
 
   let executedAction = null;
 
@@ -2311,7 +2316,7 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
     aiSource = "agenda-availability";
   }
 
-  if (!openaiApiKey && !groqApiKey && !geminiApiKey) {
+  if (!anthropicApiKey && !openaiApiKey && !groqApiKey && !geminiApiKey) {
     console.warn(
       `[CrmAutoReply] user=${String(usersId).slice(0, 8)} sem OPENAI/GROQ/GEMINI API key - usando fallback por keywords.`,
     );
@@ -2372,6 +2377,18 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
     } catch (openaiErr) {
       console.error(`[CrmAutoReply] OpenAI falhou: ${String(openaiErr?.message || openaiErr).slice(0, 240)}. Tentando fallback.`);
     }
+  }
+
+  if (!reply && anthropicApiKey && claudeSelected) {
+    try {
+      const systemPrompt = buildSystemPrompt({ settings: check.settings, aiControl: check.aiControl, services, products, customer, pet, pets, upcomingAppointments, customerNotes, conversationSummary, knowledgeBase, lastVisit, availableSlots });
+      const providerHistory = await buildHistoryMessages(conversation?.id, 8);
+      const last = providerHistory[providerHistory.length - 1];
+      if (!last || last.role !== "user" || last.content !== body) providerHistory.push({ role: "user", content: String(body || "").slice(0, 1500) });
+      const result = await anthropicChat({ apiKey: anthropicApiKey, model: anthropicModel, messages: [{ role: "system", content: systemPrompt }, ...providerHistory], maxTokens: 1200 });
+      const parsed = parseAiReply(result.content); reply = parsed.reply; aiSource = "anthropic"; providerUsage = result.usage;
+      if (parsed.action) { executedAction = await executeAiAction({ action: parsed.action, usersId, conversation, customer, pet, pets, aiControl: check.aiControl, tutorMessage: body }); if (executedAction.message && !executedAction.executed) reply = executedAction.message; }
+    } catch (error) { console.error(`[CrmAutoReply] Claude falhou: ${String(error?.message || error).slice(0, 240)}. Tentando fallback.`); }
   }
 
   if (!reply && groqApiKey && !inCooldown) {
@@ -2603,6 +2620,8 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
       promptText: body,
       completionText: finalReply,
       success: true,
+      promptTokens: providerUsage?.inputTokens || null,
+      completionTokens: providerUsage?.outputTokens || null,
     });
   } catch (err) {
     console.warn("[CrmAutoReply] Falha ao logar consumo da IA:", err.message);
@@ -2632,6 +2651,8 @@ export async function testAiReply({ usersId, messages = [] }) {
 
   const whatsappConnection = settings.whatsappConnection || {};
   const aiControl = whatsappConnection.crmAiControl || {};
+  const anthropicApiKey = String(aiControl.anthropicApiKey || process.env.ANTHROPIC_API_KEY || "").trim();
+  const anthropicModel = String(aiControl.anthropicModel || process.env.ANTHROPIC_MODEL || ANTHROPIC_DEFAULT_MODEL).trim();
   const openaiApiKey = String(aiControl.openaiApiKey || process.env.OPENAI_API_KEY || "").trim();
   const groqApiKey = String(aiControl.groqApiKey || process.env.GROQ_API_KEY || "").trim();
   const geminiApiKey = String(aiControl.geminiApiKey || process.env.GEMINI_API_KEY || "").trim();
@@ -2701,6 +2722,13 @@ export async function testAiReply({ usersId, messages = [] }) {
     const parsed = parseAiReply(rawContent);
     return parsed.reply || String(rawContent || "").trim();
   };
+
+  if (anthropicApiKey && /claude|anthropic/i.test(String(aiControl.provider || ""))) {
+    try {
+      const result = await anthropicChat({ apiKey: anthropicApiKey, model: anthropicModel, messages: providerMessages, maxTokens: 1200 });
+      return buildTestResult({ reply: parseTestReply(result.content), model: result.model || anthropicModel, provider: "anthropic" });
+    } catch (error) { console.warn("[CrmAutoReply] Chat de teste: Claude falhou, tentando fallback:", error?.message); }
+  }
 
   const buildTestResult = ({ reply, model, provider, warning = "" }) => {
     const guarded = applyReplyQualityGuard({

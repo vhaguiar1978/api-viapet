@@ -19,6 +19,7 @@
     "check:crm-ai-real": "cross-env NODE_OPTIONS=--use-system-ca node scripts/check-crm-ai-real-mode.js",
     "test:ai-policy": "node --test scripts/test-crm-ai-action-policy.js",
     "test:ai-permissions": "node --test scripts/test-ai-permission-service.js",
+    "test:anthropic": "node --test scripts/test-anthropic-client.js",
     "test:whatsapp-ia": "node scripts/test-admin-whatsapp-ia-rules.js",
     "backfill:doghouse-addresses": "node backfill-doghouse-addresses.js",
     "settle:listed-old-package-debts": "node scripts/settle-listed-old-package-debts.js"
