@@ -46,7 +46,7 @@ const DEFAULT_CONTROL = {
   autoReplyEnabled: true,
   autoExecuteEnabled: false,
   assistantName: "ViaPet IA",
-  provider: "OpenAI GPT-5.5",
+  provider: "Anthropic Claude",
   instructions:
     "Atende clientes do pet shop com simpatia e profissionalismo. Pode agendar, remarcar, cancelar, cotar servicos e produtos, cadastrar clientes e pets novos. Confirma dados importantes antes de criar agendamento. Encaminha pra humano em caso de emergencia veterinaria, reclamacao ou pedido explicito de atendente.",
   playbookMessages: [],

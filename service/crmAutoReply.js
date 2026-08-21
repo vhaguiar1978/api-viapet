@@ -2291,7 +2291,8 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
   // O provedor selecionado tem prioridade; os demais permanecem como fallback.
   const anthropicApiKey = String(check.aiControl?.anthropicApiKey || process.env.ANTHROPIC_API_KEY || "").trim();
   const anthropicModel = String(check.aiControl?.anthropicModel || process.env.ANTHROPIC_MODEL || ANTHROPIC_DEFAULT_MODEL).trim();
-  const claudeSelected = /claude|anthropic/i.test(String(check.aiControl?.provider || ""));
+  const hasTenantProviderKey = Boolean(check.aiControl?.openaiApiKey || check.aiControl?.groqApiKey || check.aiControl?.geminiApiKey || check.aiControl?.anthropicApiKey);
+  const claudeSelected = /claude|anthropic/i.test(String(check.aiControl?.provider || "")) || (Boolean(process.env.ANTHROPIC_API_KEY) && !hasTenantProviderKey);
   const openaiApiKey = String(check.aiControl?.openaiApiKey || process.env.OPENAI_API_KEY || "").trim();
   const groqApiKey = String(check.aiControl?.groqApiKey || process.env.GROQ_API_KEY || "").trim();
   const geminiApiKey = String(check.aiControl?.geminiApiKey || process.env.GEMINI_API_KEY || "").trim();
@@ -2723,7 +2724,9 @@ export async function testAiReply({ usersId, messages = [] }) {
     return parsed.reply || String(rawContent || "").trim();
   };
 
-  if (anthropicApiKey && /claude|anthropic/i.test(String(aiControl.provider || ""))) {
+  const hasTenantTestProviderKey = Boolean(aiControl.openaiApiKey || aiControl.groqApiKey || aiControl.geminiApiKey || aiControl.anthropicApiKey);
+  const useCentralClaude = Boolean(process.env.ANTHROPIC_API_KEY) && !hasTenantTestProviderKey;
+  if (anthropicApiKey && (/claude|anthropic/i.test(String(aiControl.provider || "")) || useCentralClaude)) {
     try {
       const result = await anthropicChat({ apiKey: anthropicApiKey, model: anthropicModel, messages: providerMessages, maxTokens: 1200 });
       return buildTestResult({ reply: parseTestReply(result.content), model: result.model || anthropicModel, provider: "anthropic" });
