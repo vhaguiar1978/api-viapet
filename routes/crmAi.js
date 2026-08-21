@@ -22,6 +22,8 @@ import sequelize from "../database/config.js";
 import { createSubscriptionPreference, processWebhookEvent, validateWebhookSignature } from "../service/mercadopago.js";
 import { checkLimit } from "../service/planLimits.js";
 import { testAiReply } from "../service/crmAutoReply.js";
+import { evaluateCrmAiActionPolicy } from "../service/crmAiActionPolicy.js";
+import { checkAiPermission } from "../service/aiPermissionService.js";
 
 const router = express.Router();
 const CRM_AI_PRICE = Number(process.env.CRM_AI_PRICE || 29.9);
@@ -42,7 +44,7 @@ const VALID_AGENDA_TYPES = ["estetica", "clinica", "internacao"];
 const DEFAULT_CONTROL = {
   enabled: true,
   autoReplyEnabled: true,
-  autoExecuteEnabled: true,
+  autoExecuteEnabled: false,
   assistantName: "ViaPet IA",
   provider: "OpenAI GPT-5.5",
   instructions:
@@ -52,8 +54,8 @@ const DEFAULT_CONTROL = {
   capabilities: {
     // Tudo liberado — usuario desmarca o que nao quer
     replyToMessages: true,
-    createCustomer: true,
-    createPet: true,
+    createCustomer: false,
+    createPet: false,
     createAppointment: true,
     updateAppointment: true,
     cancelAppointment: true,
@@ -65,14 +67,14 @@ const DEFAULT_CONTROL = {
     viewFinancial: false, // unico que nao defaults true (sensivel)
   },
   scheduling: {
-    requireHumanApproval: false, // antes era true: bloqueava tudo
-    requireTutorConfirmation: true, // mantem: IA pergunta antes de criar
-    allowNewCustomer: true,
-    allowNewPet: true,
+    requireHumanApproval: true,
+    requireTutorConfirmation: true,
+    allowNewCustomer: false,
+    allowNewPet: false,
     allowOffGridTimes: true,
     minimumLeadMinutes: 30,
     slotMinutes: 10,
-    maxDailyAppointments: 30,
+    maxDailyAppointments: 12,
     allowedAgendaTypes: ["estetica", "clinica", "internacao"],
     allowedServiceCategories: [
       "Banho",
@@ -90,7 +92,7 @@ const DEFAULT_CONTROL = {
     allowedTimeStart: "08:00",
     allowedTimeEnd: "18:00",
     notes:
-      "A IA pode agendar livremente quando houver servico claro, data, hora e pet identificado. Confirma com o tutor antes de salvar.",
+      "A IA prepara a acao, confirma os dados com o tutor e aguarda aprovacao humana antes de salvar.",
   },
 };
 
@@ -477,25 +479,6 @@ async function getOrCreateControlSettings(usersId) {
   };
 }
 
-function getActionCapability(actionType) {
-  switch (actionType) {
-    case "reply_message":
-      return "replyToMessages";
-    case "create_customer":
-      return "createCustomer";
-    case "create_pet":
-      return "createPet";
-    case "schedule_appointment":
-      return "createAppointment";
-    case "update_appointment":
-      return "updateAppointment";
-    case "cancel_appointment":
-      return "cancelAppointment";
-    default:
-      return "";
-  }
-}
-
 function getWeekDayFromDate(value) {
   const parsed = value ? new Date(value) : null;
   if (!parsed || Number.isNaN(parsed.getTime())) return "";
@@ -518,17 +501,14 @@ function getMinutesFromTime(value) {
 }
 
 function evaluateControlAction(control, actionType, payload = {}) {
-  const reasons = [];
-  const warnings = [];
-  const capability = getActionCapability(actionType);
-
-  if (!control.enabled) {
-    reasons.push("A IA esta desativada.");
-  }
-
-  if (!capability || !control.capabilities[capability]) {
-    reasons.push("Essa acao nao esta liberada nas permissoes da IA.");
-  }
+  const basePolicy = evaluateCrmAiActionPolicy({
+    control,
+    actionType,
+    tutorConfirmed: normalizeBoolean(payload.tutorConfirmed, false),
+    payload,
+  });
+  const reasons = [...basePolicy.reasons];
+  const warnings = [...basePolicy.warnings];
 
   if (actionType === "schedule_appointment") {
     const agendaType = String(payload.agendaType || "").trim().toLowerCase();
@@ -577,21 +557,6 @@ function evaluateControlAction(control, actionType, payload = {}) {
       }
     }
 
-    if (payload.isNewCustomer && !control.scheduling.allowNewCustomer) {
-      reasons.push("A IA nao pode cadastrar tutor novo automaticamente.");
-    }
-
-    if (payload.isNewPet && !control.scheduling.allowNewPet) {
-      reasons.push("A IA nao pode cadastrar pet novo automaticamente.");
-    }
-
-    if (
-      control.scheduling.requireTutorConfirmation &&
-      !normalizeBoolean(payload.tutorConfirmed, false)
-    ) {
-      warnings.push("O tutor ainda nao confirmou o agendamento.");
-    }
-
     if (appointmentAt) {
       const appointmentDate = new Date(appointmentAt);
       if (!Number.isNaN(appointmentDate.getTime())) {
@@ -603,20 +568,10 @@ function evaluateControlAction(control, actionType, payload = {}) {
     }
   }
 
-  if (actionType === "create_customer" && !control.scheduling.allowNewCustomer) {
-    warnings.push("Criacao de tutor exige aprovacao manual pela regra atual.");
-  }
-
-  if (actionType === "create_pet" && !control.scheduling.allowNewPet) {
-    warnings.push("Criacao de pet exige aprovacao manual pela regra atual.");
-  }
-
   const blocked = reasons.length > 0;
   const requiresApproval =
     !blocked &&
-    (control.scheduling.requireHumanApproval ||
-      !control.autoExecuteEnabled ||
-      warnings.length > 0);
+    (basePolicy.requiresApproval || warnings.length > 0);
 
   return {
     allowed: !blocked,
@@ -628,6 +583,17 @@ function evaluateControlAction(control, actionType, payload = {}) {
     reasons,
     warnings,
   };
+}
+
+async function applyCentralCalendarPermission(usersId, permissionAction, validation, payload = {}) {
+  const permission = await checkAiPermission(usersId, permissionAction, { payload, humanApproved: payload.humanApproved === true });
+  if (!permission.executable) {
+    validation.allowed = false;
+    validation.executionMode = permission.reason === "human_approval_required" ? "approval" : "blocked";
+    validation.reasons = [...(validation.reasons || []), permission.reason === "customer_confirmation_required" ? "A confirmacao clara do tutor ainda e necessaria." : permission.reason === "human_approval_required" ? "A permissao central exige aprovacao humana." : "A permissao central da agenda bloqueou esta alteracao."];
+  }
+  validation.centralPermission = permission;
+  return validation;
 }
 
 function normalizeSearchable(value) {
@@ -1774,6 +1740,7 @@ router.post(["/assistant/schedule-appointment", "/assistant/schedule-bath"], aut
       isNewCustomer: shouldCreateCustomer,
       isNewPet: shouldCreatePet,
     });
+    await applyCentralCalendarPermission(usersId, "appointment_create", validation, { tutorConfirmed: normalizeBoolean(tutorConfirmed, false), humanApproved: normalizeBoolean(humanApproved, false) });
 
     let existingAppointment = null;
     if (appointmentInfo && existingCustomer && existingPet) {
@@ -2389,6 +2356,7 @@ router.post("/assistant/reschedule-appointment", auth, async (req, res) => {
       isNewCustomer: false,
       isNewPet: false,
     });
+    await applyCentralCalendarPermission(usersId, "appointment_reschedule", validation, { confirmed: true, humanApproved: normalizeBoolean(humanApproved, false) });
 
     const conflict = await Appointment.findOne({
       where: {
@@ -2588,6 +2556,7 @@ router.post("/assistant/cancel-appointment", auth, async (req, res) => {
     }
 
     const validation = evaluateControlAction(control, "cancel_appointment", {});
+    await applyCentralCalendarPermission(usersId, "appointment_cancel", validation, { confirmed: true, humanApproved: normalizeBoolean(humanApproved, false) });
     const proposal = {
       appointment: mapAppointmentSummary(targetAppointment),
       validation,

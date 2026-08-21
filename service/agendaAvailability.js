@@ -52,6 +52,8 @@ export async function getAvailableSlots({
   type = "estetica",
   settings = {},
   aiControl = {},
+  calendarRules = {},
+  serviceDurationMinutes = 0,
   maxSlots = 6,
 }) {
   if (!usersId || !date) {
@@ -87,11 +89,11 @@ export async function getAvailableSlots({
   const hasBreak = breakStart !== null && breakEnd !== null && breakEnd > breakStart;
 
   // 3) Tamanho do slot (default 60min — banho/tosa típico)
-  let slotSize = Number(aiControl?.scheduling?.slotMinutes || 0);
+  let slotSize = Number(serviceDurationMinutes || aiControl?.scheduling?.slotMinutes || 0);
   if (!slotSize || slotSize < 10) slotSize = 60;
 
   // 4) Lead time mínimo (não propor horários muito próximos do agora pra hoje)
-  const minLead = Number(aiControl?.scheduling?.minimumLeadMinutes || 30);
+  const minLead = Number(calendarRules?.minimumNoticeMinutes ?? aiControl?.scheduling?.minimumLeadMinutes ?? 30);
   const nowSp = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
   const todayIsoSp = nowSp.toISOString().slice(0, 10);
   const isToday = date === todayIsoSp;
@@ -111,7 +113,7 @@ export async function getAvailableSlots({
       type,
       status: { [Op.notIn]: ["cancelado", "Cancelado", "concluido", "Concluido", "Finalizado", "finalizado"] },
     },
-    attributes: ["time"],
+    attributes: ["time", "serviceId"],
   }).catch(() => []);
 
   if (maxDaily > 0 && existing.length >= maxDaily) {
@@ -127,6 +129,16 @@ export async function getAvailableSlots({
       .map((a) => toMinutes(String(a.time || "").slice(0, 5)))
       .filter((m) => m !== null),
   );
+  const intervalMinutes = Math.max(0, Number(calendarRules?.intervalMinutes || 0));
+  const protectedSlots = Array.isArray(calendarRules?.settings?.protectedSlots)
+    ? calendarRules.settings.protectedSlots
+    : [];
+  const isProtected = (candidate) => protectedSlots.some((item) =>
+    item?.allowAiBooking === false &&
+    (!item.date || item.date === date) &&
+    (!item.day || item.day === dayKey) &&
+    String(item.time || "").slice(0, 5) === candidate,
+  );
 
   // 8) Gera os slots candidatos e filtra
   const slots = [];
@@ -139,6 +151,8 @@ export async function getAvailableSlots({
     if (nowMin >= 0 && t < nowMin) continue;
     // Pula horário já ocupado
     if (occupied.has(t)) continue;
+    if ([...occupied].some((busy) => Math.abs(busy - t) < slotSize + intervalMinutes)) continue;
+    if (isProtected(toHHMM(t))) continue;
 
     slots.push(toHHMM(t));
     if (slots.length >= maxSlots) break;

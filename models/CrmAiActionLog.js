@@ -41,6 +41,10 @@ const CrmAiActionLog = sequelize.define(
       type: DataTypes.STRING,
       allowNull: false,
     },
+    actionName: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
     status: {
       type: DataTypes.STRING,
       allowNull: false,
@@ -74,6 +78,24 @@ const CrmAiActionLog = sequelize.define(
       allowNull: false,
       defaultValue: {},
     },
+    actionPayload: {
+      type: DataTypes.JSON,
+      allowNull: false,
+      defaultValue: {},
+    },
+    actionResult: {
+      type: DataTypes.JSON,
+      allowNull: false,
+      defaultValue: {},
+    },
+    confidenceScore: {
+      type: DataTypes.DECIMAL(5, 4),
+      allowNull: true,
+    },
+    errorMessage: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    },
     feedback: {
       type: DataTypes.STRING,
       allowNull: true,
@@ -103,4 +125,3 @@ const CrmAiActionLog = sequelize.define(
 );
 
 export default CrmAiActionLog;
-

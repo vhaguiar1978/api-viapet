@@ -33,6 +33,8 @@ async function adjustProductStock({ productId, usersId, delta }) {
 const router = express.Router();
 
 const toNumber = (value) => Number.parseFloat(value || 0) || 0;
+const normalizePaymentSignatureText = (value) =>
+  String(value || "").trim().toLowerCase();
 
 const getAppointmentOr404 = async (appointmentId, usersId) => {
   return Appointment.findOne({
@@ -451,6 +453,35 @@ router.post("/appointments/:id/payments", auth, async (req, res) => {
         feeAmount: resolved.feeAmount,
         netAmount: resolved.netAmount,
       };
+    }
+
+    const existingPayments = await AppointmentPayment.findAll({
+      where: {
+        appointmentId: appointment.id,
+        usersId: req.user.establishment,
+        dueDate,
+        paymentMethod,
+        status,
+      },
+    });
+    const duplicatePayment = existingPayments.find((candidate) => {
+      const sameAmount =
+        Math.abs(toNumber(candidate.grossAmount || candidate.amount) - breakdown.grossAmount) <= 0.009;
+      const sameDetails =
+        normalizePaymentSignatureText(candidate.details) === normalizePaymentSignatureText(details);
+      return sameAmount && sameDetails;
+    });
+
+    if (duplicatePayment) {
+      const summary = await syncAppointmentFinance(appointment.id);
+      return res.status(200).json({
+        message: "Pagamento duplicado ignorado; baixa ja estava registrada",
+        data: {
+          payment: duplicatePayment,
+          duplicate: true,
+          summary,
+        },
+      });
     }
 
     const payment = await AppointmentPayment.create({

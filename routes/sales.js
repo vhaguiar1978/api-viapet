@@ -382,10 +382,11 @@ router.patch("/sales/:id/status", auth, async (req, res) => {
 router.get("/sales/customer/:customerId", auth, async (req, res) => {
   try {
     const { customerId } = req.params;
+    const usersId = req.user.establishment || req.user.id;
 
     const sales = await Sales.findAll({
       where: {
-        usersId: req.user.establishment,
+        usersId,
         custumerId: customerId,
       },
       include: [
@@ -403,7 +404,8 @@ router.get("/sales/customer/:customerId", auth, async (req, res) => {
         const saleJSON = sale.toJSON(); // Converte para JSON para facilitar a manipulação
 
         // Busca o nome do cliente
-        const customer = await Custumers.findByPk(sale.custumerId, {
+        const customer = await Custumers.findOne({
+          where: { id: sale.custumerId, usersId },
           attributes: ["name"],
         });
         saleJSON.customerName = customer ? customer.name : null; // Adiciona customerName
@@ -411,7 +413,8 @@ router.get("/sales/customer/:customerId", auth, async (req, res) => {
         // Busca os nomes dos produtos para cada SaleItem
         saleJSON.SaleItems = await Promise.all(
           saleJSON.SaleItems.map(async (item) => {
-            const product = await Products.findByPk(item.productId, {
+            const product = await Products.findOne({
+              where: { id: item.productId, usersId },
               attributes: ["name"],
             });
             return {

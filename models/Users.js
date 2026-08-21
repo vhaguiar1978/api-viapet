@@ -62,6 +62,11 @@ const Users = sequelize.define(
       type: DataTypes.STRING,
       allowNull: true,
     },
+    companyName: { type: DataTypes.STRING, allowNull: true },
+    registrationStatus: { type: DataTypes.STRING(48), allowNull: false, defaultValue: "cadastro_ativo" },
+    emailConfirmedAt: { type: DataTypes.DATE, allowNull: true },
+    phoneConfirmedAt: { type: DataTypes.DATE, allowNull: true },
+    trustedAt: { type: DataTypes.DATE, allowNull: true },
     lastAccess: {
       type: DataTypes.DATE,
       allowNull: true,

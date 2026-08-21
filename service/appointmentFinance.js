@@ -596,7 +596,7 @@ const syncAppointmentFinanceUnlocked = async (appointmentId) => {
     ? await Finance.findByPk(appointment.financeId)
     : null;
 
-  const [items, payments, customer] = await Promise.all([
+  const [items, loadedPayments, customer] = await Promise.all([
     AppointmentItem.findAll({
       where: { appointmentId },
       order: [["createdAt", "ASC"]],
@@ -607,6 +607,46 @@ const syncAppointmentFinanceUnlocked = async (appointmentId) => {
     }),
     Custumers.findByPk(appointment.customerId),
   ]);
+  let payments = loadedPayments;
+  const seenPaymentSignatures = new Set();
+  const duplicatePayments = [];
+  payments = payments.filter((payment) => {
+    const signature = [
+      String(payment.dueDate || "").slice(0, 10),
+      String(payment.paymentMethod || "").trim().toLowerCase(),
+      Number(payment.grossAmount || payment.amount || 0).toFixed(2),
+      String(payment.details || "").trim().toLowerCase(),
+      normalizeStatus(payment.status),
+    ].join("|");
+
+    if (seenPaymentSignatures.has(signature)) {
+      duplicatePayments.push(payment);
+      return false;
+    }
+
+    seenPaymentSignatures.add(signature);
+    return true;
+  });
+
+  if (duplicatePayments.length) {
+    const duplicateFinanceIds = duplicatePayments.map((payment) => payment.financeId).filter(Boolean);
+    const duplicateReferences = duplicatePayments.map((payment) => `appointment_payment:${payment.id}`);
+    await Finance.destroy({
+      where: {
+        usersId: appointment.usersId,
+        [Op.or]: [
+          duplicateFinanceIds.length ? { id: { [Op.in]: duplicateFinanceIds } } : null,
+          { reference: { [Op.in]: duplicateReferences } },
+        ].filter(Boolean),
+      },
+    });
+    await AppointmentPayment.destroy({
+      where: {
+        usersId: appointment.usersId,
+        id: { [Op.in]: duplicatePayments.map((payment) => payment.id) },
+      },
+    });
+  }
 
   const summary = await calculateAppointmentSummary(appointment, items, payments);
   const customerName = customer?.name || "Cliente não identificado";

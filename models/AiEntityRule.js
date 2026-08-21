@@ -1,0 +1,4 @@
+import { DataTypes } from "sequelize";
+import sequelize from "../database/config.js";
+const AiEntityRule=sequelize.define("AiEntityRule",{id:{type:DataTypes.UUID,defaultValue:DataTypes.UUIDV4,primaryKey:true},usersId:{type:DataTypes.UUID,allowNull:false},entityType:{type:DataTypes.STRING,allowNull:false},entityId:{type:DataTypes.UUID,allowNull:false},permissionMode:{type:DataTypes.STRING,allowNull:false,defaultValue:"customer_confirmation"},active:{type:DataTypes.BOOLEAN,allowNull:false,defaultValue:true},minimumNoticeMinutes:{type:DataTypes.INTEGER},requiresProfessional:{type:DataTypes.BOOLEAN,allowNull:false,defaultValue:false},requiresHumanValidation:{type:DataTypes.BOOLEAN,allowNull:false,defaultValue:false},settings:{type:DataTypes.JSON,allowNull:false,defaultValue:{}}},{tableName:"ai_entity_rules",timestamps:true,indexes:[{unique:true,fields:["usersId","entityType","entityId"]}]});
+export default AiEntityRule;

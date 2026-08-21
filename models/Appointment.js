@@ -141,12 +141,37 @@ const Appointment = sequelize.define(
       type: DataTypes.STRING,
       allowNull: true,
     },
+    paymentStatus: {
+      type: DataTypes.STRING,
+      allowNull: false,
+      defaultValue: "pending",
+    },
+    paymentAmount: {
+      type: DataTypes.DECIMAL(10, 2),
+      allowNull: true,
+    },
+    paidAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
+    receivableId: {
+      type: DataTypes.UUID,
+      allowNull: true,
+    },
+    paymentProofId: {
+      type: DataTypes.UUID,
+      allowNull: true,
+    },
     automationsSent: {
       type: DataTypes.JSON,
       allowNull: false,
       defaultValue: [],
       comment: "Registro das automacoes de WhatsApp ja disparadas para este agendamento",
     },
+    createdByType: { type: DataTypes.STRING, allowNull: false, defaultValue: "user" },
+    createdByAi: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    aiActionLogId: { type: DataTypes.UUID, allowNull: true },
+    aiOverbooking: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
   },
   {
     timestamps: true,

@@ -27,6 +27,14 @@ const Pets = sequelize.define(
       type: DataTypes.STRING,
       allowNull: true,
     },
+    size: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    approxWeight: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
     color: {
       type: DataTypes.STRING,
       allowNull: true,
@@ -44,6 +52,14 @@ const Pets = sequelize.define(
     allergic: {
       type: DataTypes.STRING,
     },
+    restrictions: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    },
+    behavior: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    },
     lastParamsMessage: {
       type: DataTypes.DATE,
       allowNull: true,
@@ -57,6 +73,19 @@ const Pets = sequelize.define(
       allowNull: true,
     },
     favoriteTreat: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    treatEnabled: {
+      type: DataTypes.BOOLEAN,
+      allowNull: true,
+    },
+    productPreferences: {
+      type: DataTypes.JSON,
+      allowNull: false,
+      defaultValue: [],
+    },
+    photoUrl: {
       type: DataTypes.STRING,
       allowNull: true,
     },

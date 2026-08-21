@@ -1365,10 +1365,45 @@ router.post("/finance/close-cash", authenticate, async (req, res) => {
     const referenceDate = req.body.referenceDate || new Date().toISOString().slice(0, 10);
     const notes = req.body.notes || null;
 
-    // Janela do dia no horario de Brasilia (UTC-3). Sem isso a query usava UTC
-    // e o "dia" ia das 21h de ontem as 20h59 de hoje, deslocando lancamentos.
-    const startDateTime = new Date(`${referenceDate}T00:00:00.000-03:00`);
-    const endDateTime = new Date(`${referenceDate}T23:59:59.999-03:00`);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(referenceDate)) {
+      return res.status(400).json({
+        message: "Informe uma data valida para fechar o caixa.",
+      });
+    }
+
+    const referenceDateCheck = new Date(`${referenceDate}T12:00:00.000Z`);
+    if (
+      Number.isNaN(referenceDateCheck.getTime()) ||
+      referenceDateCheck.toISOString().slice(0, 10) !== referenceDate
+    ) {
+      return res.status(400).json({
+        message: "Informe uma data valida para fechar o caixa.",
+      });
+    }
+
+    // Usa a mesma data de competencia da abertura. Isso garante que o valor
+    // inicial continue sendo reconhecido mesmo sem outras movimentacoes.
+    const startDateTime = new Date(`${referenceDate}T00:00:00.000Z`);
+    const endDateTime = new Date(`${referenceDate}T23:59:59.999Z`);
+
+    const openingEntry = await Finance.findOne({
+      where: {
+        usersId: req.user.establishment,
+        category: "Caixa",
+        subCategory: "Abertura",
+        dueDate: { [Op.gte]: startDateTime, [Op.lte]: endDateTime },
+        status: { [Op.ne]: "cancelado" },
+      },
+      order: [["createdAt", "DESC"]],
+    });
+
+    if (!openingEntry) {
+      return res.status(400).json({
+        message: "Abra o caixa antes de realizar o fechamento.",
+      });
+    }
+
+    const openingAmount = Number(openingEntry.netAmount ?? openingEntry.amount ?? 0);
 
     const finances = await Finance.findAll({
       where: {
@@ -1379,9 +1414,7 @@ router.post("/finance/close-cash", authenticate, async (req, res) => {
         },
         // Saldo do dia = somente o que foi efetivamente pago/recebido.
         // Contas a receber/pagar pendentes com vencimento hoje nao entram.
-        status: {
-          [Op.in]: ["pago", "paid", "confirmado"],
-        },
+        status: "pago",
       },
     });
     const currentFinances = await keepOnlyCurrentAgendaFinanceRows(
@@ -1393,7 +1426,9 @@ router.post("/finance/close-cash", authenticate, async (req, res) => {
       (acc, item) => {
         const amount = Number(item.netAmount ?? item.amount ?? 0);
 
-        if (item.type === "entrada") {
+        const isOpeningEntry = item.category === "Caixa" && item.subCategory === "Abertura";
+
+        if (item.type === "entrada" && !isOpeningEntry) {
           acc.totalEntries += amount;
         }
 
@@ -1414,7 +1449,7 @@ router.post("/finance/close-cash", authenticate, async (req, res) => {
       }
     );
 
-    const balance = totals.totalEntries - totals.totalExpenses;
+    const balance = openingAmount + totals.totalEntries - totals.totalExpenses;
 
     const payload = {
       referenceDate,
@@ -1422,7 +1457,7 @@ router.post("/finance/close-cash", authenticate, async (req, res) => {
       totalExpenses: totals.totalExpenses,
       totalSales: totals.totalSales,
       balance,
-      notes,
+      notes: notes || `Valor de abertura: ${openingAmount.toFixed(2)}`,
       closedAt: new Date(),
       closedBy: req.user.id,
       usersId: req.user.establishment,
@@ -1456,6 +1491,10 @@ router.get("/finance/cash-status/:referenceDate", authenticate, async (req, res)
   try {
     const referenceDate = req.params.referenceDate;
 
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(referenceDate)) {
+      return res.status(400).json({ message: "Informe uma data valida para consultar o caixa." });
+    }
+
     const openingEntry = await Finance.findOne({
       where: {
         usersId: req.user.establishment,
@@ -1488,8 +1527,10 @@ router.get("/finance/cash-status/:referenceDate", authenticate, async (req, res)
           openingEntry?.netAmount ?? openingEntry?.amount ?? 0,
         ),
         openingEntry,
+        openedAt: openingEntry?.createdAt || null,
         closed: Boolean(closure),
         closure,
+        closedAt: closure?.closedAt || null,
       },
     });
   } catch (error) {

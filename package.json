@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "dev": "cross-env NODE_ENV=development nodemon index.js",
-    "start": "NODE_ENV=production node index.js",
+    "dev": "cross-env NODE_ENV=development NODE_OPTIONS=--use-system-ca nodemon index.js",
+    "start": "cross-env NODE_ENV=production NODE_OPTIONS=--use-system-ca node index.js",
     "migrate": "cross-env NODE_ENV=development npx sequelize-cli db:migrate",
     "migrate:undo": "cross-env NODE_ENV=development npx sequelize-cli db:migrate:undo",
     "migrate:status": "cross-env NODE_ENV=development npx sequelize-cli db:migrate:status",
@@ -16,8 +16,12 @@
     "check-subscriptions:dev": "cross-env NODE_ENV=development node scripts/check-subscriptions.js",
     "check-subscriptions:prod": "cross-env NODE_ENV=production node scripts/check-subscriptions.js",
     "test:ai": "node scripts/test-ai-chat.js",
+    "check:crm-ai-real": "cross-env NODE_OPTIONS=--use-system-ca node scripts/check-crm-ai-real-mode.js",
+    "test:ai-policy": "node --test scripts/test-crm-ai-action-policy.js",
+    "test:ai-permissions": "node --test scripts/test-ai-permission-service.js",
     "test:whatsapp-ia": "node scripts/test-admin-whatsapp-ia-rules.js",
-    "backfill:doghouse-addresses": "node backfill-doghouse-addresses.js"
+    "backfill:doghouse-addresses": "node backfill-doghouse-addresses.js",
+    "settle:listed-old-package-debts": "node scripts/settle-listed-old-package-debts.js"
   },
   "keywords": [],
   "author": "",

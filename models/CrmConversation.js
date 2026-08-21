@@ -29,6 +29,15 @@ const CrmConversation = sequelize.define(
       type: DataTypes.UUID,
       allowNull: true,
     },
+    queueKey: {
+      type: DataTypes.STRING,
+      allowNull: false,
+      defaultValue: "geral",
+    },
+    assignedAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
     channel: {
       type: DataTypes.STRING,
       allowNull: false,
@@ -38,6 +47,29 @@ const CrmConversation = sequelize.define(
       type: DataTypes.STRING,
       allowNull: false,
       defaultValue: "pending",
+    },
+    currentIntent: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    summary: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    },
+    collectedFields: {
+      type: DataTypes.JSON,
+      allowNull: false,
+      defaultValue: {},
+    },
+    missingFields: {
+      type: DataTypes.JSON,
+      allowNull: false,
+      defaultValue: [],
+    },
+    aiEnabled: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: true,
     },
     stage: {
       type: DataTypes.STRING,

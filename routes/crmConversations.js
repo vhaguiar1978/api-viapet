@@ -76,6 +76,113 @@ function getEstablishmentId(req) {
   return req.user?.establishment || req.user?.id || null;
 }
 
+function sanitizeQueueKey(value, fallback = "geral") {
+  const normalized = String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40);
+  return normalized || fallback;
+}
+
+async function findTeamMember(usersId, userId) {
+  if (!userId) return null;
+  return Users.findOne({
+    where: {
+      id: userId,
+      status: true,
+      [Op.or]: [
+        { id: usersId },
+        { establishment: usersId },
+      ],
+    },
+    attributes: ["id", "name", "email", "role", "status", "lastAccess"],
+  });
+}
+
+async function appendAssignmentEvent({
+  conversation,
+  usersId,
+  authorUserId,
+  body,
+  event,
+  payload = {},
+}) {
+  const now = new Date();
+  await CrmConversationMessage.create({
+    conversationId: conversation.id,
+    usersId,
+    customerId: conversation.customerId || null,
+    petId: conversation.petId || null,
+    authorUserId: authorUserId || null,
+    direction: "outbound",
+    channel: "system",
+    messageType: "system",
+    body,
+    status: "sent",
+    sentAt: now,
+    payload: {
+      systemEvent: event,
+      ...payload,
+    },
+  });
+}
+
+async function ensureConversationOwnedForReply({ conversation, usersId, actor }) {
+  if (!actor) {
+    return { ok: false, status: 403, message: "Usuario sem acesso a esta equipe." };
+  }
+
+  if (
+    conversation.assignedUserId &&
+    String(conversation.assignedUserId) !== String(actor.id)
+  ) {
+    const assigned = await findTeamMember(usersId, conversation.assignedUserId);
+    return {
+      ok: false,
+      status: 409,
+      message: `Esta conversa esta sendo atendida por ${assigned?.name || "outro atendente"}. Transfira ou libere o atendimento antes de responder.`,
+    };
+  }
+
+  if (!conversation.assignedUserId) {
+    const [claimed] = await CrmConversation.update(
+      {
+        assignedUserId: actor.id,
+        assignedAt: new Date(),
+        status: "attending",
+      },
+      {
+        where: {
+          id: conversation.id,
+          usersId,
+          assignedUserId: null,
+        },
+      },
+    );
+
+    if (!claimed) {
+      const fresh = await CrmConversation.findOne({
+        where: { id: conversation.id, usersId },
+        include: buildConversationInclude(),
+      });
+      return {
+        ok: false,
+        status: 409,
+        message: `Esta conversa acabou de ser assumida por ${fresh?.assignedUser?.name || "outro atendente"}.`,
+      };
+    }
+
+    conversation.assignedUserId = actor.id;
+    conversation.assignedAt = new Date();
+    conversation.status = "attending";
+  }
+
+  return { ok: true };
+}
+
 function slugifyBoardColumnId(value, fallback = "coluna") {
   const normalized = String(value || "")
     .normalize("NFD")
@@ -393,6 +500,64 @@ router.get("/crm-conversations/summary", authenticate, async (req, res) => {
   }
 });
 
+router.get("/crm-conversations/team", authenticate, async (req, res) => {
+  try {
+    const usersId = getEstablishmentId(req);
+    const rows = await Users.findAll({
+      where: {
+        status: true,
+        [Op.or]: [
+          { id: usersId },
+          { establishment: usersId },
+        ],
+      },
+      attributes: ["id", "name", "email", "role", "status", "lastAccess"],
+      order: [["role", "ASC"], ["name", "ASC"]],
+    });
+    const [workloads, unassigned] = await Promise.all([
+      Promise.all(
+        rows.map(async (member) => ({
+          userId: member.id,
+          openCount: await CrmConversation.count({
+            where: {
+              usersId,
+              assignedUserId: member.id,
+              isArchived: false,
+              status: { [Op.ne]: "closed" },
+            },
+          }),
+        })),
+      ),
+      CrmConversation.count({
+        where: {
+          usersId,
+          assignedUserId: null,
+          isArchived: false,
+          status: { [Op.ne]: "closed" },
+        },
+      }),
+    ]);
+    const workloadByUser = new Map(
+      workloads.map((item) => [String(item.userId), item.openCount]),
+    );
+
+    return res.status(200).json({
+      message: "Equipe de atendimento carregada",
+      data: rows.map((member) => ({
+        ...member.toJSON(),
+        openCount: workloadByUser.get(String(member.id)) || 0,
+      })),
+      summary: { unassigned },
+    });
+  } catch (error) {
+    console.error("Erro ao carregar equipe do CRM:", error);
+    return res.status(500).json({
+      message: "Erro ao carregar equipe do atendimento",
+      error: error.message,
+    });
+  }
+});
+
 router.get("/crm-conversations/response-monitor", authenticate, async (req, res) => {
   try {
     const usersId = getEstablishmentId(req);
@@ -499,11 +664,12 @@ router.get("/crm-conversations", authenticate, async (req, res) => {
   try {
     const usersId = getEstablishmentId(req);
     const status = String(req.query.status || "all").trim().toLowerCase();
+    const archived = String(req.query.archived || "false").trim().toLowerCase() === "true";
     const limit = Math.min(Math.max(Number(req.query.limit || 50), 1), 200);
 
     const baseWhere = {
       usersId,
-      isArchived: false,
+      isArchived: archived,
       ...buildSearchWhere(req.query.search),
     };
     const where = {
@@ -522,6 +688,10 @@ router.get("/crm-conversations", authenticate, async (req, res) => {
       where.assignedUserId = req.query.assignedUserId;
     }
 
+    if (req.query.queueKey) {
+      where.queueKey = sanitizeQueueKey(req.query.queueKey);
+    }
+
     if (req.query.customerId) {
       where.customerId = String(req.query.customerId).trim();
     }
@@ -536,7 +706,8 @@ router.get("/crm-conversations", authenticate, async (req, res) => {
 
     const tagFilter = req.query.tag ? String(req.query.tag).trim().toLowerCase() : null;
 
-    const [rawRows, all, pending, attending, closed] = await Promise.all([
+    const activeBaseWhere = { usersId, isArchived: false, ...buildSearchWhere(req.query.search) };
+    const [rawRows, all, pending, attending, closed, archivedCount] = await Promise.all([
       CrmConversation.findAll({
         where,
         include: buildConversationInclude(),
@@ -547,10 +718,11 @@ router.get("/crm-conversations", authenticate, async (req, res) => {
         ],
         limit,
       }),
-      CrmConversation.count({ where: baseWhere }),
-      CrmConversation.count({ where: { ...baseWhere, status: "pending" } }),
-      CrmConversation.count({ where: { ...baseWhere, status: "attending" } }),
-      CrmConversation.count({ where: { ...baseWhere, status: "closed" } }),
+      CrmConversation.count({ where: activeBaseWhere }),
+      CrmConversation.count({ where: { ...activeBaseWhere, status: "pending" } }),
+      CrmConversation.count({ where: { ...activeBaseWhere, status: "attending" } }),
+      CrmConversation.count({ where: { ...activeBaseWhere, status: "closed" } }),
+      CrmConversation.count({ where: { usersId, isArchived: true, ...buildSearchWhere(req.query.search) } }),
     ]);
 
     // Filtro por tag (aplicado em memória — tags ficam em metadata.tags JSON)
@@ -569,6 +741,7 @@ router.get("/crm-conversations", authenticate, async (req, res) => {
         pending,
         attending,
         closed,
+        archived: archivedCount,
       },
     });
   } catch (error) {
@@ -587,6 +760,7 @@ router.post("/crm-conversations", authenticate, async (req, res) => {
       customerId,
       petId,
       assignedUserId,
+      queueKey,
       phone,
       channel,
       customerName,
@@ -597,6 +771,15 @@ router.post("/crm-conversations", authenticate, async (req, res) => {
       source,
       status,
     } = req.body || {};
+
+    const requestedAssignee = assignedUserId
+      ? await findTeamMember(usersId, assignedUserId)
+      : null;
+    if (assignedUserId && !requestedAssignee) {
+      return res.status(400).json({
+        message: "O responsavel informado nao pertence a equipe desta empresa.",
+      });
+    }
 
     const linked = await loadLinkedNames({
       usersId,
@@ -635,7 +818,20 @@ router.post("/crm-conversations", authenticate, async (req, res) => {
       usersId,
       customerId: linked.customerId,
       petId: linked.petId,
-      assignedUserId: assignedUserId || null,
+      assignedUserId:
+        assignedUserId !== undefined
+          ? assignedUserId || null
+          : existingConversation?.assignedUserId || null,
+      assignedAt:
+        assignedUserId !== undefined
+          ? assignedUserId
+            ? new Date()
+            : null
+          : existingConversation?.assignedAt || null,
+      queueKey:
+        queueKey !== undefined
+          ? sanitizeQueueKey(queueKey)
+          : existingConversation?.queueKey || "geral",
       phone: linked.phone,
       customerName: linked.customerName,
       petName: linked.petName,
@@ -699,6 +895,37 @@ router.patch("/crm-conversations/:conversationId", authenticate, async (req, res
       });
     }
 
+    const actor = await findTeamMember(usersId, req.user?.id);
+    if (!actor) {
+      return res.status(403).json({ message: "Usuario sem acesso a esta equipe." });
+    }
+    const changesOperationalState =
+      req.body?.assignedUserId !== undefined ||
+      req.body?.status !== undefined ||
+      req.body?.queueKey !== undefined ||
+      req.body?.isArchived !== undefined;
+    const actorIsOwner = ["admin", "proprietario"].includes(String(actor.role || ""));
+    if (
+      changesOperationalState &&
+      conversation.assignedUserId &&
+      String(conversation.assignedUserId) !== String(actor.id) &&
+      !actorIsOwner
+    ) {
+      const currentOwner = await findTeamMember(usersId, conversation.assignedUserId);
+      return res.status(409).json({
+        message: `Esta conversa esta sob responsabilidade de ${currentOwner?.name || "outro atendente"}.`,
+      });
+    }
+
+    if (req.body?.assignedUserId) {
+      const target = await findTeamMember(usersId, req.body.assignedUserId);
+      if (!target) {
+        return res.status(400).json({
+          message: "O atendente informado nao pertence a esta empresa.",
+        });
+      }
+    }
+
     const linked = await loadLinkedNames({
       usersId,
       customerId: req.body?.customerId ?? conversation.customerId,
@@ -715,6 +942,16 @@ router.patch("/crm-conversations/:conversationId", authenticate, async (req, res
         req.body?.assignedUserId !== undefined
           ? req.body.assignedUserId || null
           : conversation.assignedUserId,
+      assignedAt:
+        req.body?.assignedUserId !== undefined
+          ? req.body.assignedUserId
+            ? new Date()
+            : null
+          : conversation.assignedAt,
+      queueKey:
+        req.body?.queueKey !== undefined
+          ? sanitizeQueueKey(req.body.queueKey, conversation.queueKey || "geral")
+          : conversation.queueKey,
       phone: linked.phone || conversation.phone,
       customerName: linked.customerName,
       petName: linked.petName,
@@ -763,6 +1000,175 @@ router.patch("/crm-conversations/:conversationId", authenticate, async (req, res
       message: "Erro ao atualizar conversa",
       error: error.message,
     });
+  }
+});
+
+router.post("/crm-conversations/:conversationId/claim", authenticate, async (req, res) => {
+  try {
+    const usersId = getEstablishmentId(req);
+    const actor = await findTeamMember(usersId, req.user?.id);
+    if (!actor) {
+      return res.status(403).json({ message: "Usuario nao pertence a equipe desta empresa." });
+    }
+
+    const [updated] = await CrmConversation.update(
+      {
+        assignedUserId: actor.id,
+        assignedAt: new Date(),
+        status: "attending",
+      },
+      {
+        where: {
+          id: req.params.conversationId,
+          usersId,
+          isArchived: false,
+          [Op.or]: [
+            { assignedUserId: null },
+            { assignedUserId: actor.id },
+          ],
+        },
+      },
+    );
+
+    if (!updated) {
+      const current = await CrmConversation.findOne({
+        where: { id: req.params.conversationId, usersId },
+        include: buildConversationInclude(),
+      });
+      if (!current) return res.status(404).json({ message: "Conversa nao encontrada" });
+      return res.status(409).json({
+        message: `Esta conversa ja esta com ${current.assignedUser?.name || "outro atendente"}.`,
+        data: current,
+      });
+    }
+
+    const conversation = await CrmConversation.findOne({
+      where: { id: req.params.conversationId, usersId },
+      include: buildConversationInclude(),
+    });
+    await appendAssignmentEvent({
+      conversation,
+      usersId,
+      authorUserId: actor.id,
+      body: `${actor.name} assumiu este atendimento.`,
+      event: "conversation_claimed",
+      payload: { assignedUserId: actor.id },
+    });
+
+    return res.status(200).json({
+      message: "Atendimento assumido com sucesso",
+      data: conversation,
+    });
+  } catch (error) {
+    console.error("Erro ao assumir atendimento:", error);
+    return res.status(500).json({ message: "Erro ao assumir atendimento", error: error.message });
+  }
+});
+
+router.post("/crm-conversations/:conversationId/transfer", authenticate, async (req, res) => {
+  try {
+    const usersId = getEstablishmentId(req);
+    const actor = await findTeamMember(usersId, req.user?.id);
+    const target = await findTeamMember(usersId, req.body?.assignedUserId);
+    if (!actor) return res.status(403).json({ message: "Usuario sem acesso a esta equipe." });
+    if (!target) return res.status(400).json({ message: "Atendente de destino invalido." });
+
+    const conversation = await CrmConversation.findOne({
+      where: { id: req.params.conversationId, usersId, isArchived: false },
+      include: buildConversationInclude(),
+    });
+    if (!conversation) return res.status(404).json({ message: "Conversa nao encontrada" });
+
+    const actorIsOwner = ["admin", "proprietario"].includes(String(actor.role || ""));
+    if (
+      conversation.assignedUserId &&
+      String(conversation.assignedUserId) !== String(actor.id) &&
+      !actorIsOwner
+    ) {
+      return res.status(409).json({
+        message: `Somente ${conversation.assignedUser?.name || "o responsavel atual"} ou o proprietario pode transferir esta conversa.`,
+      });
+    }
+
+    const previousUserId = conversation.assignedUserId || null;
+    const previousUserName = conversation.assignedUser?.name || "Fila";
+    await conversation.update({
+      assignedUserId: target.id,
+      assignedAt: new Date(),
+      status: "attending",
+      queueKey: sanitizeQueueKey(req.body?.queueKey, conversation.queueKey || "geral"),
+    });
+    await appendAssignmentEvent({
+      conversation,
+      usersId,
+      authorUserId: actor.id,
+      body: `${actor.name} transferiu o atendimento de ${previousUserName} para ${target.name}.`,
+      event: "conversation_transferred",
+      payload: { previousUserId, assignedUserId: target.id },
+    });
+
+    const hydrated = await CrmConversation.findByPk(conversation.id, {
+      include: buildConversationInclude(),
+    });
+    return res.status(200).json({
+      message: `Atendimento transferido para ${target.name}`,
+      data: hydrated,
+    });
+  } catch (error) {
+    console.error("Erro ao transferir atendimento:", error);
+    return res.status(500).json({ message: "Erro ao transferir atendimento", error: error.message });
+  }
+});
+
+router.post("/crm-conversations/:conversationId/release", authenticate, async (req, res) => {
+  try {
+    const usersId = getEstablishmentId(req);
+    const actor = await findTeamMember(usersId, req.user?.id);
+    if (!actor) return res.status(403).json({ message: "Usuario sem acesso a esta equipe." });
+
+    const conversation = await CrmConversation.findOne({
+      where: { id: req.params.conversationId, usersId, isArchived: false },
+      include: buildConversationInclude(),
+    });
+    if (!conversation) return res.status(404).json({ message: "Conversa nao encontrada" });
+
+    const actorIsOwner = ["admin", "proprietario"].includes(String(actor.role || ""));
+    if (
+      conversation.assignedUserId &&
+      String(conversation.assignedUserId) !== String(actor.id) &&
+      !actorIsOwner
+    ) {
+      return res.status(409).json({
+        message: "Somente o responsavel atual ou o proprietario pode devolver esta conversa para a fila.",
+      });
+    }
+
+    const previousUserName = conversation.assignedUser?.name || actor.name;
+    await conversation.update({
+      assignedUserId: null,
+      assignedAt: null,
+      status: "pending",
+      queueKey: sanitizeQueueKey(req.body?.queueKey, conversation.queueKey || "geral"),
+    });
+    await appendAssignmentEvent({
+      conversation,
+      usersId,
+      authorUserId: actor.id,
+      body: `${previousUserName} devolveu este atendimento para a fila.`,
+      event: "conversation_released",
+      payload: { queueKey: conversation.queueKey || "geral" },
+    });
+
+    const hydrated = await CrmConversation.findByPk(conversation.id, {
+      include: buildConversationInclude(),
+    });
+    return res.status(200).json({
+      message: "Conversa devolvida para a fila",
+      data: hydrated,
+    });
+  } catch (error) {
+    console.error("Erro ao liberar atendimento:", error);
+    return res.status(500).json({ message: "Erro ao liberar atendimento", error: error.message });
   }
 });
 
@@ -1082,6 +1488,21 @@ router.post("/crm-conversations/:conversationId/messages", authenticate, enforce
       });
     }
 
+    if (normalizedDirection === "outbound") {
+      const actor = await findTeamMember(usersId, req.user?.id);
+      const ownership = await ensureConversationOwnedForReply({
+        conversation,
+        usersId,
+        actor,
+      });
+      if (!ownership.ok) {
+        return res.status(ownership.status).json({
+          message: ownership.message,
+          code: "conversation_owned_by_another_user",
+        });
+      }
+    }
+
     let providerMessageId = null;
     let messageStatus =
       normalizedDirection === "inbound"
@@ -1311,6 +1732,14 @@ router.post("/crm-conversations/:conversationId/messages", authenticate, enforce
         : "attending";
 
     await conversation.update({
+      assignedUserId:
+        normalizedDirection === "outbound"
+          ? req.user?.id || conversation.assignedUserId
+          : conversation.assignedUserId,
+      assignedAt:
+        normalizedDirection === "outbound"
+          ? conversation.assignedAt || now
+          : conversation.assignedAt,
       lastMessagePreview: normalizedBody || "[midia]",
       lastMessageAt: now,
       lastInboundAt:

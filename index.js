@@ -28,6 +28,7 @@ import appointmentRouter from "./routes/Agendamento.js";
 import adminRouter from "./routes/Admin.js";
 import whatsappRouter from "./service/whatsapp.js";
 import financeRouter from "./routes/finance.js";
+import cashRegisterRouter from "./routes/cashRegister.js";
 import paymentMethodFeesRouter from "./routes/paymentMethodFees.js";
 import bankAccountsRouter from "./routes/bankAccounts.js";
 import bankReconciliationRouter from "./routes/bankReconciliation.js";
@@ -38,6 +39,8 @@ import serviceRoutes from "./routes/Service.js";
 import subscriptionsRouter from "./routes/subscriptions.js";
 import crmAiRouter from "./routes/crmAi.js";
 import crmAiAssistantRouter from "./routes/crmAiAssistant.js";
+import crmAiOperationalRouter from "./routes/crmAiOperational.js";
+import aiUsageRouter from "./routes/aiUsage.js";
 import crmWhatsappRouter from "./routes/crmWhatsapp.js";
 import crmWhatsappOauthRouter from "./routes/crmWhatsappOauth.js";
 import crmConversationsRouter from "./routes/crmConversations.js";
@@ -63,6 +66,7 @@ import { adminAuditMiddleware } from "./middlewares/adminAudit.js";
 import adminAlertsRouter from "./routes/adminAlerts.js";
 import adminTutorialsRouter from "./routes/adminTutorials.js";
 import adminWhatsappIaRouter from "./routes/adminWhatsappIa.js";
+import adminRegistrationSecurityRouter, { cleanupUnconfirmedRegistrations } from "./routes/adminRegistrationSecurity.js";
 import { processDueInactiveAutomations, scanInactiveUsers } from "./service/adminWhatsappIa.js";
 import alertEngine from "./service/alertEngine.js";
 import {
@@ -114,7 +118,7 @@ app.use(
     // MODIFIED CORS CONFIGURATION - ALLOW ALL ORIGINS FOR TESTING - INSECURE FOR PRODUCTION!
     origin: "*", // ⚠️ ALLOW ALL ORIGINS - INSECURE FOR PRODUCTION!
     methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    allowedHeaders: ["Content-Type", "Authorization", "X-Device-Fingerprint", "X-Register-Secret"],
     credentials: true, // Keep or remove as needed for testing
   })
 );
@@ -173,6 +177,7 @@ app.use(whatsappRouter);
 app.use(whatsappOfficialRouter);
 app.use(whatsappHubRouter);
 app.use(financeRouter);
+app.use(cashRegisterRouter);
 app.use(paymentMethodFeesRouter);
 app.use(bankAccountsRouter);
 app.use(bankReconciliationRouter);
@@ -182,6 +187,8 @@ app.use(bannersRouter);
 app.use("/api/subscriptions", subscriptionsRouter);
 app.use("/api/crm-ai", crmAiRouter);
 app.use("/api/crm-ai-assistant", crmAiAssistantRouter);
+app.use("/api", crmAiOperationalRouter);
+app.use("/api", aiUsageRouter);
 app.use(crmWhatsappRouter);
 app.use(crmWhatsappOauthRouter);
 app.use(crmConversationsRouter);
@@ -202,6 +209,7 @@ app.use(adminAuditRouter);
 app.use(adminAlertsRouter);
 app.use(adminTutorialsRouter);
 app.use(adminWhatsappIaRouter);
+app.use(adminRegistrationSecurityRouter);
 // Error handler do activity logger — DEVE vir depois das rotas
 app.use(activityErrorHandler);
 // Configure as associações antes de sincronizar
@@ -997,6 +1005,15 @@ async function ensureCrmConversationsSchema() {
       allowNull: false,
       defaultValue: "prospectar",
     });
+    await ensureColumn("crm_conversations", conversationsTable, "queueKey", {
+      type: DataTypes.STRING,
+      allowNull: false,
+      defaultValue: "geral",
+    });
+    await ensureColumn("crm_conversations", conversationsTable, "assignedAt", {
+      type: DataTypes.DATE,
+      allowNull: true,
+    });
   } catch (error) {
     console.error("Nao foi possivel validar o schema de crm_conversations:", error);
   }
@@ -1189,6 +1206,15 @@ app.listen(PORT, () => {
   } else {
     console.log("Cron do WhatsApp IA desativado. Ative somente apos os testes controlados.");
   }
+
+  cron.schedule("30 * * * *", async () => {
+    try {
+      const removed = await cleanupUnconfirmedRegistrations();
+      if (removed) console.log(`[registration-security] ${removed} cadastro(s) expirado(s) removido(s)`);
+    } catch (error) {
+      console.error("[registration-security] Falha na limpeza automática:", error.message);
+    }
+  });
 
   if (process.env.NODE_ENV === "production" && process.env.API_URL) {
     const keepAliveUrl = `${process.env.API_URL}/health`;

@@ -9,10 +9,12 @@ import Services from "../models/Services.js";
 import Sales from "../models/Sales.js";
 import SaleItem from "../models/SaleItem.js";
 import Product from "../models/Products.js";
+import AppointmentItem from "../models/AppointmentItem.js";
 import AppointmentPayment from "../models/AppointmentPayment.js";
 import Finance from "../models/Finance.js";
 import sequelize from "../database/config.js";
 import { logActivity } from "../service/activityLogger.js";
+import { calculateAppointmentSummary, syncAppointmentFinance } from "../service/appointmentFinance.js";
 const router = express.Router();
 
 function isAppointmentFinanceReference(reference) {
@@ -85,6 +87,39 @@ function getFinanceDateKey(finance = {}) {
   const parsedDate = new Date(sourceValue);
   if (Number.isNaN(parsedDate.getTime())) return "";
   return parsedDate.toISOString().slice(0, 10);
+}
+
+function getSaoPauloTodayString() {
+  return new Intl.DateTimeFormat("sv-SE", {
+    timeZone: "America/Sao_Paulo",
+  }).format(new Date());
+}
+
+function extractDateOnly(value) {
+  if (!value) return "";
+  const raw = String(value);
+  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10);
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return "";
+  return parsed.toISOString().slice(0, 10);
+}
+
+function isDueTodayOrPast(value, fallbackValue = null) {
+  const dueDate = extractDateOnly(value || fallbackValue);
+  if (!dueDate) return true;
+  return dueDate <= getSaoPauloTodayString();
+}
+
+function parseAppointmentPaymentIdFromFinanceReference(reference) {
+  const normalizedReference = String(reference || "").trim();
+  const [prefix, paymentId] = normalizedReference.split(":");
+  return prefix === "appointment_payment" && paymentId ? paymentId : null;
+}
+
+function isAppointmentPaymentSettled(payment) {
+  if (!payment) return false;
+  const status = String(payment.status || "").trim().toLowerCase();
+  return status === "pago" || Boolean(payment.paidAt);
 }
 
 function extractLegacyFinancePetName(description) {
@@ -454,7 +489,7 @@ router.delete("/customers/batch", auth, async (req, res) => {
 // Sumário de dívidas por cliente — uma única query em vez de N*M requisições
 router.get("/customers/debt-summary", auth, async (req, res) => {
   try {
-    const usersId = req.user.establishment;
+    const usersId = req.user.establishment || req.user.id;
 
     // IMPORTANTE: NÃO incluir "pago" aqui. Já vimos casos em que um Finance
     // pago "mais recente" sobrescrevia o pendente original na agregação por
@@ -583,6 +618,57 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
     const appointmentById = new Map(
       appointmentsByFinanceId.map((item) => [String(item.id), item]),
     );
+    const appointmentIdsFromBalanceRefs = [
+      ...new Set(
+        currentAgendaFinances
+          .map((finance) => parseAppointmentIdFromFinanceReference(finance.reference))
+          .filter(Boolean),
+      ),
+    ];
+    const [itemsForBalanceAppointments, paymentsForBalanceAppointments] = appointmentIdsFromBalanceRefs.length
+      ? await Promise.all([
+          AppointmentItem.findAll({
+            where: {
+              usersId,
+              appointmentId: { [Op.in]: appointmentIdsFromBalanceRefs },
+            },
+            order: [["createdAt", "ASC"]],
+          }),
+          AppointmentPayment.findAll({
+            where: {
+              usersId,
+              appointmentId: { [Op.in]: appointmentIdsFromBalanceRefs },
+            },
+            order: [["dueDate", "ASC"], ["createdAt", "ASC"]],
+          }),
+        ])
+      : [[], []];
+    const itemsByAppointmentId = new Map();
+    for (const item of itemsForBalanceAppointments) {
+      const key = String(item.appointmentId || "");
+      if (!itemsByAppointmentId.has(key)) itemsByAppointmentId.set(key, []);
+      itemsByAppointmentId.get(key).push(item);
+    }
+    const paymentsByAppointmentId = new Map();
+    for (const payment of paymentsForBalanceAppointments) {
+      const key = String(payment.appointmentId || "");
+      if (!paymentsByAppointmentId.has(key)) paymentsByAppointmentId.set(key, []);
+      paymentsByAppointmentId.get(key).push(payment);
+    }
+    const balanceSummaryByAppointmentId = new Map();
+    for (const appointmentId of appointmentIdsFromBalanceRefs) {
+      const appointment = appointmentById.get(String(appointmentId));
+      if (!appointment) continue;
+      balanceSummaryByAppointmentId.set(
+        String(appointmentId),
+        await calculateAppointmentSummary(
+          appointment,
+          itemsByAppointmentId.get(String(appointmentId)) || [],
+          paymentsByAppointmentId.get(String(appointmentId)) || [],
+        ),
+      );
+    }
+    const stalePaidBalanceAppointmentIds = new Set();
 
     // PROTEÇÃO ANTI-FANTASMA (refinada).
     //
@@ -682,6 +768,19 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
         const realPayment = paymentsByOwnId.get(String(refPaymentId));
         if (isPaymentAlreadySettled(realPayment)) continue;
       }
+      const balanceAppointmentId = parseAppointmentIdFromFinanceReference(finance.reference);
+      if (balanceAppointmentId) {
+        const balanceSummary = balanceSummaryByAppointmentId.get(String(balanceAppointmentId));
+        if (
+          balanceSummary &&
+          Number(balanceSummary.total || 0) > 0 &&
+          (String(balanceSummary.financialStatus || "").toLowerCase() === "pago" ||
+            Number(balanceSummary.balance || 0) <= 0.009)
+        ) {
+          stalePaidBalanceAppointmentIds.add(String(balanceAppointmentId));
+          continue;
+        }
+      }
 
       if (!summaryMap[customerId]) {
         summaryMap[customerId] = { amount: 0, latestPurchaseDate: "", petNames: [], _seenKeys: new Set() };
@@ -694,6 +793,14 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
       summaryMap[customerId].amount += Number(finance.grossAmount || finance.amount || 0);
       const d = finance.dueDate || finance.date || payment?.dueDate || appointment?.date || "";
       if (d && d > (summaryMap[customerId].latestPurchaseDate || "")) summaryMap[customerId].latestPurchaseDate = d;
+    }
+
+    if (stalePaidBalanceAppointmentIds.size) {
+      Promise.allSettled(
+        [...stalePaidBalanceAppointmentIds].map((appointmentId) =>
+          syncAppointmentFinance(appointmentId),
+        ),
+      ).catch(() => null);
     }
 
     for (const sale of pendingSales) {
@@ -719,6 +826,20 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
       const customerId = String(pet.custumerId || "");
       if (!customerId || !summaryMap[customerId] || !pet.name) continue;
       if (!summaryMap[customerId].petNames.includes(pet.name)) summaryMap[customerId].petNames.push(pet.name);
+    }
+
+    const debtorIds = Object.keys(summaryMap);
+    if (debtorIds.length) {
+      const debtors = await Custumers.findAll({
+        where: { id: { [Op.in]: debtorIds }, usersId },
+        attributes: ["id", "name", "phone"],
+      });
+      for (const customer of debtors) {
+        const key = String(customer.id);
+        if (!summaryMap[key]) continue;
+        summaryMap[key].customerName = customer.name || "Tutor sem nome";
+        summaryMap[key].phone = customer.phone || "";
+      }
     }
 
     // Remove _seenKeys (Set interno de dedup) antes de responder.
@@ -748,22 +869,25 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
 
 router.get("/customers/:id/pending-finances", auth, async (req, res) => {
   try {
-    const usersId = req.user.establishment;
+    const usersId = req.user.establishment || req.user.id;
     const customerId = String(req.params.id || "").trim();
     if (!customerId) {
       return res.status(400).json({ message: "customerId é obrigatório" });
     }
 
-    // 1) Todos Finance pendente/atrasado do tenant
-    const finances = await Finance.findAll({
+    // 1) Todos Finance pendente/atrasado do tenant. Depois aplicamos a mesma
+    // limpeza usada em /customers/debt-summary para o modal nunca mostrar
+    // pendencias que a busca principal ja descartou como duplicadas/legadas.
+    const rawFinances = await Finance.findAll({
       where: {
         usersId,
         type: "entrada",
         status: { [Op.in]: ["pendente", "atrasado"] },
       },
-      attributes: ["id", "reference", "description", "category", "status", "amount", "grossAmount", "dueDate", "date"],
+      attributes: ["id", "reference", "description", "category", "subCategory", "status", "amount", "grossAmount", "dueDate", "date", "createdAt", "updatedAt"],
       order: [["dueDate", "ASC"], ["id", "ASC"]],
     });
+    const finances = await keepOnlyCurrentAgendaFinanceRows(rawFinances, usersId);
 
     if (!finances.length) {
       return res.status(200).json({ message: "Sem pendências", data: { customerId, items: [], total: 0 } });
@@ -784,7 +908,7 @@ router.get("/customers/:id/pending-finances", auth, async (req, res) => {
     const paymentIds = [...new Set(finances.map((f) => parsePid(f.reference)).filter(Boolean))];
     const payments = paymentIds.length
       ? await AppointmentPayment.findAll({
-          where: { id: { [Op.in]: paymentIds } },
+          where: { usersId, id: { [Op.in]: paymentIds } },
           attributes: ["id", "appointmentId", "status", "paidAt"],
         })
       : [];
@@ -823,6 +947,7 @@ router.get("/customers/:id/pending-finances", auth, async (req, res) => {
       return parsed.toISOString().slice(0, 10);
     };
 
+    const seenKeys = new Set();
     const items = [];
     for (const f of finances) {
       let resolvedCustomerId = null;
@@ -866,8 +991,16 @@ router.get("/customers/:id/pending-finances", auth, async (req, res) => {
 
       if (resolvedCustomerId !== customerId) continue;
 
-      const dueDateStr = extractDateOnly(f.dueDate);
+      const dueDateStr = extractDateOnly(f.dueDate || appointmentDate || f.date);
       if (dueDateStr && dueDateStr > todayStr) continue; // futuro não é pendência
+
+      const dedupKey = [
+        String(f.reference || "").trim().toLowerCase(),
+        dueDateStr,
+        Number(f.grossAmount || f.amount || 0).toFixed(2),
+      ].join("|");
+      if (seenKeys.has(dedupKey)) continue;
+      seenKeys.add(dedupKey);
 
       items.push({
         financeId: f.id,
@@ -897,8 +1030,9 @@ router.get("/customers/:id/pending-finances", auth, async (req, res) => {
 
 router.post("/customers/:id/settle-finances", auth, async (req, res) => {
   const t = await sequelize.transaction();
+  const appointmentIdsToSync = new Set();
   try {
-    const usersId = req.user.establishment;
+    const usersId = req.user.establishment || req.user.id;
     const customerId = String(req.params.id || "").trim();
     const { financeIds = [], paymentMethod = "Dinheiro", paidAt = null, notes = "" } = req.body || {};
 
@@ -933,6 +1067,15 @@ router.post("/customers/:id/settle-finances", auth, async (req, res) => {
       return res.status(404).json({ message: "Nenhum Finance pendente encontrado com esses ids" });
     }
 
+    const parseAppointmentPaymentId = (reference) => {
+      const [prefix, refId] = String(reference || "").trim().split(":");
+      return prefix === "appointment_payment" && refId ? refId : null;
+    };
+    const parseAppointmentId = (reference) => {
+      const [prefix, refId] = String(reference || "").trim().split(":");
+      return (prefix === "appointment_balance" || prefix === "appointment_free") && refId ? refId : null;
+    };
+
     // 2) Para cada Finance, identifica e atualiza o pago.
     let settledCount = 0;
     let settledAmount = 0;
@@ -941,6 +1084,57 @@ router.post("/customers/:id/settle-finances", auth, async (req, res) => {
     const settledFinanceIds = [];
 
     for (const f of finances) {
+      const referenceStr = String(f.reference || "").trim();
+      const [prefix, refId] = referenceStr.split(":");
+      let resolvedAppointment = null;
+      let resolvedPayment = null;
+      let resolvedSale = null;
+
+      const paymentId = parseAppointmentPaymentId(referenceStr);
+      if (paymentId) {
+        resolvedPayment = await AppointmentPayment.findOne({
+          where: { id: paymentId, usersId },
+          transaction: t,
+        });
+        if (resolvedPayment) {
+          resolvedAppointment = await Appointment.findOne({
+            where: { id: resolvedPayment.appointmentId, usersId, customerId },
+            transaction: t,
+          });
+        }
+      }
+
+      const appointmentId = parseAppointmentId(referenceStr);
+      if (!resolvedAppointment && appointmentId) {
+        resolvedAppointment = await Appointment.findOne({
+          where: { id: appointmentId, usersId, customerId },
+          transaction: t,
+        });
+      }
+
+      if (referenceStr && !referenceStr.startsWith("appointment")) {
+        resolvedSale = await Sales.findOne({
+          where: { id: referenceStr, usersId, custumerId: customerId },
+          transaction: t,
+        });
+      }
+
+      if (referenceStr.startsWith("appointment") && !resolvedAppointment) {
+        continue;
+      }
+
+      if (!referenceStr.startsWith("appointment") && !resolvedSale) {
+        continue;
+      }
+
+      if (resolvedPayment && isAppointmentPaymentSettled(resolvedPayment)) {
+        continue;
+      }
+
+      if (!isDueTodayOrPast(f.dueDate || f.date, resolvedAppointment?.date)) {
+        continue;
+      }
+
       // Atualiza Finance
       await f.update(
         {
@@ -956,9 +1150,11 @@ router.post("/customers/:id/settle-finances", auth, async (req, res) => {
       settledCount += 1;
 
       // Se for parcela de agendamento, atualiza AppointmentPayment também
-      const [prefix, refId] = String(f.reference || "").trim().split(":");
       if (prefix === "appointment_payment" && refId) {
-        const payment = await AppointmentPayment.findByPk(refId, { transaction: t });
+        const payment = resolvedPayment || await AppointmentPayment.findOne({
+          where: { id: refId, usersId },
+          transaction: t,
+        });
         if (payment) {
           await payment.update(
             {
@@ -969,24 +1165,70 @@ router.post("/customers/:id/settle-finances", auth, async (req, res) => {
             { transaction: t },
           );
           settledPaymentIds.push(payment.id);
+          appointmentIdsToSync.add(String(payment.appointmentId));
         }
+      }
+
+      // Se for saldo de agendamento, transforma a baixa em uma linha real de
+      // pagamento vinculada ao mesmo Finance. O sync converte a referencia
+      // appointment_balance:* para appointment_payment:* e zera o saldo do
+      // agendamento em toda a agenda/historico.
+      if ((prefix === "appointment_balance" || prefix === "appointment_free") && resolvedAppointment) {
+        const amount = Number(f.grossAmount || f.amount || 0) || 0;
+        const existingPayment = await AppointmentPayment.findOne({
+          where: {
+            usersId,
+            financeId: f.id,
+          },
+          transaction: t,
+        });
+        const paymentPayload = {
+          appointmentId: resolvedAppointment.id,
+          usersId,
+          dueDate: paidAtDate.toISOString().slice(0, 10),
+          paymentMethod: paymentMethod || f.paymentMethod || "Dinheiro",
+          details: notes || f.notes || "Baixa registrada em lote",
+          amount,
+          grossAmount: amount,
+          feePercentage: Number(f.feePercentage || 0) || 0,
+          feeAmount: Number(f.feeAmount || 0) || 0,
+          netAmount: Number(f.netAmount || f.grossAmount || f.amount || 0) || amount,
+          status: "pago",
+          paidAt: paidAtDate,
+          financeId: f.id,
+          createdBy: f.createdBy || req.user.id,
+        };
+
+        const payment = existingPayment
+          ? await existingPayment.update(paymentPayload, { transaction: t })
+          : await AppointmentPayment.create(paymentPayload, { transaction: t });
+
+        settledPaymentIds.push(payment.id);
+        appointmentIdsToSync.add(String(resolvedAppointment.id));
       }
 
       // Se for venda, atualiza Sales
-      const referenceStr = String(f.reference || "").trim();
-      if (referenceStr && !referenceStr.startsWith("appointment")) {
-        const sale = await Sales.findOne({
-          where: { id: referenceStr, usersId, custumerId: customerId },
-          transaction: t,
-        });
-        if (sale) {
-          await sale.update({ status: "pago" }, { transaction: t });
-          settledSaleIds.push(sale.id);
-        }
+      if (resolvedSale) {
+        await resolvedSale.update({ status: "pago" }, { transaction: t });
+        settledSaleIds.push(resolvedSale.id);
       }
     }
 
+    if (!settledCount) {
+      await t.rollback();
+      return res.status(404).json({ message: "Nenhuma pendência selecionada pertence a este cliente" });
+    }
+
     await t.commit();
+
+    for (const appointmentId of appointmentIdsToSync) {
+      try {
+        await syncAppointmentFinance(appointmentId);
+      } catch (syncError) {
+        console.error("Erro ao ressincronizar baixa em lote:", appointmentId, syncError);
+      }
+    }
+
     return res.status(200).json({
       message: "Baixa em lote concluída",
       data: {

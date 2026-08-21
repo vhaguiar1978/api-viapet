@@ -64,6 +64,26 @@ const CrmConversationMessage = sequelize.define(
       type: DataTypes.STRING,
       allowNull: true,
     },
+    whatsappMessageId: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    senderType: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    role: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    content: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    },
+    mediaType: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
     status: {
       type: DataTypes.STRING,
       allowNull: false,
@@ -86,6 +106,11 @@ const CrmConversationMessage = sequelize.define(
       allowNull: true,
     },
     payload: {
+      type: DataTypes.JSON,
+      allowNull: false,
+      defaultValue: {},
+    },
+    metadata: {
       type: DataTypes.JSON,
       allowNull: false,
       defaultValue: {},

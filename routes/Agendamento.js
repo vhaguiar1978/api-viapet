@@ -1229,10 +1229,11 @@ router.put("/appointments/:id", auth, async (req, res) => {
 router.get("/appointments/customer/:customerId", auth, async (req, res) => {
   try {
     const { customerId } = req.params;
+    const usersId = req.user.establishment || req.user.id;
 
     const appointments = await Appointment.findAll({
       where: {
-        usersId: req.user.establishment,
+        usersId,
         customerId,
       },
       include: [

@@ -5,6 +5,27 @@ const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const DEFAULT_MODEL = process.env.OPENAI_MODEL || "gpt-5.5";
 const DEFAULT_TIMEOUT_MS = 30000;
 
+function supportsTemperature(model) {
+  const normalized = String(model || "").toLowerCase();
+  if (!normalized) return true;
+  return !(
+    normalized.startsWith("gpt-5") ||
+    normalized.startsWith("o1") ||
+    normalized.startsWith("o3") ||
+    normalized.startsWith("o4")
+  );
+}
+
+function supportsReasoningEffort(model) {
+  const normalized = String(model || "").toLowerCase();
+  return (
+    normalized.startsWith("gpt-5") ||
+    normalized.startsWith("o1") ||
+    normalized.startsWith("o3") ||
+    normalized.startsWith("o4")
+  );
+}
+
 function toResponsesInput(messages = []) {
   return messages
     .filter((message) => message && message.content)
@@ -50,10 +71,13 @@ export async function openaiChat({
     model,
     input,
     max_output_tokens: maxTokens,
-    reasoning: { effort: reasoningEffort },
   };
 
-  if (Number.isFinite(Number(temperature))) {
+  if (supportsReasoningEffort(model) && reasoningEffort) {
+    body.reasoning = { effort: reasoningEffort };
+  }
+
+  if (supportsTemperature(model) && Number.isFinite(Number(temperature))) {
     body.temperature = temperature;
   }
 

@@ -168,6 +168,16 @@ router.post("/login", async (req, res) => {
       return res.status(401).json({ message: "Email ou senha invalidos" });
     }
 
+    if (user.registrationStatus && user.registrationStatus !== "cadastro_ativo") {
+      await registerLoginHistory(user.id, req, "failed");
+      return res.status(403).json({
+        message: user.registrationStatus === "cadastro_bloqueado" ? "Cadastro bloqueado. Fale com o suporte." : "Confirme seu e-mail e telefone antes de entrar.",
+        code: "REGISTRATION_NOT_ACTIVE",
+        registrationId: user.id,
+        registrationStatus: user.registrationStatus,
+      });
+    }
+
     if (!user.status) {
       logActivity({
         req,

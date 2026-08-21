@@ -27,6 +27,31 @@ const Services = sequelize.define(
     category: {
       type: DataTypes.STRING,
     },
+    requiresGroomer: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
+    },
+    blocksParallelServices: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
+    },
+    maxParallelQuantity: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      defaultValue: 1,
+    },
+    aiCanSchedule: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: true,
+    },
+    aiCanOffer: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: true,
+    },
     observation: {
       type: DataTypes.TEXT,
     },

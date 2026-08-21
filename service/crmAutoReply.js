@@ -13,6 +13,9 @@ import { groqChat, GROQ_DEFAULT_MODEL, GROQ_SMART_MODEL } from "./groqClient.js"
 import { geminiChat, GEMINI_DEFAULT_MODEL } from "./geminiClient.js";
 import { openaiChat, OPENAI_DEFAULT_MODEL } from "./openaiClient.js";
 import { analyzeCrmAiReply } from "./crmAiQuality.js";
+import { evaluateCrmAiActionPolicy } from "./crmAiActionPolicy.js";
+import { checkAiPermission } from "./aiPermissionService.js";
+import { assertAiUsageAllowed, logAiUsage } from "./aiUsageLimits.js";
 
 // Cooldown global por usuario quando Groq retornar 413 (TPM excedido).
 // Map<usersId, timestampUntil>. TPM (tokens per minute) se renova a cada 60s,
@@ -180,6 +183,60 @@ function detectHora(text) {
   const m4 = n.match(/\b(\d{1,2})\s+horas?\b/);
   if (m4) return `${m4[1]}:00`;
   return null;
+}
+
+function isShortScheduleContinuation(text) {
+  const n = normalizeSearchable(text).trim();
+  if (!n || n.length > 40) return false;
+  if (detectData(n) || detectPeriodoOnly(n) || detectHora(n)) return true;
+  return /^(sim|isso|pode|ok|certo|confirmo|confirmar|fechado|combinado)$/.test(n);
+}
+
+function hasSchedulePromptFromAssistant(text) {
+  const n = normalizeSearchable(text);
+  return (
+    /\bqual\s+dia\b/.test(n) ||
+    /\bpra\s+qual\s+dia\b/.test(n) ||
+    /\bque\s+dia\b/.test(n) ||
+    /\bqual\s+horario\b/.test(n) ||
+    /\bque\s+horario\b/.test(n) ||
+    /\bmanha\s+ou\s+(a\s+)?tarde\b/.test(n) ||
+    /\bagendar\b|\bmarcar\b/.test(n)
+  );
+}
+
+function buildScheduleContextQuestion(question, history = []) {
+  const text = String(question || "").trim();
+  if (!isShortScheduleContinuation(text)) return text;
+
+  const previous = (Array.isArray(history) ? history : [])
+    .filter((message) => message && typeof message.content === "string")
+    .map((message) => ({
+      role: message.role,
+      content: String(message.content || "").trim(),
+    }))
+    .filter((message) => message.content && message.content !== text);
+
+  const hasAssistantPrompt = previous
+    .slice(-4)
+    .some((message) => message.role === "assistant" && hasSchedulePromptFromAssistant(message.content));
+
+  const previousUserSchedule = previous
+    .filter((message) => message.role === "user")
+    .reverse()
+    .find((message) => {
+      const content = message.content;
+      return (
+        detectIntent(content) === "agendar" ||
+        isScheduleAvailabilityText(content) ||
+        Boolean(detectServico(content))
+      );
+    });
+
+  if (!previousUserSchedule && !hasAssistantPrompt) return text;
+
+  const base = previousUserSchedule?.content || "quero agendar";
+  return `${base} ${text}`.replace(/\s+/g, " ").trim();
 }
 
 function formatServicoLabel(servico) {
@@ -510,7 +567,7 @@ function buildIndefinidoReply({ greeting, services, history, pet, customer }) {
 // ─── Builder principal: roteia para o construtor certo ───────────────────
 
 function buildReply({ question, services, settings, customer, pet, history, identifyAsAi, availableSlots = null }) {
-  const text = String(question || "");
+  const text = buildScheduleContextQuestion(question, history);
   const greeting = pickGreeting(customer?.name);
   const intent = detectIntent(text);
 
@@ -1488,8 +1545,106 @@ function parseAiReply(rawContent) {
 }
 
 // Executa a acao retornada pela IA (criar agendamento, etc)
-async function executeAiAction({ action, usersId, conversation, customer, pet, pets = [], aiControl }) {
+async function executeAiAction({
+  action,
+  usersId,
+  conversation,
+  customer,
+  pet,
+  pets = [],
+  aiControl,
+  tutorMessage = "",
+}) {
   if (!action || !action.type) return { executed: false, reason: "no_action" };
+
+  const requestedPetName = String(action.petName || "").trim();
+  const existingPetByName = requestedPetName
+    ? pets.some(
+        (item) =>
+          normalizeSearchable(item?.name) === normalizeSearchable(requestedPetName),
+      )
+    : false;
+  const policy = evaluateCrmAiActionPolicy({
+    control: aiControl,
+    actionType: action.type,
+    tutorMessage,
+    payload: {
+      isNewCustomer: !customer?.id,
+      isNewPet: Boolean(requestedPetName && !existingPetByName),
+    },
+  });
+
+  if (!policy.allowed) {
+    return {
+      executed: false,
+      reason: "policy_blocked",
+      message: policy.reasons[0] || "Essa acao nao esta liberada para a IA.",
+      policy,
+    };
+  }
+
+  const calendarPermissionAction = {
+    schedule_appointment: "appointment_create",
+    reschedule_appointment: "appointment_reschedule",
+    cancel_appointment: "appointment_cancel",
+  }[action.type];
+  if (calendarPermissionAction) {
+    const permission = await checkAiPermission(usersId, calendarPermissionAction, {
+      payload: { ...action, lastCustomerMessage: tutorMessage },
+      humanApproved: action.humanApproved === true,
+    });
+    if (!permission.executable) {
+      return {
+        executed: false,
+        reason: permission.reason,
+        message: permission.reason === "customer_confirmation_required"
+          ? "Preciso da confirmacao clara do tutor antes de alterar a agenda."
+          : permission.reason === "human_approval_required"
+            ? "Essa alteracao precisa de aprovacao humana."
+            : "Essa alteracao da agenda nao esta liberada para a IA.",
+        permission,
+      };
+    }
+  }
+
+  if (policy.requiresApproval) {
+    try {
+      await CrmAiActionLog.create({
+        usersId,
+        conversationId: conversation?.id || null,
+        customerId: customer?.id || null,
+        petId: pet?.id || null,
+        authorUserId: null,
+        actionType: action.type,
+        status: "waiting_approval",
+        summary: "Acao do WhatsApp aguardando aprovacao",
+        assistantReply: "",
+        approvalRequired: true,
+        approvedByHuman: false,
+        executed: false,
+        payload: {
+          action,
+          policy,
+          tutorMessage: String(tutorMessage || "").slice(0, 500),
+          source: "whatsapp_auto_reply",
+        },
+      });
+    } catch (err) {
+      console.warn("[CrmAutoReply] Falha ao registrar aprovacao pendente:", err.message);
+    }
+
+    return {
+      executed: false,
+      reason: policy.tutorConfirmed
+        ? "human_approval_required"
+        : "tutor_confirmation_required",
+      message: policy.tutorConfirmed
+        ? "Perfeito. Deixei a solicitacao pronta e uma pessoa da equipe vai aprovar antes de concluir."
+        : "Antes de concluir, preciso da sua confirmacao. Posso seguir com essa alteracao?",
+      pendingApproval: true,
+      policy,
+    };
+  }
 
   if (action.type === "create_appointment") {
     if (!aiControl?.capabilities?.createAppointment) {
@@ -1505,7 +1660,7 @@ async function executeAiAction({ action, usersId, conversation, customer, pet, p
     //                          4) pet (single) do contexto
     let chosenPetId = null;
     const actionPetId = String(action.petId || "").trim();
-    const actionPetName = String(action.petName || "").trim();
+    const actionPetName = requestedPetName;
 
     if (actionPetId) {
       const found = pets.find((p) => String(p.id) === actionPetId);
@@ -1903,7 +2058,23 @@ async function canAutoReply(usersId) {
     console.warn(`${tag} BLOQUEIO: CrmAiSubscription ${sub ? `status="${sub.status}"` : "inexistente"} e trial principal inativo. Renove a assinatura da IA.`);
     return { ok: false, reason: "no_active_subscription", settings };
   }
-  return { ok: true, settings, aiControl };
+  try {
+    const aiUsage = await assertAiUsageAllowed(usersId);
+    return { ok: true, settings, aiControl, aiUsage };
+  } catch (error) {
+    if (error.code === "ai_monthly_limit_reached") {
+      console.warn(
+        `${tag} BLOQUEIO: limite mensal de IA atingido (${error.usage?.used}/${error.usage?.limit}).`,
+      );
+      return {
+        ok: false,
+        reason: "ai_monthly_limit_reached",
+        settings,
+        aiUsage: error.usage,
+      };
+    }
+    throw error;
+  }
 }
 
 export async function generateAutoReply({ usersId, conversation, customer, pet, pets = [], body }) {
@@ -2189,6 +2360,7 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
           pet,
           pets,
           aiControl: check.aiControl,
+          tutorMessage: body,
         });
         console.log(`[CrmAutoReply] Action OpenAI: ${JSON.stringify(executedAction)}`);
         if (executedAction.message && !executedAction.executed) {
@@ -2236,6 +2408,7 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
           pet,
           pets,
           aiControl: check.aiControl,
+          tutorMessage: body,
         });
         console.log(`[CrmAutoReply] Action: ${JSON.stringify(executedAction)}`);
         // Se a acao foi executada, mantem o reply (a IA ja confirmou no texto)
@@ -2330,6 +2503,7 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
           pet,
           pets,
           aiControl: check.aiControl,
+          tutorMessage: body,
         });
         if (executedAction.message && !executedAction.executed) {
           reply = executedAction.message;
@@ -2373,8 +2547,9 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
 
   if (replyQuality.shouldRepair) {
     const histForRepair = await lazyHistory();
+    const contextualBody = buildScheduleContextQuestion(body, histForRepair);
     const guarded = applyReplyQualityGuard({
-      question: body,
+      question: contextualBody,
       reply: finalReply,
       services,
       settings: check.settings,
@@ -2409,13 +2584,28 @@ export async function generateAutoReply({ usersId, conversation, customer, pet, 
       executed: true,
       payload: {
         question: String(body || "").slice(0, 500),
-        intent: detectIntent(body),
+        intent: detectIntent(buildScheduleContextQuestion(body, history || [])),
         aiSource,
         quality: replyQuality,
       },
     });
   } catch (err) {
     console.warn("[CrmAutoReply] Falha ao logar acao:", err.message);
+  }
+
+  try {
+    await logAiUsage({
+      organizationId: usersId,
+      conversationId: conversation?.id || null,
+      userId: customer?.id || null,
+      model: aiSource,
+      source: aiSource,
+      promptText: body,
+      completionText: finalReply,
+      success: true,
+    });
+  } catch (err) {
+    console.warn("[CrmAutoReply] Falha ao logar consumo da IA:", err.message);
   }
 
   // Fire-and-forget: atualiza resumo da conversa se ja passou de 20 mensagens.
@@ -2471,6 +2661,7 @@ export async function testAiReply({ usersId, messages = [] }) {
   }
 
   const lastUserBody = cleanMessages[cleanMessages.length - 1]?.content || "";
+  const contextualLastUserBody = buildScheduleContextQuestion(lastUserBody, cleanMessages.slice(0, -1));
   let availableSlots = null;
   try {
     availableSlots = await loadAvailableSlotsForAi({
@@ -2498,7 +2689,7 @@ export async function testAiReply({ usersId, messages = [] }) {
 
   const providerMessages = [{ role: "system", content: systemPrompt }, ...cleanMessages];
   const useSmart = shouldUseSmartModel({
-    body: lastUserBody,
+    body: contextualLastUserBody,
     aiControl,
     history: cleanMessages,
     customer: null,
@@ -2513,7 +2704,7 @@ export async function testAiReply({ usersId, messages = [] }) {
 
   const buildTestResult = ({ reply, model, provider, warning = "" }) => {
     const guarded = applyReplyQualityGuard({
-      question: lastUserBody,
+      question: contextualLastUserBody,
       reply,
       services,
       settings,
@@ -2536,9 +2727,9 @@ export async function testAiReply({ usersId, messages = [] }) {
     };
   };
 
-  if (isScheduleAvailabilityText(lastUserBody)) {
+  if (isScheduleAvailabilityText(contextualLastUserBody) || contextualLastUserBody !== lastUserBody) {
     const reply = buildReply({
-      question: lastUserBody,
+      question: contextualLastUserBody,
       services,
       settings,
       customer: null,
@@ -2616,7 +2807,7 @@ export async function testAiReply({ usersId, messages = [] }) {
   }
 
   const reply = buildReply({
-    question: lastUserBody,
+    question: contextualLastUserBody,
     services,
     settings,
     customer: null,
