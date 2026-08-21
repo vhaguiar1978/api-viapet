@@ -1383,8 +1383,8 @@ router.post("/finance/close-cash", authenticate, async (req, res) => {
 
     // Usa a mesma data de competencia da abertura. Isso garante que o valor
     // inicial continue sendo reconhecido mesmo sem outras movimentacoes.
-    const startDateTime = new Date(`${referenceDate}T00:00:00.000Z`);
-    const endDateTime = new Date(`${referenceDate}T23:59:59.999Z`);
+    const startDateTime = new Date(`${referenceDate}T00:00:00.000-03:00`);
+    const endDateTime = new Date(`${referenceDate}T23:59:59.999-03:00`);
 
     const openingEntry = await Finance.findOne({
       where: {
