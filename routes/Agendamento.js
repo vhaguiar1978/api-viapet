@@ -22,6 +22,8 @@ import SaleItems from "../models/SaleItem.js";
 import Products from "../models/Products.js";
 import sequelize from "../database/config.js";
 import Drivers from "../models/Drivers.js";
+import DriverChecklistShare from "../models/DriverChecklistShare.js";
+import crypto from "crypto";
 import {
   hydrateAppointmentsWithFinancialDetails,
   syncAppointmentFinance,
@@ -93,6 +95,36 @@ function decodeDriverChecklistToken(token) {
   }
 }
 
+function getDriverChecklistDateKey(value) {
+  const raw = String(value || "");
+  const directMatch = raw.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (directMatch) return directMatch[1];
+  const parsed = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(parsed.getTime()) ? "" : parsed.toISOString().slice(0, 10);
+}
+
+async function resolveDriverChecklistToken(token) {
+  const normalizedToken = String(token || "").trim();
+  if (!normalizedToken) return null;
+
+  const legacyPayload = decodeDriverChecklistToken(normalizedToken);
+  if (legacyPayload?.rows?.length) return legacyPayload;
+
+  const share = await DriverChecklistShare.findOne({
+    where: {
+      token: normalizedToken,
+      expiresAt: { [Op.gt]: new Date() },
+    },
+  });
+  if (!share) return null;
+
+  return {
+    token: share.token,
+    date: String(share.date || "").slice(0, 10),
+    rows: Array.isArray(share.rows) ? share.rows : [],
+  };
+}
+
 function normalizeAgendaTypeText(value) {
   return String(value || "")
     .normalize("NFD")
@@ -131,9 +163,27 @@ const SHARED_DRIVER_CHECKLIST_STATUSES = [
   "Realizado",
 ];
 
+function sanitizeDriverChecklistRows(rows, allowedIds) {
+  return (Array.isArray(rows) ? rows : [])
+    .filter((row) => allowedIds.has(String(row?.id || "")))
+    .slice(0, 200)
+    .map((row) => ({
+      id: String(row.id),
+      hour: String(row.hour || "").slice(0, 8),
+      tutor: String(row.tutor || "").slice(0, 180),
+      pet: String(row.pet || "").slice(0, 120),
+      address: String(row.address || "").slice(0, 500),
+      service: String(row.service || "").slice(0, 300),
+      note: String(row.note || "").slice(0, 500),
+      completed: Boolean(row.completed || row.deliveredChecked),
+      driverStatus: String(row.driverStatus || row.status || "").slice(0, 40),
+      status: String(row.driverStatus || row.status || "").slice(0, 40),
+    }));
+}
+
 async function updateSharedDriverChecklistStatus(req, res, nextStatus) {
   const { id } = req.params;
-  const checklist = decodeDriverChecklistToken(req.body?.token);
+  const checklist = await resolveDriverChecklistToken(req.body?.token);
 
   if (!checklist || !checklist.rows.some((row) => String(row?.id) === String(id))) {
     return res.status(403).json({
@@ -154,7 +204,7 @@ async function updateSharedDriverChecklistStatus(req, res, nextStatus) {
     });
   }
 
-  const appointmentDate = String(appointment.date || "").slice(0, 10);
+  const appointmentDate = getDriverChecklistDateKey(appointment.date);
   if (checklist.date && appointmentDate && checklist.date !== appointmentDate) {
     return res.status(409).json({
       message: "Esse servico nao pertence a data desta lista.",
@@ -162,6 +212,20 @@ async function updateSharedDriverChecklistStatus(req, res, nextStatus) {
   }
 
   await appointment.update({ driver_status: nextStatus });
+
+  if (checklist.token) {
+    const nextRows = checklist.rows.map((row) =>
+      String(row?.id) === String(id)
+        ? {
+            ...row,
+            driverStatus: nextStatus,
+            status: nextStatus,
+            completed: nextStatus === "Realizado",
+          }
+        : row,
+    );
+    await DriverChecklistShare.update({ rows: nextRows }, { where: { token: checklist.token } });
+  }
 
   if (["Buscar pet", "Entregar pet"].includes(nextStatus)) {
     try {
@@ -855,6 +919,79 @@ router.patch("/appointments/:id/status", auth, async (req, res) => {
       message: "Erro ao atualizar status do agendamento",
       error: error.message,
     });
+  }
+});
+
+// Cria ou atualiza um link curto e seguro para a lista do motorista.
+router.post("/appointments/driver-checklist/shares", auth, async (req, res) => {
+  try {
+    const date = String(req.body?.date || "").slice(0, 10);
+    const requestedRows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+    const requestedIds = [...new Set(requestedRows.map((row) => String(row?.id || "")).filter(Boolean))];
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !requestedIds.length) {
+      return res.status(400).json({ message: "Informe a data e os agendamentos da lista do motorista." });
+    }
+
+    const appointments = await Appointment.findAll({
+      attributes: ["id", "date"],
+      where: {
+        id: { [Op.in]: requestedIds },
+        usersId: req.user.establishment,
+      },
+    });
+    const allowedIds = new Set(
+      appointments
+        .filter((appointment) => getDriverChecklistDateKey(appointment.date) === date)
+        .map((appointment) => String(appointment.id)),
+    );
+    const rows = sanitizeDriverChecklistRows(requestedRows, allowedIds);
+    if (!rows.length) {
+      return res.status(400).json({ message: "Nenhum agendamento valido foi encontrado para essa data." });
+    }
+
+    const expiresAt = new Date(`${date}T23:59:59.999Z`);
+    expiresAt.setUTCDate(expiresAt.getUTCDate() + 30);
+    let share = await DriverChecklistShare.findOne({
+      where: {
+        usersId: req.user.establishment,
+        date,
+        expiresAt: { [Op.gt]: new Date() },
+      },
+      order: [["updatedAt", "DESC"]],
+    });
+
+    if (share) {
+      await share.update({ rows, expiresAt });
+    } else {
+      share = await DriverChecklistShare.create({
+        token: crypto.randomBytes(8).toString("base64url"),
+        usersId: req.user.establishment,
+        date,
+        rows,
+        expiresAt,
+      });
+    }
+
+    return res.status(200).json({
+      data: { token: share.token, date: share.date, expiresAt: share.expiresAt },
+    });
+  } catch (error) {
+    console.error("Erro ao criar link curto do motorista:", error);
+    return res.status(500).json({ message: "Nao foi possivel criar o link do motorista." });
+  }
+});
+
+router.get("/appointments/driver-checklist/shares/:token", async (req, res) => {
+  try {
+    const checklist = await resolveDriverChecklistToken(req.params.token);
+    if (!checklist) {
+      return res.status(404).json({ message: "Link do motorista invalido ou expirado." });
+    }
+    return res.status(200).json({ data: checklist });
+  } catch (error) {
+    console.error("Erro ao abrir link curto do motorista:", error);
+    return res.status(500).json({ message: "Nao foi possivel abrir a lista do motorista." });
   }
 });
 
