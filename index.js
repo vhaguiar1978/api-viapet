@@ -156,6 +156,7 @@ app.use(attachActivityHelper);
 app.use(loginRouter);
 app.use(loginFuncRouter);
 app.use(registerRouter);
+app.use(sellersRouter);
 app.use(registerFuncRouter);
 app.use(resetPassTokenRouter);
 app.use(resetPassRouter);
@@ -211,7 +212,6 @@ app.use(adminAlertsRouter);
 app.use(adminTutorialsRouter);
 app.use(adminWhatsappIaRouter);
 app.use(adminRegistrationSecurityRouter);
-app.use(sellersRouter);
 // Error handler do activity logger — DEVE vir depois das rotas
 app.use(activityErrorHandler);
 // Configure as associações antes de sincronizar
