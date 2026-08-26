@@ -68,6 +68,7 @@ import adminTutorialsRouter from "./routes/adminTutorials.js";
 import adminWhatsappIaRouter from "./routes/adminWhatsappIa.js";
 import adminRegistrationSecurityRouter, { cleanupUnconfirmedRegistrations } from "./routes/adminRegistrationSecurity.js";
 import sellersRouter from "./routes/sellers.js";
+import transportRouter from "./routes/transport.js";
 import { processDueInactiveAutomations, scanInactiveUsers } from "./service/adminWhatsappIa.js";
 import alertEngine from "./service/alertEngine.js";
 import {
@@ -174,6 +175,7 @@ app.use(customerRouter);
 app.use(petRouter);
 app.use(salesRouter);
 app.use(appointmentRouter);
+app.use(transportRouter);
 app.use(adminRouter);
 app.use(whatsappRouter);
 app.use(whatsappOfficialRouter);

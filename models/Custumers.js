@@ -74,6 +74,12 @@ const Custumers = sequelize.define(
       type: DataTypes.DATE,
       allowNull: true,
     },
+    latitude: DataTypes.DECIMAL(10, 7),
+    longitude: DataTypes.DECIMAL(10, 7),
+    geocodedAt: DataTypes.DATE,
+    geocodeStatus: { type: DataTypes.STRING, defaultValue: "pending" },
+    logisticsRegionId: DataTypes.UUID,
+    taxiDogNotifications: { type: DataTypes.JSON, defaultValue: {} },
   },
   {
     timestamps: true,

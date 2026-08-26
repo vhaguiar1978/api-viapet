@@ -23,6 +23,10 @@ import Products from "../models/Products.js";
 import sequelize from "../database/config.js";
 import Drivers from "../models/Drivers.js";
 import DriverChecklistShare from "../models/DriverChecklistShare.js";
+import TransportJob from "../models/TransportJob.js";
+import TransportEvent from "../models/TransportEvent.js";
+import { sendTransportCustomerMessage } from "../service/transportWhatsapp.js";
+import TransportMessageLog from "../models/TransportMessageLog.js";
 import crypto from "crypto";
 import {
   hydrateAppointmentsWithFinancialDetails,
@@ -161,6 +165,8 @@ const SHARED_DRIVER_CHECKLIST_STATUSES = [
   "Entregar pet",
   "Sem status",
   "Realizado",
+  "pickup_started", "arrived_pickup", "pet_collected", "at_shop", "ready_delivery",
+  "delivery_started", "arrived_delivery", "delivered", "cancelled",
 ];
 
 function sanitizeDriverChecklistRows(rows, allowedIds) {
@@ -213,6 +219,22 @@ async function updateSharedDriverChecklistStatus(req, res, nextStatus) {
 
   await appointment.update({ driver_status: nextStatus });
 
+  const transportJob = await TransportJob.findOne({ where: { appointmentId: id } });
+  if (transportJob) {
+    const previousTransportStatus = transportJob.status;
+    await transportJob.update({ status: nextStatus });
+    await TransportEvent.create({
+      usersId: transportJob.usersId,
+      transportJobId: transportJob.id,
+      appointmentId: id,
+      eventType: nextStatus,
+      previousStatus: previousTransportStatus,
+      newStatus: nextStatus,
+      actorName: "Motorista",
+      metadata: { sharedChecklist: true, sendWhatsapp: Boolean(req.body?.sendWhatsapp) },
+    });
+  }
+
   if (checklist.token) {
     const nextRows = checklist.rows.map((row) =>
       String(row?.id) === String(id)
@@ -227,9 +249,17 @@ async function updateSharedDriverChecklistStatus(req, res, nextStatus) {
     await DriverChecklistShare.update({ rows: nextRows }, { where: { token: checklist.token } });
   }
 
-  if (["Buscar pet", "Entregar pet"].includes(nextStatus)) {
+  if (["Buscar pet", "Entregar pet", "pickup_started", "delivery_started"].includes(nextStatus) && req.body?.sendWhatsapp !== false) {
+    const normalizedMessageEvent = ["Entregar pet", "delivery_started"].includes(nextStatus) ? "delivery_started" : "pickup_started";
+    const idempotencyKey = `${transportJob?.id || id}:${normalizedMessageEvent}:${new Date().toISOString().slice(0, 10)}`;
+    const existingMessage = await TransportMessageLog.findOne({ where: { idempotencyKey } });
+    if (existingMessage?.status === "sent") {
+      return res.status(200).json({ message: "Status atualizado; mensagem ja havia sido enviada.", data: { appointmentId: appointment.id, driverStatus: appointment.driver_status }, whatsapp: { status: "sent", duplicatePrevented: true } });
+    }
+    const messageLog = existingMessage || (transportJob ? await TransportMessageLog.create({ usersId: transportJob.usersId, transportJobId: transportJob.id, eventType: normalizedMessageEvent, idempotencyKey, status: "pending" }) : null);
     try {
-      await mensagemMotorista(id, nextStatus);
+      const sentMessage = await sendTransportCustomerMessage({ appointmentId: id, eventType: normalizedMessageEvent });
+      if (messageLog) await messageLog.update({ status: sentMessage.status, recipient: sentMessage.recipient || null, message: sentMessage.message || null, sentAt: sentMessage.status === "sent" ? new Date() : null });
       return res.status(200).json({
         message: "Status do motorista atualizado com sucesso",
         data: {
@@ -238,6 +268,7 @@ async function updateSharedDriverChecklistStatus(req, res, nextStatus) {
         },
       });
     } catch (messageError) {
+      if (messageLog) await messageLog.update({ status: "failed", error: messageError.message });
       console.error("Erro ao enviar mensagem do motorista:", messageError);
       return res.status(200).json({
         message: "Status atualizado, mas houve um erro ao enviar a mensagem",

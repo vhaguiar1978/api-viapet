@@ -1268,6 +1268,7 @@ router.post("/customers", auth, async (req, res) => {
       profissao,
       rg,
       status = true, // Valor padrão true
+      taxiDogNotifications,
     } = req.body;
 
     let formattedBirthDateCreate = null;
@@ -1295,6 +1296,7 @@ router.post("/customers", auth, async (req, res) => {
       birthDate: formattedBirthDateCreate,
       cpf: cpf || null,
       status,
+      taxiDogNotifications: taxiDogNotifications || {},
     });
 
     logActivity({
@@ -1456,6 +1458,8 @@ router.put("/customers", auth, async (req, res) => {
       profissao,
       rg,
       status,
+      taxiDogNotifications,
+      logisticsRegionId,
     } = req.body;
 
     console.log("Data recebida:", birthDate); // Debug
@@ -1522,6 +1526,8 @@ router.put("/customers", auth, async (req, res) => {
     if (profissao !== undefined)
       updateData.profissao = profissao || customer.profissao;
     if (rg !== undefined) updateData.rg = rg || customer.rg;
+    if (taxiDogNotifications !== undefined) updateData.taxiDogNotifications = taxiDogNotifications || {};
+    if (logisticsRegionId !== undefined) updateData.logisticsRegionId = logisticsRegionId || null;
 
     console.log("Data formatada:", formattedBirthDate); // Debug
 
