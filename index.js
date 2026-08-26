@@ -67,6 +67,7 @@ import adminAlertsRouter from "./routes/adminAlerts.js";
 import adminTutorialsRouter from "./routes/adminTutorials.js";
 import adminWhatsappIaRouter from "./routes/adminWhatsappIa.js";
 import adminRegistrationSecurityRouter, { cleanupUnconfirmedRegistrations } from "./routes/adminRegistrationSecurity.js";
+import sellersRouter from "./routes/sellers.js";
 import { processDueInactiveAutomations, scanInactiveUsers } from "./service/adminWhatsappIa.js";
 import alertEngine from "./service/alertEngine.js";
 import {
@@ -210,6 +211,7 @@ app.use(adminAlertsRouter);
 app.use(adminTutorialsRouter);
 app.use(adminWhatsappIaRouter);
 app.use(adminRegistrationSecurityRouter);
+app.use(sellersRouter);
 // Error handler do activity logger — DEVE vir depois das rotas
 app.use(activityErrorHandler);
 // Configure as associações antes de sincronizar

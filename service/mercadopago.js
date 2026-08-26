@@ -3,6 +3,7 @@ import { Op } from "sequelize";
 import "../config/env.js"; // Usar configuração centralizada
 import BillingSettings from "../models/BillingSettings.js";
 import Admin from "../models/Admin.js";
+import { cancelCommissionForPayment, createCommissionForApprovedPayment } from "./sellerCommissions.js";
 
 const DEFAULT_STATEMENT_DESCRIPTOR = "VIAPET";
 
@@ -593,6 +594,15 @@ export const processWebhookEvent = async (eventData) => {
         });
 
         if (existingPayment) {
+          if (existingPayment.status === "approved") {
+            await createCommissionForApprovedPayment({
+              userId: existingPayment.user_id,
+              paymentId,
+              paymentHistoryId: existingPayment.id,
+              amount: existingPayment.amount,
+              planId: existingPayment.plan_type,
+            });
+          }
           console.log(
             `✅ Pagamento ${paymentId} já foi processado anteriormente - ignorando evento duplicado`
           );
@@ -636,6 +646,8 @@ export const processWebhookEvent = async (eventData) => {
         } catch (applyError) {
           console.error("❌ Erro ao aplicar pagamento aprovado:", applyError);
         }
+      } else if (["refunded", "charged_back", "cancelled"].includes(paymentInfo.payment.status)) {
+        await cancelCommissionForPayment(paymentId, `Pagamento ${paymentInfo.payment.status} no Mercado Pago`);
       }
 
       return {
@@ -807,6 +819,19 @@ export const applyApprovedMainPayment = async (payment) => {
     }
   } catch (e) {
     console.log(`⚠️ Erro ao criar/atualizar PaymentHistory (continuando):`, e.message);
+  }
+
+  try {
+    const persistedPayment = await PaymentHistory.findOne({ where: { payment_id: paymentId } });
+    await createCommissionForApprovedPayment({
+      userId,
+      paymentId,
+      paymentHistoryId: persistedPayment?.id || null,
+      amount: payment.transaction_amount || 0,
+      planId: meta.plan_id || meta.requested_plan || meta.plan_type || subscription.plan_type,
+    });
+  } catch (commissionError) {
+    console.error(`⚠️ Erro ao gerar comissão do pagamento ${paymentId}:`, commissionError.message);
   }
 
   return {

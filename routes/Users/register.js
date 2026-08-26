@@ -11,6 +11,7 @@ import {
   REGISTRATION_STATUS, auditRegistration, consumeVerification, enforceRegistrationLimits,
   isDisposableEmail, issueVerification, normalizePhone, resolveRegistrationContext, verifyCaptcha,
 } from "../../service/registrationSecurity.js";
+import { attributeRegisteredUser } from "../../service/sellerCommissions.js";
 
 const router = express.Router();
 
@@ -36,7 +37,7 @@ async function provisionActiveAccount(user, requestedPlan = "essential") {
 }
 
 router.post("/register", async (req, res) => {
-  const { name, companyName, email, password, phone, requestedPlan, acceptedTerms, acceptedPrivacy, captchaToken, deviceFingerprint } = req.body || {};
+  const { name, companyName, email, password, phone, requestedPlan, acceptedTerms, acceptedPrivacy, captchaToken, deviceFingerprint, referralSessionId, referralCode } = req.body || {};
   const normalizedEmail = String(email || "").trim().toLowerCase(); const normalizedPhone = normalizePhone(phone);
   let createdUser = null;
   try {
@@ -55,6 +56,7 @@ router.post("/register", async (req, res) => {
     const selectedPlan = ["essential", "professional", "premium"].includes(String(requestedPlan).toLowerCase()) ? String(requestedPlan).toLowerCase() : "essential";
     const user = await Users.create({ name: name.trim(), companyName: companyName.trim(), email: normalizedEmail, phone: normalizedPhone, password: await bcrypt.hash(password, 12), status: false, registrationStatus: REGISTRATION_STATUS.EMAIL_PENDING, observation: JSON.stringify({ requestedPlan: selectedPlan }) });
     createdUser = user;
+    await attributeRegisteredUser({ userId: user.id, sessionId: referralSessionId, code: referralCode });
     await auditRegistration(req, "registration_created", { userId: user.id, email: normalizedEmail, phone: normalizedPhone, deviceFingerprint, metadata: { acceptedTermsAt: new Date().toISOString(), selectedPlan } });
     const devCode = await issueVerification(user, "email");
     return res.status(201).json({ message: "Cadastro recebido. Confirme o código enviado ao seu e-mail.", registrationId: user.id, status: user.registrationStatus, resendAfter: 60, ...(devCode ? { devCode } : {}) });
