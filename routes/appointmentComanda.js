@@ -1,4 +1,5 @@
 import express from "express";
+import { Op } from "sequelize";
 import auth from "../middlewares/auth.js";
 import Appointment from "../models/Appointment.js";
 import AppointmentItem from "../models/AppointmentItem.js";
@@ -112,6 +113,7 @@ router.post("/appointments/:id/items", auth, async (req, res) => {
       unitPrice,
       discount = 0,
       observation,
+      replaceExisting = false,
     } = req.body;
 
     if (!["service", "product", "manual"].includes(type)) {
@@ -187,7 +189,23 @@ router.post("/appointments/:id/items", auth, async (req, res) => {
       });
     }
 
-    const item = await AppointmentItem.create({
+    // Salvamentos completos da agenda reenviam a comanda. Quando a exclusao
+    // anterior falhava ou a requisicao era repetida, o POST criava outra linha
+    // identica e inflava automaticamente servicos e total. Nesse fluxo,
+    // reutiliza a linha do mesmo servico em vez de criar uma copia.
+    const existingItem = replaceExisting && type === "service" && resolvedServiceId
+      ? await AppointmentItem.findOne({
+          where: {
+            appointmentId: appointment.id,
+            usersId: req.user.establishment,
+            type: "service",
+            serviceId: resolvedServiceId,
+          },
+          order: [["createdAt", "ASC"]],
+        })
+      : null;
+
+    const itemPayload = {
       appointmentId: appointment.id,
       usersId: req.user.establishment,
       type,
@@ -200,7 +218,22 @@ router.post("/appointments/:id/items", auth, async (req, res) => {
       total,
       observation: observation || null,
       createdBy: req.user.id,
-    });
+    };
+    const item = existingItem
+      ? await existingItem.update(itemPayload)
+      : await AppointmentItem.create(itemPayload);
+
+    if (existingItem) {
+      await AppointmentItem.destroy({
+        where: {
+          appointmentId: appointment.id,
+          usersId: req.user.establishment,
+          type: "service",
+          serviceId: resolvedServiceId,
+          id: { [Op.ne]: existingItem.id },
+        },
+      });
+    }
 
     if (type === "product") {
       await adjustProductStock({
