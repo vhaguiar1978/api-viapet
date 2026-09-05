@@ -1381,10 +1381,12 @@ router.post("/finance/close-cash", authenticate, async (req, res) => {
       });
     }
 
-    // Usa a mesma data de competencia da abertura. Isso garante que o valor
-    // inicial continue sendo reconhecido mesmo sem outras movimentacoes.
-    const startDateTime = new Date(`${referenceDate}T00:00:00.000-03:00`);
-    const endDateTime = new Date(`${referenceDate}T23:59:59.999-03:00`);
+    // Finance.date/dueDate recebem DATEONLY como meia-noite UTC. A abertura,
+    // a consulta de status e o fechamento precisam usar exatamente a mesma
+    // janela; a antiga janela -03:00 começava às 03:00Z e não encontrava a
+    // abertura gravada às 00:00Z, impedindo qualquer fechamento do dia.
+    const startDateTime = new Date(`${referenceDate}T00:00:00.000Z`);
+    const endDateTime = new Date(`${referenceDate}T23:59:59.999Z`);
 
     const openingEntry = await Finance.findOne({
       where: {
