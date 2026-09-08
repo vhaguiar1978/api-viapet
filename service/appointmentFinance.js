@@ -591,6 +591,19 @@ const syncAppointmentFinanceUnlocked = async (appointmentId) => {
   const isPackageAppointment =
     Boolean(String(appointment.packageGroupId || "").trim()) ||
     (Boolean(appointment.package) && Number(appointment.packageMax || 0) > 1);
+  const packageNumber = Number(appointment.packageNumber || 0) || 0;
+  let isPrimaryPackageOccurrence = !isPackageAppointment || packageNumber === 1;
+  if (isPackageAppointment && packageNumber <= 0 && appointment.packageGroupId) {
+    const firstPackageOccurrence = await Appointment.findOne({
+      where: {
+        usersId: appointment.usersId,
+        packageGroupId: appointment.packageGroupId,
+      },
+      attributes: ["id"],
+      order: [["date", "ASC"], ["time", "ASC"], ["createdAt", "ASC"]],
+    });
+    isPrimaryPackageOccurrence = String(firstPackageOccurrence?.id || "") === String(appointment.id);
+  }
 
   const currentLinkedFinance = appointment.financeId
     ? await Finance.findByPk(appointment.financeId)
@@ -745,6 +758,29 @@ const syncAppointmentFinanceUnlocked = async (appointmentId) => {
         usersId: appointment.usersId,
       },
     });
+  }
+
+  // A comanda de um pacotinho representa o valor total do grupo e o frontend
+  // contabiliza financeiramente apenas a primeira ocorrencia. Criar um saldo
+  // em cada data seguinte fazia um pacote pago reaparecer como divida varias
+  // vezes. Ocorrencias secundarias podem exibir o pagamento compartilhado,
+  // mas nunca geram outro appointment_balance.
+  if (isPackageAppointment && !isPrimaryPackageOccurrence) {
+    if (existingBalanceFinance) {
+      await existingBalanceFinance.destroy();
+    }
+    const freeAppointmentFinance = await Finance.findOne({
+      where: {
+        reference: `appointment_free:${appointment.id}`,
+        usersId: appointment.usersId,
+      },
+    });
+    if (freeAppointmentFinance) {
+      await freeAppointmentFinance.destroy();
+    }
+    const latestPaymentFinanceId = getLatestAppointmentPaymentFinanceId(payments);
+    await appointment.update({ financeId: latestPaymentFinanceId || null });
+    return summary;
   }
 
   if (summary.balance > 0) {
