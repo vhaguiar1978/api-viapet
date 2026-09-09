@@ -10,6 +10,7 @@ import Finance from "../models/Finance.js";
 import AppointmentPayment from "../models/AppointmentPayment.js";
 import Custumers from "../models/Custumers.js";
 import { helpers } from "./bankStatementParser.js";
+import { syncAppointmentFinance } from "./appointmentFinance.js";
 
 const { STRIP_DIACRITICS } = helpers;
 
@@ -313,10 +314,16 @@ export async function applyBaixa({ usersId, candidate, entry, confidence, source
   if (candidate.kind === "payment") {
     const row = await AppointmentPayment.findOne({ where: { id: candidate.id, usersId } });
     if (!row) throw new Error("AppointmentPayment não encontrado");
+    const bankPaidAt = entry?.entryDate
+      ? new Date(`${String(entry.entryDate).slice(0, 10)}T12:00:00.000Z`)
+      : new Date();
     await row.update({
       status: "pago",
-      paidAt: new Date(),
+      paidAt: bankPaidAt,
     });
+    // Mantem Agenda, Financeiro, ViaCentral e caixa na mesma fonte de verdade
+    // imediatamente apos a baixa identificada no extrato bancario.
+    await syncAppointmentFinance(row.appointmentId);
     await ReconciliationMatch.create({
       usersId,
       entryId: entry.id,

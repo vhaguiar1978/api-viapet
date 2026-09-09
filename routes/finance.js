@@ -3045,7 +3045,7 @@ router.get("/summary/:date", authenticate, async (req, res) => {
       where: {
         usersId: req.user.establishment,
         type: "entrada",
-        status: "Pago",
+        status: "pago",
         dueDate: {
           [Op.between]: [
             new Date(date + "T00:00:00.000Z"),
@@ -3054,11 +3054,15 @@ router.get("/summary/:date", authenticate, async (req, res) => {
         },
       },
     });
+    const faturamentoAtual = await keepOnlyCurrentAgendaFinanceRows(
+      faturamentoHoje,
+      req.user.establishment,
+    );
 
     res.status(200).json({
       message: "Resumo financeiro encontrado com sucesso",
       data: {
-        faturamentoHoje: faturamentoHoje
+        faturamentoHoje: faturamentoAtual
           .reduce((sum, finance) => sum + parseFloat(finance.amount), 0)
           .toFixed(2),
         agendamentoHoje: appointments.length,
