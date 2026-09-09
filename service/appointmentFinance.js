@@ -908,6 +908,19 @@ export const repairDeliveredAppointmentPayments = async (usersId, { appointmentI
 
   const candidatePayments = await AppointmentPayment.findAll({ where: paymentWhere });
 
+  const linkedFinanceIds = [
+    ...new Set(candidatePayments.map((payment) => Number(payment.financeId || 0)).filter(Boolean)),
+  ];
+  const linkedFinancesById = linkedFinanceIds.length
+    ? new Map(
+        (
+          await Finance.findAll({
+            where: { id: { [Op.in]: linkedFinanceIds }, usersId },
+          })
+        ).map((finance) => [Number(finance.id), finance]),
+      )
+    : new Map();
+
   const appointmentIdsToCheck = [
     ...new Set(
       candidatePayments
@@ -932,15 +945,28 @@ export const repairDeliveredAppointmentPayments = async (usersId, { appointmentI
   for (const payment of candidatePayments) {
     const method = String(payment.paymentMethod || "").trim();
     const amount = Number(payment.grossAmount || payment.amount || 0) || 0;
-    if (!method || amount <= 0) continue;
+    if (amount <= 0) continue;
+
+    // Evidencia mais forte: o lancamento financeiro ligado a esta parcela ja
+    // foi baixado, mesmo que o pagamento tenha acontecido em outra data.
+    const linkedFinance = linkedFinancesById.get(Number(payment.financeId || 0));
+    const financeAlreadyPaid = String(linkedFinance?.status || "").trim().toLowerCase() === "pago";
 
     const appointment = appointmentsById.get(String(payment.appointmentId));
     const appointmentStatus = String(appointment?.status || "").trim().toLowerCase();
-    if (!DELIVERED_APPOINTMENT_STATUSES.includes(appointmentStatus)) continue;
+    const deliveredWithPaymentMethod =
+      Boolean(method) && DELIVERED_APPOINTMENT_STATUSES.includes(appointmentStatus);
+    if (!financeAlreadyPaid && !deliveredWithPaymentMethod) continue;
 
     await payment.update({
       status: "pago",
-      paidAt: payment.paidAt || payment.updatedAt || payment.createdAt || new Date(),
+      paidAt:
+        payment.paidAt ||
+        linkedFinance?.date ||
+        linkedFinance?.updatedAt ||
+        payment.updatedAt ||
+        payment.createdAt ||
+        new Date(),
     });
     repairedCount += 1;
     affectedAppointmentIds.add(String(payment.appointmentId));
