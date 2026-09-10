@@ -64,12 +64,16 @@ export async function verifyCaptcha(token, ip) {
 
 export async function enforceRegistrationLimits(req) {
   const { ip } = resolveRegistrationContext(req);
-  const fingerprint = String(req.headers["x-device-fingerprint"] || "").slice(0, 128);
   if (await RegistrationIpBlock.findOne({ where: { ip } })) return { allowed: false, reason: "Este endereço de rede está bloqueado." };
+
+  // Mobile carriers and shared Wi-Fi can place many legitimate customers behind
+  // the same public IP. The former browser fingerprint was also identical across
+  // many iPhones, so it could block real sign-ups. Keep only an emergency IP cap
+  // high enough to stop automated floods without affecting normal customers.
   const since = new Date(Date.now() - 60 * 60 * 1000);
   const ipCount = await RegistrationSecurityEvent.count({ where: { ip, eventType: "registration_created", createdAt: { [Op.gte]: since } } });
-  const fingerprintCount = fingerprint ? await RegistrationSecurityEvent.count({ where: { deviceFingerprint: fingerprint, eventType: "registration_created", createdAt: { [Op.gte]: since } } }) : 0;
-  if (ipCount >= Number(process.env.REGISTRATION_LIMIT_PER_IP || 3) || fingerprintCount >= Number(process.env.REGISTRATION_LIMIT_PER_DEVICE || 2)) return { allowed: false, reason: "Limite de cadastros atingido. Tente novamente mais tarde." };
+  const emergencyIpLimit = Math.max(100, Number(process.env.REGISTRATION_LIMIT_PER_IP) || 0);
+  if (ipCount >= emergencyIpLimit) return { allowed: false, reason: "Muitas tentativas foram detectadas nesta rede. Fale com o suporte do ViaPet para continuar." };
   return { allowed: true };
 }
 
