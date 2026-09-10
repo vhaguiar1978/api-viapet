@@ -126,7 +126,15 @@ class EmailService {
   }
 
   async getMailSettings() {
-    const settings = await Admin.findOne();
+    // There may be legacy duplicate admin rows. Prefer a complete SMTP record
+    // deterministically so registration never depends on database row order.
+    const settings = await Admin.findOne({
+      where: {
+        smtpHost: { [Op.ne]: null }, smtpPort: { [Op.ne]: null },
+        smtpEmail: { [Op.ne]: null }, smtpPassword: { [Op.ne]: null },
+      },
+      order: [["updatedAt", "DESC"]],
+    }) || await Admin.findOne({ order: [["updatedAt", "DESC"]] });
     const smtpPort =
       Number(settings?.smtpPort || process.env.SMTP_PORT || process.env.MAIL_PORT || 0) || null;
     const mailSettings = {
