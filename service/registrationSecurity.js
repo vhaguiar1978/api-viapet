@@ -45,12 +45,21 @@ export async function auditRegistration(req, eventType, data = {}) {
 }
 
 export async function verifyCaptcha(token, ip) {
-  if (process.env.NODE_ENV !== "production" && !process.env.TURNSTILE_SECRET_KEY) return true;
-  if (!token || !process.env.TURNSTILE_SECRET_KEY) return false;
-  const body = new URLSearchParams({ secret: process.env.TURNSTILE_SECRET_KEY, response: token, remoteip: ip });
-  const response = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", { method: "POST", body });
-  const result = await response.json();
-  return result.success === true;
+  const secret = String(process.env.TURNSTILE_SECRET_KEY || "").trim();
+  // Turnstile is an optional extra layer. IP/device limits and two-step contact
+  // verification continue protecting registration when it is not configured.
+  if (!secret) return true;
+  if (!token) return false;
+  try {
+    const body = new URLSearchParams({ secret, response: token, remoteip: ip });
+    const response = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", { method: "POST", body });
+    if (!response.ok) return false;
+    const result = await response.json();
+    return result.success === true;
+  } catch (error) {
+    console.error("Falha ao consultar o Turnstile:", error);
+    return false;
+  }
 }
 
 export async function enforceRegistrationLimits(req) {
