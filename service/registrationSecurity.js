@@ -113,8 +113,9 @@ async function sendEmailCode(user, code) {
 
 async function sendPhoneCode(user, code) {
   const message = `ViaPet: seu código de confirmação é ${code}. Expira em 10 minutos. Não compartilhe.`;
-  if (process.env.WHATSAPP_PHONE_NUMBER_ID && process.env.WHATSAPP_ACCESS_TOKEN) {
-    const response = await fetch(`https://graph.facebook.com/v22.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`, { method: "POST", headers: { Authorization: `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`, "Content-Type": "application/json" }, body: JSON.stringify({ messaging_product: "whatsapp", to: user.phone, type: "text", text: { body: message } }) });
+  const whatsappToken = process.env.WHATSAPP_ACCESS_TOKEN || process.env.WHATSAPP_TOKEN;
+  if (process.env.WHATSAPP_PHONE_NUMBER_ID && whatsappToken) {
+    const response = await fetch(`https://graph.facebook.com/v22.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`, { method: "POST", headers: { Authorization: `Bearer ${whatsappToken}`, "Content-Type": "application/json" }, body: JSON.stringify({ messaging_product: "whatsapp", to: user.phone, type: "text", text: { body: message } }) });
     if (!response.ok) throw new Error("Falha ao enviar confirmação pelo WhatsApp"); return;
   }
   if (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_FROM_NUMBER) {
