@@ -69,6 +69,8 @@ import adminWhatsappIaRouter from "./routes/adminWhatsappIa.js";
 import adminRegistrationSecurityRouter, { cleanupUnconfirmedRegistrations } from "./routes/adminRegistrationSecurity.js";
 import sellersRouter from "./routes/sellers.js";
 import transportRouter from "./routes/transport.js";
+import dataExportsRouter from "./routes/dataExports.js";
+import { expireDataExports, processNextDataExport } from "./service/dataExportService.js";
 import { processDueInactiveAutomations, scanInactiveUsers } from "./service/adminWhatsappIa.js";
 import alertEngine from "./service/alertEngine.js";
 import {
@@ -176,6 +178,7 @@ app.use(petRouter);
 app.use(salesRouter);
 app.use(appointmentRouter);
 app.use(transportRouter);
+app.use(dataExportsRouter);
 app.use(adminRouter);
 app.use(whatsappRouter);
 app.use(whatsappOfficialRouter);
@@ -1157,6 +1160,17 @@ app.listen(PORT, () => {
     }, 15000);
   } else {
     console.log("Fila de respostas CRM pausada neste processo");
+  }
+
+  if (process.env.DISABLE_DATA_EXPORT_WORKER !== "true") {
+    processNextDataExport().catch((error) => console.error("Erro ao recuperar exportações pendentes:", error.message));
+    setInterval(() => {
+      processNextDataExport().catch((error) => console.error("Erro na fila de exportações:", error.message));
+    }, 15000);
+    cron.schedule("20 3 * * *", () => {
+      expireDataExports().catch((error) => console.error("Erro ao expirar exportações:", error.message));
+    });
+    console.log("Fila privada de exportação de dados ativada");
   }
 
   if (process.env.DISABLE_CRM_AUTOMATIONS_CRON !== "true") {

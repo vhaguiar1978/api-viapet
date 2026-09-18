@@ -1,5 +1,6 @@
 # Dependencies
 node_modules
+.private-data-exports/
 
 # Environment files
 .env
