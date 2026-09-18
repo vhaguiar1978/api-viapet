@@ -1,11 +1,12 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
+import { Readable } from "node:stream";
 import express from "express";
 import { Op } from "sequelize";
 import authenticate from "../middlewares/auth.js";
 import owner from "../middlewares/owner.js";
 import DataExportJob from "../models/DataExportJob.js";
-import { canAccessExport, hashDownloadToken, processNextDataExport, resolvePrivateExportPath } from "../service/dataExportService.js";
+import { canAccessExport, fetchPrivateExport, hashDownloadToken, processNextDataExport, resolvePrivateExportPath } from "../service/dataExportService.js";
 
 const router = express.Router();
 const asyncRoute = (handler) => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
@@ -50,6 +51,15 @@ router.get("/data-exports/:id/download", ...secured, asyncRoute(async (req, res)
   const suppliedHash = hashDownloadToken(req.query.token || "");
   if (!canAccessExport(job, req.user) || !job.downloadTokenHash || suppliedHash.length !== job.downloadTokenHash.length || !crypto.timingSafeEqual(Buffer.from(suppliedHash), Buffer.from(job.downloadTokenHash))) return res.status(404).json({ message: "Download não encontrado." });
   if (job.status !== "READY" || new Date(job.expiresAt) <= new Date() || new Date(job.downloadTokenExpiresAt) <= new Date()) return res.status(410).json({ message: "Link expirado. Gere um novo link de download." });
+  if (String(job.storageKey || "").startsWith("supabase:")) {
+    const storedResponse = await fetchPrivateExport(job.storageKey);
+    if (!storedResponse) return res.status(404).json({ message: "Arquivo não encontrado." });
+    await job.update({ downloadedAt: new Date(), downloadTokenHash: null, downloadTokenExpiresAt: null });
+    res.set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.set("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(job.fileName)}`);
+    if (storedResponse.headers.get("content-length")) res.set("Content-Length", storedResponse.headers.get("content-length"));
+    return Readable.fromWeb(storedResponse.body).pipe(res);
+  }
   const target = resolvePrivateExportPath(job.storageKey);
   if (!target) return res.status(404).json({ message: "Arquivo não encontrado." });
   try { await fs.access(target); } catch { return res.status(404).json({ message: "Arquivo não encontrado." }); }

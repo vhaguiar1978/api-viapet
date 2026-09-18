@@ -24,7 +24,74 @@ import CrmConversation from "../models/CrmConversation.js";
 
 export const EXPORT_STATUSES = ["REQUESTED", "QUEUED", "PROCESSING", "GENERATING_FILE", "READY", "FAILED", "EXPIRED"];
 const PRIVATE_ROOT = path.resolve(process.env.DATA_EXPORT_STORAGE_DIR || ".private-data-exports");
+const STORAGE_BUCKET = String(process.env.DATA_EXPORT_STORAGE_BUCKET || "viapet-data-exports").trim();
 const SENSITIVE_FIELD = /password|token|secret|credential|api.?key|hash|webhook|metadata|deviceInfo|attachment/i;
+
+function supabaseStorageConfig() {
+  const baseUrl = String(process.env.SUPABASE_URL || "").replace(/\/+$/, "");
+  const serviceKey = String(process.env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
+  return baseUrl && serviceKey ? { baseUrl, serviceKey } : null;
+}
+
+function storageHeaders(config, extra = {}) {
+  return { apikey: config.serviceKey, Authorization: `Bearer ${config.serviceKey}`, ...extra };
+}
+
+export async function ensureDataExportBucket() {
+  const config = supabaseStorageConfig();
+  if (!config) return false;
+  const inspect = await fetch(`${config.baseUrl}/storage/v1/bucket/${encodeURIComponent(STORAGE_BUCKET)}`, { headers: storageHeaders(config) });
+  if (inspect.ok) return true;
+  const listResponse = await fetch(`${config.baseUrl}/storage/v1/bucket`, { headers: storageHeaders(config) });
+  if (!listResponse.ok) throw new Error(`Não foi possível verificar o storage privado (${listResponse.status}).`);
+  const buckets = await listResponse.json();
+  if (Array.isArray(buckets) && buckets.some((bucket) => bucket?.id === STORAGE_BUCKET)) return true;
+  const created = await fetch(`${config.baseUrl}/storage/v1/bucket`, {
+    method: "POST",
+    headers: storageHeaders(config, { "Content-Type": "application/json" }),
+    body: JSON.stringify({ id: STORAGE_BUCKET, name: STORAGE_BUCKET, public: false, file_size_limit: 52428800, allowed_mime_types: ["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"] }),
+  });
+  if (!created.ok && created.status !== 409) throw new Error(`Não foi possível criar o storage privado (${created.status}).`);
+  return true;
+}
+
+async function uploadToPrivateStorage(localPath, objectKey) {
+  const config = supabaseStorageConfig();
+  if (!config) return null;
+  await ensureDataExportBucket();
+  const bytes = await fs.readFile(localPath);
+  const response = await fetch(`${config.baseUrl}/storage/v1/object/${encodeURIComponent(STORAGE_BUCKET)}/${objectKey.split("/").map(encodeURIComponent).join("/")}`, {
+    method: "POST",
+    headers: storageHeaders(config, { "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "x-upsert": "true" }),
+    body: bytes,
+  });
+  if (!response.ok) throw new Error(`Falha ao salvar exportação no storage privado (${response.status}).`);
+  return `supabase:${objectKey}`;
+}
+
+export async function fetchPrivateExport(storageKey) {
+  if (!String(storageKey || "").startsWith("supabase:")) return null;
+  const config = supabaseStorageConfig();
+  if (!config) throw new Error("Storage privado indisponível neste ambiente.");
+  const objectKey = String(storageKey).slice("supabase:".length);
+  const response = await fetch(`${config.baseUrl}/storage/v1/object/authenticated/${encodeURIComponent(STORAGE_BUCKET)}/${objectKey.split("/").map(encodeURIComponent).join("/")}`, { headers: storageHeaders(config) });
+  if (!response.ok || !response.body) return null;
+  return response;
+}
+
+async function removePrivateExport(storageKey) {
+  if (String(storageKey || "").startsWith("supabase:")) {
+    const config = supabaseStorageConfig();
+    if (!config) return;
+    const objectKey = String(storageKey).slice("supabase:".length);
+    await fetch(`${config.baseUrl}/storage/v1/object/${encodeURIComponent(STORAGE_BUCKET)}`, {
+      method: "DELETE", headers: storageHeaders(config, { "Content-Type": "application/json" }), body: JSON.stringify({ prefixes: [objectKey] }),
+    });
+    return;
+  }
+  const target = resolvePrivateExportPath(storageKey);
+  if (target) await fs.rm(target, { force: true }).catch(() => {});
+}
 
 export function safeExportAttributes(model, extraBlocked = []) {
   const blocked = new Set(["usersId", ...extraBlocked]);
@@ -142,7 +209,9 @@ export async function generateTenantExport(job) {
   await fs.mkdir(path.dirname(absolutePath), { recursive: true });
   XLSX.writeFile(wb, absolutePath, { compression: true, cellDates: true, cellStyles: true });
   const stat = await fs.stat(absolutePath);
-  await job.update({ status: "READY", fileName, storageKey, fileSize: stat.size, recordCount, finishedAt: new Date(), expiresAt: new Date(Date.now() + 7 * 86400000) });
+  const persistentStorageKey = await uploadToPrivateStorage(absolutePath, storageKey);
+  if (persistentStorageKey) await fs.rm(absolutePath, { force: true });
+  await job.update({ status: "READY", fileName, storageKey: persistentStorageKey || storageKey, fileSize: stat.size, recordCount, finishedAt: new Date(), expiresAt: new Date(Date.now() + 7 * 86400000) });
 }
 
 let workerRunning = false;
@@ -170,10 +239,7 @@ export async function processNextDataExport() {
 export async function expireDataExports() {
   const jobs = await DataExportJob.findAll({ where: { status: "READY", expiresAt: { [Op.lt]: new Date() } } });
   for (const job of jobs) {
-    if (job.storageKey) {
-      const target = path.resolve(PRIVATE_ROOT, job.storageKey);
-      if (target.startsWith(`${PRIVATE_ROOT}${path.sep}`)) await fs.rm(target, { force: true }).catch(() => {});
-    }
+    if (job.storageKey) await removePrivateExport(job.storageKey);
     await job.update({ status: "EXPIRED", downloadTokenHash: null, downloadTokenExpiresAt: null });
   }
 }
