@@ -58,10 +58,24 @@ router.post("/register", async (req, res) => {
     createdUser = user;
     await attributeRegisteredUser({ userId: user.id, sessionId: referralSessionId, code: referralCode });
     await auditRegistration(req, "registration_created", { userId: user.id, email: normalizedEmail, phone: normalizedPhone, deviceFingerprint, metadata: { acceptedTermsAt: new Date().toISOString(), selectedPlan } });
-    const devCode = await issueVerification(user, "email");
-    return res.status(201).json({ message: "Cadastro recebido. Confirme o código enviado ao seu e-mail.", registrationId: user.id, status: user.registrationStatus, resendAfter: 60, ...(devCode ? { devCode } : {}) });
+    try {
+      const devCode = await issueVerification(user, "email");
+      return res.status(201).json({ message: "Cadastro recebido. Confirme o código enviado ao seu e-mail.", registrationId: user.id, status: user.registrationStatus, resendAfter: 60, ...(devCode ? { devCode } : {}) });
+    } catch (deliveryError) {
+      console.error("Cadastro criado, mas o código de e-mail não foi entregue:", deliveryError);
+      await auditRegistration(req, "email_verification_delivery_failed", { userId: user.id, email: user.email, phone: user.phone, success: false, metadata: { reason: deliveryError.code || deliveryError.name || "delivery_error" } }).catch(() => {});
+      return res.status(202).json({
+        message: "Seu cadastro foi salvo, mas o e-mail demorou para responder. Toque em Reenviar código para tentar novamente.",
+        registrationId: user.id,
+        status: user.registrationStatus,
+        deliveryPending: true,
+        resendAfter: 0,
+      });
+    }
   } catch (error) {
     console.error("Erro no cadastro seguro:", error); await auditRegistration(req, "registration_failed", { email: normalizedEmail, phone: normalizedPhone, success: false, metadata: { reason: error.name || "error" } }).catch(() => {});
+    // Only failures before the successful account creation are rolled back.
+    // Delivery failures are handled above and keep the pending registration.
     if (createdUser) await createdUser.destroy().catch(() => {});
     return res.status(error.status || 500).json({ message: error.status ? error.message : "Não foi possível concluir o cadastro agora." });
   }
@@ -80,8 +94,14 @@ async function verifyChannel(req, res, channel) {
     if (!result.ok) { if (result.blocked) { user.registrationStatus = REGISTRATION_STATUS.SUSPICIOUS; await user.save(); } return res.status(result.blocked ? 423 : 400).json({ message: result.reason, attemptsRemaining: result.blocked ? 0 : undefined }); }
     if (channel === "email") {
       user.emailConfirmedAt = new Date(); user.registrationStatus = REGISTRATION_STATUS.PHONE_PENDING; await user.save();
-      const devCode = await issueVerification(user, "phone");
-      return res.json({ message: "E-mail confirmado. Enviamos agora um código ao seu WhatsApp ou SMS.", status: user.registrationStatus, resendAfter: 60, ...(devCode ? { devCode } : {}) });
+      try {
+        const devCode = await issueVerification(user, "phone");
+        return res.json({ message: "E-mail confirmado. Enviamos agora um código ao seu WhatsApp ou SMS.", status: user.registrationStatus, resendAfter: 60, ...(devCode ? { devCode } : {}) });
+      } catch (deliveryError) {
+        console.error("E-mail confirmado, mas o código de telefone não foi entregue:", deliveryError);
+        await auditRegistration(req, "phone_verification_delivery_failed", { userId: user.id, email: user.email, phone: user.phone, success: false, metadata: { reason: deliveryError.code || deliveryError.name || "delivery_error" } }).catch(() => {});
+        return res.json({ message: "E-mail confirmado. O envio ao telefone demorou para responder; toque em Reenviar código.", status: user.registrationStatus, deliveryPending: true, resendAfter: 0 });
+      }
     }
     user.phoneConfirmedAt = new Date(); const plan = JSON.parse(user.observation || "{}").requestedPlan || "essential"; await provisionActiveAccount(user, plan);
     return res.json({ message: "Identidade confirmada. Seu cadastro está ativo e você já pode entrar.", status: user.registrationStatus });

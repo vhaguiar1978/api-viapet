@@ -91,8 +91,15 @@ export async function issueVerification(user, channel) {
   }
   await RegistrationVerification.update({ consumedAt: new Date() }, { where: { userId: user.id, channel, consumedAt: null } });
   const code = String(crypto.randomInt(0, 1000000)).padStart(6, "0");
-  await RegistrationVerification.create({ userId: user.id, channel, codeHash: hashCode(user.id, channel, code), expiresAt: new Date(Date.now() + CODE_TTL_MS) });
-  if (channel === "email") await sendEmailCode(user, code); else await sendPhoneCode(user, code);
+  const verification = await RegistrationVerification.create({ userId: user.id, channel, codeHash: hashCode(user.id, channel, code), expiresAt: new Date(Date.now() + CODE_TTL_MS) });
+  try {
+    if (channel === "email") await sendEmailCode(user, code); else await sendPhoneCode(user, code);
+  } catch (error) {
+    // A failed provider call must not leave a phantom code enforcing the
+    // 60-second cooldown. Keep the account pending so the customer can retry.
+    await verification.destroy().catch(() => {});
+    throw error;
+  }
   return process.env.NODE_ENV !== "production" && process.env.EXPOSE_DEV_VERIFICATION_CODE === "true" ? code : undefined;
 }
 
