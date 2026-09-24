@@ -1,6 +1,7 @@
 import express from "express";
 import validator from "validator";
 import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
 import { Op } from "sequelize";
 import Users from "../../models/Users.js";
 import Settings from "../../models/Settings.js";
@@ -14,6 +15,11 @@ import {
 import { attributeRegisteredUser } from "../../service/sellerCommissions.js";
 
 const router = express.Router();
+
+function buildAuthToken(user) {
+  const secret = process.env.JWT_SECRET || process.env.JWTSECRET || process.env.JWT_SECRET_KEY || "viapet_jwt_fallback_change_me";
+  return jwt.sign({ id: user.id, role: user.role, establishment: user.establishment }, secret, { expiresIn: "7d" });
+}
 
 function publicRegistrationAllowed(req) {
   const flag = String(process.env.ENABLE_PUBLIC_REGISTER || "true").toLowerCase();
@@ -54,24 +60,21 @@ router.post("/register", async (req, res) => {
     const duplicate = await Users.findOne({ where: { [Op.or]: [{ email: normalizedEmail }, { phone: normalizedPhone }] } });
     if (duplicate) return res.status(409).json({ message: "Já existe um cadastro com este e-mail ou telefone." });
     const selectedPlan = ["essential", "professional", "premium"].includes(String(requestedPlan).toLowerCase()) ? String(requestedPlan).toLowerCase() : "essential";
-    const user = await Users.create({ name: name.trim(), companyName: companyName.trim(), email: normalizedEmail, phone: normalizedPhone, password: await bcrypt.hash(password, 12), status: false, registrationStatus: REGISTRATION_STATUS.EMAIL_PENDING, observation: JSON.stringify({ requestedPlan: selectedPlan }) });
+    const user = await Users.create({ name: name.trim(), companyName: companyName.trim(), email: normalizedEmail, phone: normalizedPhone, password: await bcrypt.hash(password, 12), status: true, registrationStatus: REGISTRATION_STATUS.ACTIVE, observation: JSON.stringify({ requestedPlan: selectedPlan }) });
     createdUser = user;
     await attributeRegisteredUser({ userId: user.id, sessionId: referralSessionId, code: referralCode });
     await auditRegistration(req, "registration_created", { userId: user.id, email: normalizedEmail, phone: normalizedPhone, deviceFingerprint, metadata: { acceptedTermsAt: new Date().toISOString(), selectedPlan } });
-    try {
-      const devCode = await issueVerification(user, "email");
-      return res.status(201).json({ message: "Cadastro recebido. Confirme o código enviado ao seu e-mail.", registrationId: user.id, status: user.registrationStatus, resendAfter: 60, ...(devCode ? { devCode } : {}) });
-    } catch (deliveryError) {
-      console.error("Cadastro criado, mas o código de e-mail não foi entregue:", deliveryError);
-      await auditRegistration(req, "email_verification_delivery_failed", { userId: user.id, email: user.email, phone: user.phone, success: false, metadata: { reason: deliveryError.code || deliveryError.name || "delivery_error" } }).catch(() => {});
-      return res.status(202).json({
-        message: "Seu cadastro foi salvo, mas o e-mail demorou para responder. Toque em Reenviar código para tentar novamente.",
-        registrationId: user.id,
-        status: user.registrationStatus,
-        deliveryPending: true,
-        resendAfter: 0,
-      });
-    }
+    await provisionActiveAccount(user, selectedPlan);
+    await auditRegistration(req, "registration_activated", { userId: user.id, email: normalizedEmail, phone: normalizedPhone, metadata: { selectedPlan, activation: "immediate" } });
+    const token = buildAuthToken(user);
+    return res.status(201).json({
+      message: "Conta criada com sucesso. Bem-vindo ao ViaPet!",
+      registrationId: user.id,
+      status: user.registrationStatus,
+      token,
+      role: user.role,
+      user: { id: user.id, name: user.name, email: user.email, role: user.role, establishment: user.establishment },
+    });
   } catch (error) {
     console.error("Erro no cadastro seguro:", error); await auditRegistration(req, "registration_failed", { email: normalizedEmail, phone: normalizedPhone, success: false, metadata: { reason: error.name || "error" } }).catch(() => {});
     // Only failures before the successful account creation are rolled back.
