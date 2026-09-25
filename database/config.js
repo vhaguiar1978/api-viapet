@@ -147,10 +147,11 @@ const sharedOptions = {
           },
         },
         pool: {
-          max: 10,
+          max: Math.max(1, Number(process.env.DB_POOL_MAX || 3)),
           min: 0,
           acquire: 30000,
-          idle: 10000,
+          idle: Math.max(5000, Number(process.env.DB_POOL_IDLE_MS || 10000)),
+          evict: Math.max(1000, Number(process.env.DB_POOL_EVICT_MS || 5000)),
         },
       }
     : {}),
