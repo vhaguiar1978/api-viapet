@@ -1,11 +1,14 @@
 import express from "express";
 import axios from "axios";
-import { Op } from "sequelize";
+import { Op, QueryTypes } from "sequelize";
 import authenticate from "../middlewares/auth.js";
 import Settings from "../models/Settings.js";
 import CrmWhatsappMessage from "../models/CrmWhatsappMessage.js";
 import Custumers from "../models/Custumers.js";
 import CrmConversation from "../models/CrmConversation.js";
+import CrmConversationMessage from "../models/CrmConversationMessage.js";
+import CrmResponseJob from "../models/CrmResponseJob.js";
+import sequelize from "../database/config.js";
 import { markConversationJobsAnswered } from "../service/crmResponseQueue.js";
 
 const router = express.Router();
@@ -171,6 +174,46 @@ router.get("/crm-whatsapp/status", authenticate, async (req, res) => {
         degraded: true,
       },
     });
+  }
+});
+
+router.get("/crm-whatsapp/diagnostics", authenticate, async (req, res) => {
+  const usersId = getEstablishmentId(req);
+  const startedAt = Date.now();
+  try {
+    await sequelize.authenticate();
+    const settings = await Settings.findOne({ where: { usersId }, attributes: ["whatsappConnection"] });
+    const config = settings?.whatsappConnection || {};
+    const baileys = config.baileys || {};
+    const { phoneNumberId, token } = resolveWhatsappConfig(settings);
+    const [failedJobs, retryJobs, duplicateRows] = await Promise.all([
+      CrmResponseJob.count({ where: { usersId, status: "failed" } }),
+      CrmResponseJob.count({ where: { usersId, status: "retry" } }),
+      sequelize.query(`SELECT COUNT(*)::int AS count FROM (SELECT "providerMessageId" FROM crm_conversation_messages WHERE "usersId" = :usersId AND "providerMessageId" IS NOT NULL GROUP BY "providerMessageId" HAVING COUNT(*) > 1) duplicated`, { replacements: { usersId }, type: QueryTypes.SELECT }).then((rows) => Number(rows?.[0]?.count || 0)),
+    ]);
+    const qrStatus = String(baileys.connectionStatus || "disconnected");
+    const qrHasSession = Boolean(baileys.authState && Object.keys(baileys.authState).length);
+    const officialConfigured = Boolean(phoneNumberId && token);
+    const lastWebhookAt = config.lastWebhookAt || null;
+    const webhookAgeMinutes = lastWebhookAt ? Math.max(0, Math.round((Date.now() - new Date(lastWebhookAt).getTime()) / 60000)) : null;
+    const activeProvider = qrStatus === "connected" ? "qr" : officialConfigured ? "official" : "none";
+    const connectionHealthy = qrStatus === "connected" || (officialConfigured && !config.tokenInvalid && webhookAgeMinutes !== null && webhookAgeMinutes <= 2880);
+    const issues = [];
+    if (activeProvider === "none") issues.push("WhatsApp ainda nao conectado.");
+    if (qrHasSession && ["disconnected", "error", "banned"].includes(qrStatus)) issues.push("A sessao QR esta salva, mas a conexao caiu e precisa ser recuperada.");
+    if (config.tokenInvalid) issues.push("O token da Meta expirou ou foi invalidado.");
+    if (officialConfigured && !lastWebhookAt) issues.push("A Meta esta configurada, mas nenhum webhook foi recebido.");
+    if (failedJobs > 0) issues.push(`${failedJobs} resposta(s) automatica(s) falharam.`);
+    if (duplicateRows > 0) issues.push(`${duplicateRows} mensagem(ns) duplicada(s) precisam de revisao.`);
+    return res.json({ message: "Diagnostico do WhatsApp concluido", data: {
+      healthy: connectionHealthy && failedJobs === 0 && duplicateRows === 0,
+      activeProvider,
+      connection: { status: activeProvider === "qr" ? qrStatus : officialConfigured ? "configured" : "disconnected", qrHasSession, officialConfigured, tokenValid: !config.tokenInvalid, lastWebhookAt, webhookAgeMinutes },
+      delivery: { failedJobs, retryJobs, duplicateMessages: duplicateRows },
+      database: { healthy: true, latencyMs: Date.now() - startedAt }, issues, checkedAt: new Date().toISOString(),
+    }});
+  } catch (error) {
+    return res.status(503).json({ message: "Diagnostico do WhatsApp indisponivel", data: { healthy: false, database: { healthy: false, latencyMs: Date.now() - startedAt }, issues: [error?.message || "Falha ao consultar a infraestrutura do CRM."], checkedAt: new Date().toISOString() } });
   }
 });
 
