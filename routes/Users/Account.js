@@ -11,10 +11,16 @@ import { Op } from "sequelize";
 import { createPixPayment, getPaymentInfo, applyApprovedMainPayment } from "../../service/mercadopago.js";
 import { buildBillingProfile, getOrCreateBillingSettings } from "../../service/billingAccess.js";
 import { resolvePlanAccess } from "../../service/planAccess.js";
+import Seller from "../../models/Seller.js";
 const router = express.Router();
 
 router.get("/account", authenticate, async (req, res) => {
   try {
+    if (req.user.role === "seller") {
+      const seller = await Seller.findOne({ where: { id: req.user.id, systemId: "VIAPET", status: "active" } });
+      if (!seller) return res.status(403).json({ message: "Acesso comercial não está liberado." });
+      return res.json({ id: seller.id, name: seller.name, email: seller.email, role: "seller", code: seller.code, commercialAccess: true });
+    }
     const ownerId =
       req.user.role === "funcionario" && req.user.establishment
         ? req.user.establishment
@@ -89,6 +95,10 @@ router.post("/changepassword", authenticate, async (req, res) => {
       });
     }
 
+    if (req.user.role === "seller") {
+      await Seller.update({ passwordHash: await bcrypt.hash(password, 12) }, { where: { id: req.user.id, systemId: "VIAPET", status: "active" } });
+      return res.status(200).json({ message: "Senha atualizada com sucesso" });
+    }
     // Generate salt and hash password
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);

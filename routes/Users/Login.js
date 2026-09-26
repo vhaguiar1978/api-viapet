@@ -5,6 +5,7 @@ import jwt from "jsonwebtoken";
 import net from "node:net";
 import "dotenv/config";
 import Users from "../../models/Users.js";
+import Seller from "../../models/Seller.js";
 import LoginHistory from "../../models/LoginHistory.js";
 import { logActivity } from "../../service/activityLogger.js";
 
@@ -126,6 +127,21 @@ router.post("/login", async (req, res) => {
     const user = await Users.findOne({ where: { email: normalizedEmail } });
 
     if (!user) {
+      const seller = await Seller.findOne({ where: { email: normalizedEmail, systemId: "VIAPET" } });
+      if (seller) {
+        const validSellerPassword = seller.passwordHash && await bcrypt.compare(password, seller.passwordHash);
+        if (!validSellerPassword) return res.status(401).json({ message: "Email ou senha invalidos" });
+        if (seller.status === "pending") return res.status(403).json({ message: "Seu cadastro foi recebido e aguarda liberação do administrador.", code: "SELLER_APPROVAL_PENDING" });
+        if (seller.status !== "active") return res.status(403).json({ message: "Acesso comercial bloqueado. Fale com o administrador." });
+        const token = jwt.sign({ id: seller.id, role: "seller", establishment: null, systemId: "VIAPET" }, getJwtSecret(), { expiresIn: "7d" });
+        await seller.update({ lastAccessAt: new Date() }).catch(() => {});
+        return res.status(200).json({
+          message: `Login bem-sucedido! Bem-vindo novamente ${seller.name}`,
+          token,
+          role: "seller",
+          user: { id: seller.id, name: seller.name, email: seller.email, role: "seller" },
+        });
+      }
       await registerLoginHistory(null, req, "failed");
       logActivity({
         req,
