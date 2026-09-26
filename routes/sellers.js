@@ -15,15 +15,39 @@ import Users from "../models/Users.js";
 import Subscription from "../models/Subscription.js";
 import CommissionPayment from "../models/CommissionPayment.js";
 import SellerAuditLog from "../models/SellerAuditLog.js";
+import Addon from "../models/Addon.js";
+import ClientAddon from "../models/ClientAddon.js";
 import { normalizeSellerCode, registerReferralVisit, SELLER_SYSTEM_ID } from "../service/sellerCommissions.js";
 
 const router = express.Router();
 const admin = [authenticate, adminMiddleware];
 const jwtSecret = () => process.env.JWT_SECRET || process.env.JWTSECRET || process.env.JWT_SECRET_KEY || "viapet_jwt_fallback_change_me";
+const sellerDto = (seller) => ({ id: seller.id, name: seller.name, email: seller.email, phone: seller.phone, whatsapp: seller.whatsapp,
+  document: seller.document, joinedAt: seller.joinedAt, status: seller.status, code: seller.code, notes: seller.notes,
+  approvedAt: seller.approvedAt, lastAccessAt: seller.lastAccessAt, createdAt: seller.createdAt, updatedAt: seller.updatedAt });
 const sellerAuth = async (req, res, next) => { try { const token = req.headers.authorization?.split(" ")[1]; const decoded = jwt.verify(token, jwtSecret());
   if (decoded.role !== "seller") return res.status(403).json({ message: "Acesso restrito a vendedores." });
   const seller = await Seller.findOne({ where: { id: decoded.id, status: "active" } }); if (!seller) return res.status(403).json({ message: "Vendedor inativo ou bloqueado." });
   req.seller = seller; next(); } catch { return res.status(401).json({ message: "Sessão inválida." }); } };
+
+router.post("/seller-register", async (req, res) => {
+  try {
+    const name = String(req.body.name || "").trim();
+    const email = String(req.body.email || "").trim().toLowerCase();
+    const phone = String(req.body.phone || "").replace(/\D/g, "").slice(0, 20);
+    const password = String(req.body.password || "");
+    if (!name || !email || !phone || password.length < 8) return res.status(400).json({ message: "Informe nome, e-mail, WhatsApp e uma senha com pelo menos 8 caracteres." });
+    const [existing, existingUser] = await Promise.all([Seller.findOne({ where: { systemId: SELLER_SYSTEM_ID, email } }), Users.findOne({ where: { email } })]);
+    if (existing || existingUser) return res.status(409).json({ message: "Este e-mail já possui um acesso no ViaPet." });
+    const baseCode = normalizeSellerCode(name).slice(0, 48) || "VENDEDOR";
+    let code = `${baseCode}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
+    while (await Seller.count({ where: { systemId: SELLER_SYSTEM_ID, code } })) code = `${baseCode}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+    const seller = await Seller.create({ systemId: SELLER_SYSTEM_ID, name, email, phone, whatsapp: phone, document: req.body.document || null,
+      joinedAt: new Date().toISOString().slice(0, 10), status: "pending", code, notes: req.body.notes || null, passwordHash: await bcrypt.hash(password, 12) });
+    await SellerAuditLog.create({ systemId: SELLER_SYSTEM_ID, action: "seller_registration_requested", newSellerId: seller.id, metadata: { email, phone } });
+    return res.status(201).json({ ok: true, message: "Cadastro enviado. Você poderá entrar após a liberação do administrador." });
+  } catch (error) { return res.status(500).json({ message: "Não foi possível concluir o cadastro.", error: error.message }); }
+});
 
 router.post("/seller-referrals/visit", async (req, res) => {
   try {
@@ -40,18 +64,27 @@ router.post("/seller-auth/login", async (req, res) => { const seller = await Sel
 router.get("/seller-dashboard", sellerAuth, async (req, res) => { const sellerId = req.seller.id;
   const [links, commissions] = await Promise.all([SellerCustomer.findAll({ where: { sellerId } }), Commission.findAll({ where: { sellerId } })]);
   const userIds = links.map((x) => x.userId); const users = userIds.length ? await Users.findAll({ where: { id: { [Op.in]: userIds } }, attributes: ["id", "name", "companyName", "email", "createdAt", "plan", "expirationDate"] }) : [];
-  const subs = userIds.length ? await Subscription.findAll({ where: { user_id: { [Op.in]: userIds } } }) : []; const subMap = new Map(subs.map((x) => [x.user_id, x]));
+  const [subs, addons, clientAddons] = await Promise.all([
+    userIds.length ? Subscription.findAll({ where: { user_id: { [Op.in]: userIds } }, order: [["created_at", "DESC"]] }) : [],
+    Addon.findAll({ where: { active: true }, order: [["sort_order", "ASC"], ["name", "ASC"]] }),
+    userIds.length ? ClientAddon.findAll({ where: { client_user_id: { [Op.in]: userIds } } }) : [],
+  ]);
+  const subMap = new Map(); for (const sub of subs) if (!subMap.has(sub.user_id)) subMap.set(sub.user_id, sub);
+  const clientAddonMap = new Map(); for (const item of clientAddons) { const list = clientAddonMap.get(item.client_user_id) || []; list.push(item); clientAddonMap.set(item.client_user_id, list); }
   const amountBy = (status) => commissions.filter((x) => status.includes(x.status)).reduce((sum, x) => sum + Number(x.commissionAmount), 0);
-  return res.json({ ok: true, data: { seller: req.seller, link: `${process.env.FRONTEND_URL || "https://viapet.app"}/cadastro?ref=${req.seller.code}`,
+  return res.json({ ok: true, data: { seller: sellerDto(req.seller), link: `${process.env.FRONTEND_URL || "https://viapet.app"}/cadastro?ref=${req.seller.code}`,
     metrics: { customers: links.length, active: users.filter((x) => x.plan).length, trial: subs.filter((x) => x.plan_type === "trial" && x.status === "active").length,
       pending: amountBy(["pending"]), approved: amountBy(["approved"]), paid: amountBy(["paid"]) },
-    customers: users.map((x) => ({ ...x.toJSON(), subscription: subMap.get(x.id) || null })), commissions } }); });
+    catalog: addons,
+    customers: users.map((x) => ({ ...x.toJSON(), subscription: subMap.get(x.id) || null,
+      products: addons.map((addon) => { const owned = (clientAddonMap.get(x.id) || []).find((item) => item.addon_id === addon.id); return { id: addon.id, key: addon.key, name: addon.name, description: addon.description,
+        catalogPrice: addon.default_amount, contracted: owned?.status === "active" || owned?.status === "trial", status: owned?.status || "available", price: owned?.amount_override ?? addon.default_amount }; }) })), commissions } }); });
 router.get("/seller-dashboard/qr", sellerAuth, async (req, res) => { const link = `${process.env.FRONTEND_URL || "https://viapet.app"}/cadastro?ref=${req.seller.code}`;
   return res.json({ ok: true, data: { link, qrCode: await QRCode.toDataURL(link, { width: 420, margin: 2, color: { dark: "#332b38", light: "#ffffff" } }) } }); });
 
 router.get("/admin/sellers", ...admin, async (_req, res) => {
   const rows = await Seller.findAll({ where: { systemId: SELLER_SYSTEM_ID }, order: [["name", "ASC"]] });
-  const data = await Promise.all(rows.map(async (seller) => ({ ...seller.toJSON(),
+  const data = await Promise.all(rows.map(async (seller) => ({ ...sellerDto(seller),
     link: `${process.env.FRONTEND_URL || "https://viapet.app"}/cadastro?ref=${seller.code}`,
     customers: await SellerCustomer.count({ where: { sellerId: seller.id } }),
     clicks: await Referral.count({ where: { sellerId: seller.id } }),
@@ -93,6 +126,18 @@ router.patch("/admin/sellers/:id", ...admin, async (req, res) => {
   await seller.update({ name: req.body.name ?? seller.name, phone: req.body.phone ?? seller.phone,
     whatsapp: req.body.whatsapp ?? seller.whatsapp, email: req.body.email ?? seller.email,
     document: req.body.document ?? seller.document, status: req.body.status ?? seller.status, notes: req.body.notes ?? seller.notes });
+  return res.json({ ok: true, data: seller });
+});
+
+router.patch("/admin/sellers/:id/approval", ...admin, async (req, res) => {
+  const seller = await Seller.findOne({ where: { id: req.params.id, systemId: SELLER_SYSTEM_ID } });
+  if (!seller) return res.status(404).json({ message: "Vendedor não encontrado." });
+  const approved = req.body.approved === true;
+  await seller.update({ status: approved ? "active" : "blocked", approvedAt: approved ? new Date() : null, approvedBy: approved ? req.user.id : null });
+  if (approved) await CommissionRule.findOrCreate({ where: { sellerId: seller.id, systemId: SELLER_SYSTEM_ID, planId: null }, defaults: {
+    calculationType: "percentage", value: Math.max(0, Number(req.body.commissionValue || 0)), recurrenceType: "recurring", active: true,
+  } });
+  await SellerAuditLog.create({ systemId: SELLER_SYSTEM_ID, action: approved ? "seller_access_approved" : "seller_access_blocked", newSellerId: seller.id, actorUserId: req.user.id, reason: req.body.reason || null });
   return res.json({ ok: true, data: seller });
 });
 
