@@ -12,4 +12,7 @@ export default sequelize.define("Seller", {
   status: { type: DataTypes.STRING(24), allowNull: false, defaultValue: "active" },
   code: { type: DataTypes.STRING(64), allowNull: false },
   notes: DataTypes.TEXT, passwordHash: DataTypes.STRING,
+  approvedAt: DataTypes.DATE,
+  approvedBy: DataTypes.UUID,
+  lastAccessAt: DataTypes.DATE,
 }, { tableName: "sellers", timestamps: true });
