@@ -15,6 +15,7 @@ import Finance from "../models/Finance.js";
 import sequelize from "../database/config.js";
 import { logActivity } from "../service/activityLogger.js";
 import { calculateAppointmentSummary, syncAppointmentFinance } from "../service/appointmentFinance.js";
+import { isSaleOutstanding } from "../service/saleDebtRules.js";
 const router = express.Router();
 
 function isAppointmentFinanceReference(reference) {
@@ -576,7 +577,7 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
                 [Op.in]: pendingSaleReferences,
               },
             },
-            attributes: ["id", "custumerId"],
+            attributes: ["id", "custumerId", "status", "paymentMethod"],
           })
         : Promise.resolve([]),
     ]);
@@ -804,6 +805,11 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
     }
 
     for (const sale of pendingSales) {
+      // Vendas do PDV com Pix, dinheiro, débito, crédito etc. são pagas no
+      // ato. Versões antigas gravavam Sales e Finance como "pendente" mesmo
+      // com uma dessas formas selecionada, gerando dívida fantasma. Só uma
+      // venda explicitamente fiada/a prazo deve permanecer neste relatório.
+      if (!isSaleOutstanding(sale)) continue;
       const customerId = String(sale.custumerId || "");
       if (!customerId) continue;
       const finance = financeByReference.get(String(sale.id || ""));
