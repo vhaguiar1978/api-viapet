@@ -488,9 +488,21 @@ router.post("/appointments/:id/payments", auth, async (req, res) => {
       };
     }
 
+    const packageOccurrences = appointment.packageGroupId
+      ? await Appointment.findAll({
+          where: {
+            usersId: req.user.establishment,
+            packageGroupId: appointment.packageGroupId,
+          },
+          attributes: ["id"],
+        })
+      : [];
+    const paymentScopeAppointmentIds = packageOccurrences.length
+      ? packageOccurrences.map((occurrence) => occurrence.id)
+      : [appointment.id];
     const existingPayments = await AppointmentPayment.findAll({
       where: {
-        appointmentId: appointment.id,
+        appointmentId: { [Op.in]: paymentScopeAppointmentIds },
         usersId: req.user.establishment,
         dueDate,
         paymentMethod,

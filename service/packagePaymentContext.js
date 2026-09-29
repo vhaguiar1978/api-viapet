@@ -20,3 +20,25 @@ export function isPrimaryPackageOccurrence(appointment = {}, occurrences = []) {
     .sort((left, right) => occurrenceKey(left).localeCompare(occurrenceKey(right)));
   return String(ordered[0]?.id || "") === String(appointment.id || "");
 }
+
+export function packagePaymentFingerprint(payment = {}) {
+  return [
+    String(payment.paidAt || payment.dueDate || payment.date || "").slice(0, 10),
+    String(payment.dueDate || "").slice(0, 10),
+    String(payment.paymentMethod || "").trim().toLowerCase(),
+    Number(payment.grossAmount ?? payment.amount ?? 0).toFixed(2),
+    Number(payment.netAmount ?? payment.amount ?? 0).toFixed(2),
+    String(payment.details || "").trim().toLowerCase(),
+    String(payment.status || "").trim().toLowerCase(),
+  ].join("|");
+}
+
+export function dedupePackagePayments(payments = []) {
+  const seen = new Set();
+  return payments.filter((payment) => {
+    const fingerprint = packagePaymentFingerprint(payment);
+    if (seen.has(fingerprint)) return false;
+    seen.add(fingerprint);
+    return true;
+  });
+}
