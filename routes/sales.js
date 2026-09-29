@@ -12,6 +12,7 @@ import SaleItem from "../models/SaleItem.js";
 import Custumers from "../models/Custumers.js";
 import Products from "../models/Products.js";
 import Finance from "../models/Finance.js";
+import { getInitialSaleStatus } from "../service/saleDebtRules.js";
 
 // Rota para criar uma nova venda
 router.post("/sales", auth, async (req, res) => {
@@ -50,7 +51,10 @@ router.post("/sales", auth, async (req, res) => {
       return acc + item.price * item.quantify;
     }, 0);
 
-    // Cria a venda
+    const saleStatus = getInitialSaleStatus(paymentMethod);
+
+    // Cria a venda. Formas de pagamento imediatas já representam uma venda
+    // quitada; somente "fiado/a prazo/pendente" fica em aberto.
     const sale = await Sales.create(
       {
         usersId: establishment,
@@ -59,7 +63,7 @@ router.post("/sales", auth, async (req, res) => {
         appointmentId,
         total,
         paymentMethod,
-        status: "pendente",
+        status: saleStatus,
         observation,
       },
       { transaction: t },
@@ -128,7 +132,7 @@ router.post("/sales", auth, async (req, res) => {
         dueDate: new Date(), // Data de vencimento igual à data atual para vendas pagas
         category: "Vendas",
         paymentMethod: paymentMethod,
-        status: "pendente",
+        status: saleStatus,
         reference: sale.id,
         createdBy: req.user.id,
         usersId: req.user.establishment,
