@@ -12,7 +12,10 @@ import PaymentMethodFee, {
 import Products from "../models/Products.js";
 import Services from "../models/Services.js";
 import { Op } from "sequelize";
-import { isPrimaryPackageOccurrence as isPrimaryPackageOccurrenceRule } from "./packagePaymentContext.js";
+import {
+  dedupePackagePayments,
+  isPrimaryPackageOccurrence as isPrimaryPackageOccurrenceRule,
+} from "./packagePaymentContext.js";
 
 const toNumber = (value) => Number.parseFloat(value || 0) || 0;
 
@@ -54,28 +57,9 @@ const getLatestAppointmentPaymentFinanceId = (payments = []) =>
 
 const dedupeSharedPackagePayments = (payments = []) => {
   const normalizedPayments = Array.isArray(payments) ? payments : [];
-  const seen = new Set();
-
-  return normalizedPayments.filter((payment) => {
-    const financeId = String(payment?.financeId || "").trim();
-    const fingerprint = financeId
-      ? `finance:${financeId}`
-      : [
-          String(payment?.paidAt || payment?.dueDate || payment?.date || "").slice(0, 19),
-          String(payment?.paymentMethod || "").trim().toLowerCase(),
-          Number(payment?.grossAmount ?? payment?.amount ?? 0).toFixed(2),
-          Number(payment?.netAmount ?? payment?.amount ?? 0).toFixed(2),
-          String(payment?.details || "").trim().toLowerCase(),
-          String(payment?.status || "").trim().toLowerCase(),
-        ].join("|");
-
-    if (seen.has(fingerprint)) {
-      return false;
-    }
-
-    seen.add(fingerprint);
-    return true;
-  });
+  // Não use financeId como chave: o defeito histórico criou o mesmo pagamento
+  // em ocorrências diferentes do pacote, com ids distintos.
+  return dedupePackagePayments(normalizedPayments);
 };
 
 export const calculateMachineFeeBreakdown = (grossAmount, feePercentage = 0) => {
