@@ -14,7 +14,11 @@ import AppointmentPayment from "../models/AppointmentPayment.js";
 import Finance from "../models/Finance.js";
 import sequelize from "../database/config.js";
 import { logActivity } from "../service/activityLogger.js";
-import { calculateAppointmentSummary, syncAppointmentFinance } from "../service/appointmentFinance.js";
+import {
+  calculateAppointmentSummary,
+  getAppointmentComandaDetails,
+  syncAppointmentFinance,
+} from "../service/appointmentFinance.js";
 import { isSaleOutstanding } from "../service/saleDebtRules.js";
 const router = express.Router();
 
@@ -608,7 +612,17 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
               },
             ],
           },
-          attributes: ["id", "customerId", "date", "financeId", "status"],
+          attributes: [
+            "id",
+            "customerId",
+            "date",
+            "financeId",
+            "status",
+            "package",
+            "packageGroupId",
+            "packageNumber",
+            "packageMax",
+          ],
         })
       : [];
     const appointmentByFinanceId = new Map(
@@ -660,6 +674,19 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
     for (const appointmentId of appointmentIdsFromBalanceRefs) {
       const appointment = appointmentById.get(String(appointmentId));
       if (!appointment) continue;
+      if (appointment.packageGroupId) {
+        const packageDetails = await getAppointmentComandaDetails(
+          appointment.id,
+          usersId,
+        );
+        if (packageDetails?.summary) {
+          balanceSummaryByAppointmentId.set(
+            String(appointmentId),
+            packageDetails.summary,
+          );
+          continue;
+        }
+      }
       balanceSummaryByAppointmentId.set(
         String(appointmentId),
         await calculateAppointmentSummary(
