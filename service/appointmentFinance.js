@@ -12,6 +12,7 @@ import PaymentMethodFee, {
 import Products from "../models/Products.js";
 import Services from "../models/Services.js";
 import { Op } from "sequelize";
+import { isPrimaryPackageOccurrence as isPrimaryPackageOccurrenceRule } from "./packagePaymentContext.js";
 
 const toNumber = (value) => Number.parseFloat(value || 0) || 0;
 
@@ -475,7 +476,22 @@ export const hydrateAppointmentsWithFinancialDetails = async (
     normalizedAppointments.map(async (appointment) => {
       const appointmentId = String(appointment.id || "");
       const itemsList = itemsByAppointmentId[appointmentId] || [];
-      const paymentsList = paymentsByAppointmentId[appointmentId] || [];
+      const ownPaymentsList = paymentsByAppointmentId[appointmentId] || [];
+      const packageGroupId = String(appointment.packageGroupId || "").trim();
+      const occurrenceList = packageGroupId
+        ? packageOccurrencesByGroupId[packageGroupId] || []
+        : [];
+      const sharedPaidPayments = packageGroupId
+        ? sharedPackagePaymentsByGroupId[packageGroupId] || []
+        : [];
+      // O pagamento de um pacote pode ser lançado a partir de qualquer uma
+      // das ocorrências. A ocorrência principal é a fonte financeira do
+      // pacote e precisa enxergar essas baixas compartilhadas no histórico e
+      // no cálculo do saldo, mesmo quando o AppointmentPayment foi salvo em
+      // outro appointmentId do mesmo packageGroupId.
+      const paymentsList = isPrimaryPackageOccurrenceRule(appointment, occurrenceList)
+        ? dedupeSharedPackagePayments([...ownPaymentsList, ...sharedPaidPayments])
+        : ownPaymentsList;
       const statusHistory = historyByAppointmentId[appointmentId] || [];
       const legacyItemsList = itemsList.length
         ? []
@@ -498,10 +514,10 @@ export const hydrateAppointmentsWithFinancialDetails = async (
         paymentsList,
         statusHistory,
         packageOccurrences: appointment?.packageGroupId
-          ? packageOccurrencesByGroupId[String(appointment.packageGroupId).trim()] || []
+          ? occurrenceList
           : appointment?.packageOccurrences || [],
         sharedPackagePayments: appointment?.packageGroupId
-          ? sharedPackagePaymentsByGroupId[String(appointment.packageGroupId).trim()] || []
+          ? sharedPaidPayments
           : appointment?.sharedPackagePayments || [],
         summary: {
           ...summary,
@@ -661,7 +677,32 @@ const syncAppointmentFinanceUnlocked = async (appointmentId) => {
     });
   }
 
-  const summary = await calculateAppointmentSummary(appointment, items, payments);
+  let financialPayments = payments;
+  if (isPackageAppointment && isPrimaryPackageOccurrence) {
+    const packageOccurrences = appointment.packageGroupId
+      ? await Appointment.findAll({
+          where: { usersId: appointment.usersId, packageGroupId: appointment.packageGroupId },
+          attributes: ["id", "date", "time", "createdAt", "packageNumber", "packageMax", "packageGroupId"],
+          order: [["date", "ASC"], ["time", "ASC"], ["createdAt", "ASC"]],
+        })
+      : [appointment];
+    if (isPrimaryPackageOccurrenceRule(appointment, packageOccurrences)) {
+      const occurrenceIds = packageOccurrences.map((occurrence) => occurrence.id).filter(Boolean);
+      const sharedPaidPayments = occurrenceIds.length
+        ? await AppointmentPayment.findAll({
+            where: {
+              usersId: appointment.usersId,
+              appointmentId: { [Op.in]: occurrenceIds },
+              status: "pago",
+            },
+            order: [["dueDate", "ASC"], ["createdAt", "ASC"]],
+          })
+        : [];
+      financialPayments = dedupeSharedPackagePayments([...payments, ...sharedPaidPayments]);
+    }
+  }
+
+  const summary = await calculateAppointmentSummary(appointment, items, financialPayments);
   const customerName = customer?.name || "Cliente não identificado";
   const appointmentDate = appointment.date
     ? new Date(`${appointment.date}T12:00:00`)
@@ -778,7 +819,7 @@ const syncAppointmentFinanceUnlocked = async (appointmentId) => {
     if (freeAppointmentFinance) {
       await freeAppointmentFinance.destroy();
     }
-    const latestPaymentFinanceId = getLatestAppointmentPaymentFinanceId(payments);
+    const latestPaymentFinanceId = getLatestAppointmentPaymentFinanceId(financialPayments);
     await appointment.update({ financeId: latestPaymentFinanceId || null });
     return summary;
   }
@@ -841,7 +882,7 @@ const syncAppointmentFinanceUnlocked = async (appointmentId) => {
       await existingBalanceFinance.destroy();
     }
 
-    const latestPaymentFinanceId = getLatestAppointmentPaymentFinanceId(payments);
+    const latestPaymentFinanceId = getLatestAppointmentPaymentFinanceId(financialPayments);
     if (latestPaymentFinanceId) {
       await appointment.update({ financeId: latestPaymentFinanceId });
     } else {
@@ -868,7 +909,7 @@ const syncAppointmentFinanceUnlocked = async (appointmentId) => {
   return summary;
 };
 
-export const syncAppointmentFinance = async (appointmentId) => {
+const syncSingleAppointmentFinance = async (appointmentId) => {
   const lockKey = String(appointmentId || "");
   const previousSync = _appointmentFinanceSyncLocks.get(lockKey) || Promise.resolve();
   const currentSync = previousSync
@@ -884,6 +925,30 @@ export const syncAppointmentFinance = async (appointmentId) => {
       _appointmentFinanceSyncLocks.delete(lockKey);
     }
   }
+};
+
+export const syncAppointmentFinance = async (appointmentId) => {
+  const summary = await syncSingleAppointmentFinance(appointmentId);
+  const appointment = await Appointment.findByPk(appointmentId, {
+    attributes: ["id", "usersId", "packageGroupId", "package", "packageNumber", "packageMax"],
+  });
+
+  // Se a baixa foi lançada numa ocorrência secundária, ressincroniza também
+  // a ocorrência principal. Isso impede a agenda de mostrar o pagamento e o
+  // histórico/debt-summary continuarem com o saldo antigo.
+  if (appointment?.packageGroupId) {
+    const occurrences = await Appointment.findAll({
+      where: { usersId: appointment.usersId, packageGroupId: appointment.packageGroupId },
+      attributes: ["id", "date", "time", "createdAt", "packageNumber", "packageMax", "packageGroupId"],
+      order: [["date", "ASC"], ["time", "ASC"], ["createdAt", "ASC"]],
+    });
+    const primary = occurrences.find((occurrence) => isPrimaryPackageOccurrenceRule(occurrence, occurrences));
+    if (primary && String(primary.id) !== String(appointment.id)) {
+      await syncSingleAppointmentFinance(primary.id);
+    }
+  }
+
+  return summary;
 };
 
 // Status que indicam que o pet ja foi entregue/atendido — quando um agendamento
@@ -1018,11 +1083,6 @@ export const getAppointmentComandaDetails = async (appointmentId, usersId) => {
     }),
   ]);
 
-  const summary = await calculateAppointmentSummary(appointment, items, payments);
-  if (summary.total <= 0 && payments.length === 0 && appointment.financeId) {
-    await syncAppointmentFinance(appointment.id);
-    await appointment.reload();
-  }
   const legacyItems = items.length === 0 ? await getLegacyServiceItems(appointment) : [];
   const finance = appointment.financeId
     ? await Finance.findByPk(appointment.financeId)
@@ -1064,11 +1124,27 @@ export const getAppointmentComandaDetails = async (appointmentId, usersId) => {
         )
       : [];
 
+  const effectivePayments = isPrimaryPackageOccurrenceRule(appointment, packageOccurrences)
+    ? dedupeSharedPackagePayments([
+        ...payments,
+        ...sharedPackagePayments.filter((payment) => normalizeStatus(payment.status) === "pago"),
+      ])
+    : payments;
+  const summary = await calculateAppointmentSummary(
+    appointment,
+    items.length ? items : legacyItems,
+    effectivePayments,
+  );
+  if (summary.total <= 0 && effectivePayments.length === 0 && appointment.financeId) {
+    await syncAppointmentFinance(appointment.id);
+    await appointment.reload();
+  }
+
   return {
     appointment,
     items,
     legacyItems,
-    payments,
+    payments: effectivePayments,
     history,
     summary,
     finance,
