@@ -55,11 +55,52 @@ const getLatestAppointmentPaymentFinanceId = (payments = []) =>
       return currentTimestamp >= latestTimestamp ? currentPayment : latestPayment;
     }, null)?.financeId || null;
 
-const dedupeSharedPackagePayments = (payments = []) => {
+export const dedupeSharedPackagePayments = (payments = []) => {
   const normalizedPayments = Array.isArray(payments) ? payments : [];
   // Não use financeId como chave: o defeito histórico criou o mesmo pagamento
   // em ocorrências diferentes do pacote, com ids distintos.
   return dedupePackagePayments(normalizedPayments);
+};
+
+export const calculateAppointmentOutstandingSummary = async (appointment) => {
+  if (!appointment?.id || !appointment?.usersId) {
+    throw new Error("Agendamento inválido para cálculo financeiro");
+  }
+
+  const packageGroupId = String(appointment.packageGroupId || "").trim();
+  let chargeAppointment = appointment;
+  let relevantAppointmentIds = [appointment.id];
+
+  if (packageGroupId) {
+    const occurrences = await Appointment.findAll({
+      where: { usersId: appointment.usersId, packageGroupId },
+      attributes: ["id", "usersId", "customerId", "petId", "serviceId", "secondaryServiceId", "tertiaryServiceId", "date", "time", "package", "packageNumber", "packageMax", "packageGroupId"],
+      order: [["packageNumber", "ASC"], ["date", "ASC"], ["time", "ASC"], ["createdAt", "ASC"]],
+    });
+    if (occurrences.length) {
+      chargeAppointment = occurrences.find((row) => Number(row.packageNumber || 0) === 1) || occurrences[0];
+      relevantAppointmentIds = occurrences.map((row) => row.id);
+    }
+  }
+
+  const [items, payments] = await Promise.all([
+    AppointmentItem.findAll({
+      where: { usersId: appointment.usersId, appointmentId: chargeAppointment.id },
+      order: [["createdAt", "ASC"]],
+    }),
+    AppointmentPayment.findAll({
+      where: { usersId: appointment.usersId, appointmentId: { [Op.in]: relevantAppointmentIds } },
+      order: [["dueDate", "ASC"], ["createdAt", "ASC"]],
+    }),
+  ]);
+
+  const effectivePayments = packageGroupId ? dedupeSharedPackagePayments(payments) : payments;
+  return {
+    summary: await calculateAppointmentSummary(chargeAppointment, items, effectivePayments),
+    chargeAppointment,
+    relevantAppointmentIds,
+    payments: effectivePayments,
+  };
 };
 
 export const calculateMachineFeeBreakdown = (grossAmount, feePercentage = 0) => {
@@ -661,32 +702,11 @@ const syncAppointmentFinanceUnlocked = async (appointmentId) => {
     });
   }
 
-  let financialPayments = payments;
-  if (isPackageAppointment && isPrimaryPackageOccurrence) {
-    const packageOccurrences = appointment.packageGroupId
-      ? await Appointment.findAll({
-          where: { usersId: appointment.usersId, packageGroupId: appointment.packageGroupId },
-          attributes: ["id", "date", "time", "createdAt", "packageNumber", "packageMax", "packageGroupId"],
-          order: [["date", "ASC"], ["time", "ASC"], ["createdAt", "ASC"]],
-        })
-      : [appointment];
-    if (isPrimaryPackageOccurrenceRule(appointment, packageOccurrences)) {
-      const occurrenceIds = packageOccurrences.map((occurrence) => occurrence.id).filter(Boolean);
-      const sharedPaidPayments = occurrenceIds.length
-        ? await AppointmentPayment.findAll({
-            where: {
-              usersId: appointment.usersId,
-              appointmentId: { [Op.in]: occurrenceIds },
-              status: "pago",
-            },
-            order: [["dueDate", "ASC"], ["createdAt", "ASC"]],
-          })
-        : [];
-      financialPayments = dedupeSharedPackagePayments([...payments, ...sharedPaidPayments]);
-    }
-  }
-
-  const summary = await calculateAppointmentSummary(appointment, items, financialPayments);
+  const packageFinancialContext = isPackageAppointment && appointment.packageGroupId
+    ? await calculateAppointmentOutstandingSummary(appointment)
+    : null;
+  const financialPayments = packageFinancialContext?.payments || payments;
+  const summary = packageFinancialContext?.summary || await calculateAppointmentSummary(appointment, items, payments);
   const customerName = customer?.name || "Cliente não identificado";
   const appointmentDate = appointment.date
     ? new Date(`${appointment.date}T12:00:00`)
@@ -805,6 +825,10 @@ const syncAppointmentFinanceUnlocked = async (appointmentId) => {
     }
     const latestPaymentFinanceId = getLatestAppointmentPaymentFinanceId(financialPayments);
     await appointment.update({ financeId: latestPaymentFinanceId || null });
+    const primaryAppointmentId = packageFinancialContext?.chargeAppointment?.id;
+    if (primaryAppointmentId && String(primaryAppointmentId) !== String(appointment.id)) {
+      await syncAppointmentFinance(primaryAppointmentId);
+    }
     return summary;
   }
 

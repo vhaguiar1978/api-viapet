@@ -16,7 +16,7 @@ import sequelize from "../database/config.js";
 import { logActivity } from "../service/activityLogger.js";
 import {
   calculateAppointmentSummary,
-  getAppointmentComandaDetails,
+  calculateAppointmentOutstandingSummary,
   syncAppointmentFinance,
 } from "../service/appointmentFinance.js";
 import { isSaleOutstanding } from "../service/saleDebtRules.js";
@@ -614,8 +614,14 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
           },
           attributes: [
             "id",
+            "usersId",
             "customerId",
+            "petId",
+            "serviceId",
+            "secondaryServiceId",
+            "tertiaryServiceId",
             "date",
+            "time",
             "financeId",
             "status",
             "package",
@@ -640,60 +646,14 @@ router.get("/customers/debt-summary", auth, async (req, res) => {
           .filter(Boolean),
       ),
     ];
-    const [itemsForBalanceAppointments, paymentsForBalanceAppointments] = appointmentIdsFromBalanceRefs.length
-      ? await Promise.all([
-          AppointmentItem.findAll({
-            where: {
-              usersId,
-              appointmentId: { [Op.in]: appointmentIdsFromBalanceRefs },
-            },
-            order: [["createdAt", "ASC"]],
-          }),
-          AppointmentPayment.findAll({
-            where: {
-              usersId,
-              appointmentId: { [Op.in]: appointmentIdsFromBalanceRefs },
-            },
-            order: [["dueDate", "ASC"], ["createdAt", "ASC"]],
-          }),
-        ])
-      : [[], []];
-    const itemsByAppointmentId = new Map();
-    for (const item of itemsForBalanceAppointments) {
-      const key = String(item.appointmentId || "");
-      if (!itemsByAppointmentId.has(key)) itemsByAppointmentId.set(key, []);
-      itemsByAppointmentId.get(key).push(item);
-    }
-    const paymentsByAppointmentId = new Map();
-    for (const payment of paymentsForBalanceAppointments) {
-      const key = String(payment.appointmentId || "");
-      if (!paymentsByAppointmentId.has(key)) paymentsByAppointmentId.set(key, []);
-      paymentsByAppointmentId.get(key).push(payment);
-    }
     const balanceSummaryByAppointmentId = new Map();
     for (const appointmentId of appointmentIdsFromBalanceRefs) {
       const appointment = appointmentById.get(String(appointmentId));
       if (!appointment) continue;
-      if (appointment.packageGroupId) {
-        const packageDetails = await getAppointmentComandaDetails(
-          appointment.id,
-          usersId,
-        );
-        if (packageDetails?.summary) {
-          balanceSummaryByAppointmentId.set(
-            String(appointmentId),
-            packageDetails.summary,
-          );
-          continue;
-        }
-      }
+      const { summary } = await calculateAppointmentOutstandingSummary(appointment);
       balanceSummaryByAppointmentId.set(
         String(appointmentId),
-        await calculateAppointmentSummary(
-          appointment,
-          itemsByAppointmentId.get(String(appointmentId)) || [],
-          paymentsByAppointmentId.get(String(appointmentId)) || [],
-        ),
+        summary,
       );
     }
     const stalePaidBalanceAppointmentIds = new Set();
@@ -956,7 +916,7 @@ router.get("/customers/:id/pending-finances", auth, async (req, res) => {
     const appts = apptIds.length
       ? await Appointment.findAll({
           where: { usersId, id: { [Op.in]: apptIds } },
-          attributes: ["id", "customerId", "date", "status"],
+          attributes: ["id", "usersId", "customerId", "petId", "serviceId", "secondaryServiceId", "tertiaryServiceId", "date", "time", "status", "package", "packageGroupId", "packageNumber", "packageMax"],
         })
       : [];
     const apptById = new Map(appts.map((a) => [String(a.id), a]));
@@ -964,9 +924,14 @@ router.get("/customers/:id/pending-finances", auth, async (req, res) => {
     // Sales do cliente (mais barato que carregar todas)
     const sales = await Sales.findAll({
       where: { usersId, custumerId: customerId },
-      attributes: ["id"],
+      attributes: ["id", "status"],
     });
     const saleIds = new Set(sales.map((s) => String(s.id)));
+    const paidSaleIds = new Set(
+      sales
+        .filter((sale) => String(sale.status || "").trim().toLowerCase() === "pago")
+        .map((sale) => String(sale.id)),
+    );
 
     const todayStr = new Intl.DateTimeFormat("sv-SE", {
       timeZone: "America/Sao_Paulo",
@@ -981,6 +946,7 @@ router.get("/customers/:id/pending-finances", auth, async (req, res) => {
     };
 
     const seenKeys = new Set();
+    const balanceSummaryCache = new Map();
     const items = [];
     for (const f of finances) {
       let resolvedCustomerId = null;
@@ -1018,11 +984,24 @@ router.get("/customers/:id/pending-finances", auth, async (req, res) => {
         }
       }
       if (!resolvedCustomerId && saleIds.has(String(f.reference))) {
+        if (paidSaleIds.has(String(f.reference))) continue;
         kind = "sale";
         resolvedCustomerId = customerId;
       }
 
       if (resolvedCustomerId !== customerId) continue;
+
+      if ((kind === "appointment_balance" || kind === "appointment_free") && appointmentId) {
+        let balanceSummary = balanceSummaryCache.get(appointmentId);
+        if (!balanceSummary) {
+          const appointment = apptById.get(appointmentId);
+          if (appointment) {
+            balanceSummary = (await calculateAppointmentOutstandingSummary(appointment)).summary;
+            balanceSummaryCache.set(appointmentId, balanceSummary);
+          }
+        }
+        if (balanceSummary && Number(balanceSummary.balance || 0) <= 0.009) continue;
+      }
 
       const dueDateStr = extractDateOnly(f.dueDate || appointmentDate || f.date);
       if (dueDateStr && dueDateStr > todayStr) continue; // futuro não é pendência
