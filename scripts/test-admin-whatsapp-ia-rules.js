@@ -51,6 +51,11 @@ assert.equal(
 );
 
 assert.equal(
+  canContactInactiveUser({ user: baseUser, consent: { consentStatus: "pending" }, automation: { attempts: 0, status: "pending" }, settings: baseSettings, now }).reason,
+  "sem_consentimento",
+);
+
+assert.equal(
   canContactInactiveUser({
     user: baseUser,
     consent: { consentStatus: "opt_out", optOutAt: now },

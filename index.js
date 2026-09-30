@@ -66,6 +66,7 @@ import { adminAuditMiddleware } from "./middlewares/adminAudit.js";
 import adminAlertsRouter from "./routes/adminAlerts.js";
 import adminTutorialsRouter from "./routes/adminTutorials.js";
 import adminWhatsappIaRouter from "./routes/adminWhatsappIa.js";
+import adminRelationshipRadarRouter from "./routes/adminRelationshipRadar.js";
 import adminRegistrationSecurityRouter, { cleanupUnconfirmedRegistrations } from "./routes/adminRegistrationSecurity.js";
 import sellersRouter from "./routes/sellers.js";
 import commercialCrmRouter from "./routes/commercialCrm.js";
@@ -218,6 +219,7 @@ app.use(adminAuditRouter);
 app.use(adminAlertsRouter);
 app.use(adminTutorialsRouter);
 app.use(adminWhatsappIaRouter);
+app.use(adminRelationshipRadarRouter);
 app.use(adminRegistrationSecurityRouter);
 // Error handler do activity logger — DEVE vir depois das rotas
 app.use(activityErrorHandler);
