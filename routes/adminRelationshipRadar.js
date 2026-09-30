@@ -1,15 +1,15 @@
 import express from "express";
-import { Op } from "sequelize";
 import adminMiddleware from "../middlewares/admin.js";
 import Users from "../models/Users.js";
-import ActivityLog from "../models/ActivityLog.js";
+import RelationshipRadarSetting from "../models/RelationshipRadarSetting.js";
+import RelationshipMission from "../models/RelationshipMission.js";
+import { RADAR_DEFAULTS } from "../service/relationshipRadarRules.js";
+import { assessRelationshipUsers } from "../service/relationshipRadarData.js";
+import { logActivity } from "../service/activityLogger.js";
+import AiKnowledge from "../models/AiKnowledge.js";
 import Subscription from "../models/Subscription.js";
 import PaymentHistory from "../models/PaymentHistory.js";
-import WhatsappConsent from "../models/WhatsappConsent.js";
-import WhatsappIaConversation from "../models/WhatsappIaConversation.js";
-import SellerCustomer from "../models/SellerCustomer.js";
-import RelationshipRadarSetting from "../models/RelationshipRadarSetting.js";
-import { RADAR_DEFAULTS, evaluateRelationship } from "../service/relationshipRadarRules.js";
+import { previewRelationshipResponse } from "../service/relationshipAssistantPreview.js";
 
 const router = express.Router();
 router.use("/admin/relationship-radar", adminMiddleware);
@@ -52,31 +52,49 @@ router.get("/admin/relationship-radar", async (req, res) => {
       order: [["createdAt", "DESC"]], limit, offset: (page - 1) * limit,
     });
     if (!users.length) return res.json({ data: [], total: count, page, settings });
-    const ids = users.map((user) => user.id);
-    const since = new Date(Date.now() - 7 * 86400000);
-    const [activities, subscriptions, payments, consents, conversations, sellers] = await Promise.all([
-      ActivityLog.findAll({ where: { user_id: { [Op.in]: ids }, created_at: { [Op.gte]: since } }, attributes: ["user_id", "modulo", "acao", "descricao", "metadata_json", "created_at"], order: [["created_at", "DESC"]], limit: 2000 }),
-      Subscription.findAll({ where: { user_id: { [Op.in]: ids } }, order: [["created_at", "DESC"]] }),
-      PaymentHistory.findAll({ where: { user_id: { [Op.in]: ids }, status: "approved" }, order: [["date_approved", "DESC"]], limit: 200 }),
-      WhatsappConsent.findAll({ where: { userId: { [Op.in]: ids } }, order: [["updatedAt", "DESC"]] }),
-      WhatsappIaConversation.findAll({ where: { userId: { [Op.in]: ids } }, order: [["updatedAt", "DESC"]] }),
-      SellerCustomer.findAll({ where: { systemId: "VIAPET", userId: { [Op.in]: ids } }, attributes: ["userId", "sellerId"] }),
-    ]);
-    const firstBy = (rows, key) => new Map(rows.slice().reverse().map((row) => [String(row[key]), row]));
-    const activityBy = new Map();
-    for (const activity of activities) { const key = String(activity.user_id); const list = activityBy.get(key) || []; list.push(activity); activityBy.set(key, list); }
-    const subscriptionBy = firstBy(subscriptions, "user_id");
-    const paymentBy = firstBy(payments, "user_id");
-    const consentBy = firstBy(consents, "userId");
-    const conversationBy = firstBy(conversations, "userId");
-    const sellerBy = firstBy(sellers, "userId");
-    const data = users.map((user) => {
-      const id = String(user.id);
-      const decision = evaluateRelationship({ user, activities: activityBy.get(id) || [], subscription: subscriptionBy.get(id), payment: paymentBy.get(id), consent: consentBy.get(id), conversation: conversationBy.get(id), sellerId: sellerBy.get(id)?.sellerId, settings });
-      return { id: user.id, name: user.companyName || user.name, createdAt: user.createdAt, lastAccess: user.lastAccess, sellerId: sellerBy.get(id)?.sellerId || null, ...decision };
-    });
+    const data = await assessRelationshipUsers(users, settings);
     return res.json({ data, total: count, page, settings });
   } catch (error) { return res.status(500).json({ message: "Não foi possível avaliar os clientes.", error: error.message }); }
+});
+
+router.get("/admin/relationship-radar/missions", async (_req, res) => {
+  try {
+    const missions = await RelationshipMission.findAll({ where: { systemId: "VIAPET" }, order: [["createdAt", "DESC"]], limit: 50 });
+    return res.json({ data: missions });
+  } catch (error) { return res.status(500).json({ message: "Não foi possível listar as missões.", error: error.message }); }
+});
+
+router.post("/admin/relationship-radar/simulate", async (req, res) => {
+  try {
+    const message = String(req.body.message || "").trim().slice(0, 1500);
+    if (!message) return res.status(400).json({ message: "Digite uma mensagem para testar." });
+    const userId = req.body.userId || null;
+    const user = userId ? await Users.findOne({ where: { id: userId, role: "proprietario" }, attributes: ["id"] }) : null;
+    if (userId && !user) return res.status(404).json({ message: "Cliente não encontrado." });
+    const [knowledge, subscription, payment] = await Promise.all([
+      AiKnowledge.findAll({ where: { status: "published" }, attributes: ["title", "keywords", "questions", "content", "videoLink", "internalLink"], limit: 120 }),
+      user ? Subscription.findOne({ where: { user_id: user.id }, order: [["created_at", "DESC"]] }) : null,
+      user ? PaymentHistory.findOne({ where: { user_id: user.id, status: "approved" }, order: [["date_approved", "DESC"]] }) : null,
+    ]);
+    const data = previewRelationshipResponse({ message, knowledge, subscription, payment });
+    return res.json({ data: { ...data, sent: false, userId: user?.id || null } });
+  } catch (error) { return res.status(500).json({ message: "Não foi possível testar a Assistente.", error: error.message }); }
+});
+
+router.post("/admin/relationship-radar/missions", async (req, res) => {
+  try {
+    const userIds = [...new Set(Array.isArray(req.body.userIds) ? req.body.userIds.map(String) : [])];
+    const name = String(req.body.name || "").trim().slice(0, 160);
+    const instruction = String(req.body.instruction || "").trim().slice(0, 4000);
+    if (!name || !instruction || !userIds.length || userIds.length > 25 || userIds.some((id) => !/^[0-9a-f-]{36}$/i.test(id))) return res.status(400).json({ message: "Informe nome, instrução e até 25 clientes válidos." });
+    const users = await Users.findAll({ where: { id: userIds, role: "proprietario", status: true }, attributes: ["id", "name", "companyName", "createdAt", "lastAccess", "plan"] });
+    if (users.length !== userIds.length) return res.status(400).json({ message: "Há clientes inválidos ou indisponíveis na seleção." });
+    const { settings } = await getSettings();
+    const results = await assessRelationshipUsers(users, settings);
+    const mission = await RelationshipMission.create({ systemId: "VIAPET", name, instruction, userIds, results, status: "observed", createdBy: req.user.id, analyzedAt: new Date() });
+    await logActivity({ req, modulo: "relationship_radar", acao: "mission_analyzed", descricao: `Missão ${name}: ${results.length} clientes analisados sem envio.`, entidadeTipo: "relationship_mission", entidadeId: mission.id, metadata: { userIds, decisions: results.map((row) => ({ userId: row.id, state: row.state, nextAction: row.nextAction, reason: row.reason })) } });
+    return res.status(201).json({ data: mission });
+  } catch (error) { return res.status(500).json({ message: "Não foi possível analisar a missão.", error: error.message }); }
 });
 
 export default router;
