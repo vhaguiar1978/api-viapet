@@ -13,7 +13,7 @@ import InactiveUserAutomation from "../models/InactiveUserAutomation.js";
 import AiKnowledge from "../models/AiKnowledge.js";
 import WhatsappConsent from "../models/WhatsappConsent.js";
 import AiUsageLog from "../models/AiUsageLog.js";
-import { sendTextMessage } from "./whatsappOfficial/whatsappSendService.js";
+import { sendTemplateMessage, sendTextMessage } from "./whatsappOfficial/whatsappSendService.js";
 import { normalizePhone } from "./whatsappOfficial/phone.js";
 import { openaiChat, OPENAI_DEFAULT_MODEL } from "./openaiClient.js";
 
@@ -75,7 +75,7 @@ export function canContactInactiveUser({ user, consent, automation, settings = {
   if (consent?.optOutAt || consent?.consentStatus === "opt_out") {
     return { allowed: false, reason: "opt_out" };
   }
-  if (consent?.consentStatus && consent.consentStatus !== "granted") {
+  if (consent.consentStatus !== "granted") {
     return { allowed: false, reason: "sem_consentimento" };
   }
   if (automation?.status === "paused" || automation?.status === "recovery_paused") {
@@ -314,6 +314,21 @@ export async function processDueInactiveAutomations({ limit = 30 } = {}) {
     }
 
     const organizationId = user.establishment || user.id;
+    const [currentSubscription, paid, currentConversation] = await Promise.all([
+      Subscription.findOne({ where: { user_id: user.id }, order: [["created_at", "DESC"]] }),
+      PaymentHistory.findOne({ where: { user_id: user.id, status: "approved" }, order: [["date_approved", "DESC"]] }),
+      WhatsappIaConversation.findOne({ where: { organizationId, userId: user.id } }),
+    ]);
+    if (currentSubscription?.status === "active" && currentSubscription.plan_type !== "trial" && (currentSubscription.payment_status === "approved" || paid)) {
+      await automation.update({ status: "converted", convertedAt: paid?.date_approved || new Date(), nextContactAt: null });
+      skipped += 1;
+      continue;
+    }
+    if (currentConversation?.attendanceMode === "human" || currentConversation?.aiPaused) {
+      await automation.update({ status: "paused", metadata: { ...(automation.metadata || {}), blockReason: "atendimento_humano" } });
+      skipped += 1;
+      continue;
+    }
     const consent = await WhatsappConsent.findOne({ where: { organizationId, userId: user.id } });
     const contactCheck = canContactInactiveUser({ user, consent, automation, settings });
 
@@ -329,7 +344,13 @@ export async function processDueInactiveAutomations({ limit = 30 } = {}) {
     }
 
     const step = Math.max(1, Number(automation.currentStep || 1));
-    const body = renderTemplate(settings.initialTemplate, user);
+    const templateName = String(process.env.VIAPET_WHATSAPP_REACTIVATION_TEMPLATE || "").trim();
+    const senderCompanyId = String(process.env.VIAPET_WHATSAPP_COMPANY_ID || "").trim();
+    if (!templateName || !senderCompanyId) {
+      await automation.update({ status: "paused", metadata: { ...(automation.metadata || {}), blockReason: "template_ou_remetente_nao_configurado" } });
+      blocked += 1;
+      continue;
+    }
 
     try {
       const [conversation] = await WhatsappIaConversation.findOrCreate({
@@ -345,11 +366,10 @@ export async function processDueInactiveAutomations({ limit = 30 } = {}) {
         },
       });
 
-      const sentMessage = await sendTextMessage({
-        companyId: organizationId,
+      const sentMessage = await sendTemplateMessage({
+        companyId: senderCompanyId,
         to: contactCheck.phone,
-        body,
-        conversationId: conversation.id,
+        templateName,
       });
 
       const nextAttempts = Number(automation.attempts || 0) + 1;
@@ -365,7 +385,7 @@ export async function processDueInactiveAutomations({ limit = 30 } = {}) {
           phoneNumber: contactCheck.phone,
           lastMessageAt: new Date(),
           lastAiMessageAt: new Date(),
-          metadata: { ...(conversation.metadata || {}), lastMessage: body },
+          metadata: { ...(conversation.metadata || {}), lastMessage: `[modelo] ${templateName}` },
         }),
         automation.update({
           status: nextStep > cadenceDays.length || nextAttempts >= Number(settings.maxAttempts || 4) ? "recovery_paused" : "contacted",
@@ -375,7 +395,7 @@ export async function processDueInactiveAutomations({ limit = 30 } = {}) {
           lastContactAt: new Date(),
           metadata: {
             ...(automation.metadata || {}),
-            template: "initial",
+            template: templateName,
             metaMessageId: sentMessage.metaMessageId || null,
           },
         }),
@@ -637,17 +657,14 @@ export async function startInactiveConversation({ adminUserId, userId }) {
   const user = await Users.findByPk(userId);
   if (!user) throw new Error("Usuario nao encontrado");
   const organizationId = user.establishment || user.id;
-  const [consent] = await WhatsappConsent.findOrCreate({
-    where: { organizationId, userId: user.id },
-    defaults: {
-      organizationId,
-      userId: user.id,
-      phoneNumber: normalizePhone(user.phone || ""),
-      consentStatus: "granted",
-      consentSource: "admin_manual",
-      consentAt: new Date(),
-    },
-  });
+  const [subscription, payment, existingConversation] = await Promise.all([
+    Subscription.findOne({ where: { user_id: user.id }, order: [["created_at", "DESC"]] }),
+    PaymentHistory.findOne({ where: { user_id: user.id, status: "approved" }, order: [["date_approved", "DESC"]] }),
+    WhatsappIaConversation.findOne({ where: { organizationId, userId: user.id } }),
+  ]);
+  if (subscription?.status === "active" && subscription.plan_type !== "trial" && (subscription.payment_status === "approved" || payment)) throw new Error("Assinatura já paga; reativação comercial não se aplica.");
+  if (existingConversation?.attendanceMode === "human" || existingConversation?.aiPaused) throw new Error("Atendimento humano ativo. A IA está pausada.");
+  const consent = await WhatsappConsent.findOne({ where: { organizationId, userId: user.id } });
   const automation = await ensureInactiveAutomationForUser(user, settings);
   const contactCheck = canContactInactiveUser({ user, consent, automation, settings });
   if (!contactCheck.allowed) {
@@ -667,24 +684,25 @@ export async function startInactiveConversation({ adminUserId, userId }) {
       metadata: { contactName: user.name, lastMessage: "" },
     },
   });
-  const body = renderTemplate(settings.initialTemplate, user);
-  const sent = await sendTextMessage({
-    companyId: adminUserId,
+  const templateName = String(process.env.VIAPET_WHATSAPP_REACTIVATION_TEMPLATE || "").trim();
+  const senderCompanyId = String(process.env.VIAPET_WHATSAPP_COMPANY_ID || "").trim();
+  if (!templateName || !senderCompanyId) throw new Error("Configure o remetente ViaPet e um modelo de reativação aprovado pela Meta.");
+  const sent = await sendTemplateMessage({
+    companyId: senderCompanyId,
     to: contactCheck.phone,
-    body,
-    conversationId: conversation.id,
+    templateName,
   });
   await Promise.all([
     conversation.update({
       lastMessageAt: new Date(),
       lastAiMessageAt: new Date(),
-      metadata: { ...(conversation.metadata || {}), lastMessage: body },
+      metadata: { ...(conversation.metadata || {}), lastMessage: `[modelo] ${templateName}` },
     }),
     automation.update({
       status: "contacted",
       lastContactAt: new Date(),
       attempts: Number(automation.attempts || 0) + 1,
-      metadata: { ...(automation.metadata || {}), template: "initial", metaMessageId: sent.metaMessageId || null },
+      metadata: { ...(automation.metadata || {}), template: templateName, metaMessageId: sent.metaMessageId || null },
     }),
   ]);
   return { conversation, sent };
@@ -745,6 +763,8 @@ export async function getConfigSummary() {
       whatsappBusinessAccountId: Boolean(process.env.WHATSAPP_BUSINESS_ACCOUNT_ID),
       whatsappVerifyToken: Boolean(process.env.WHATSAPP_VERIFY_TOKEN),
       whatsappAppSecret: Boolean(process.env.WHATSAPP_APP_SECRET || process.env.META_APP_SECRET),
+      viapetSender: Boolean(process.env.VIAPET_WHATSAPP_COMPANY_ID),
+      reactivationTemplate: Boolean(process.env.VIAPET_WHATSAPP_REACTIVATION_TEMPLATE),
       openaiApiKey: Boolean(process.env.OPENAI_API_KEY),
     },
     prompt: DEFAULT_AI_PROMPT,
