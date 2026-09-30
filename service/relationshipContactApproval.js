@@ -49,7 +49,11 @@ export async function approveRelationshipContact({ approvalId, adminUserId, req 
   try {
     const sent = await sendTemplateMessage({ companyId: senderCompanyId, to: user.phone, templateName });
     await approval.update({ status: "sent", providerMessageId: sent.metaMessageId || null, metadata: { ...(approval.metadata || {}), conversationId: sent.conversationId, templateName } });
-    await logActivity({ req, modulo: "relationship_radar", acao: "approved_contact_sent", descricao: `Contato aprovado e enviado para ${user.companyName || user.name}.`, entidadeTipo: "relationship_contact_approval", entidadeId: approval.id, metadata: { userId: user.id, action: decision.nextAction, reason: decision.reason, metaMessageId: sent.metaMessageId } });
+    try {
+      await logActivity({ req, modulo: "relationship_radar", acao: "approved_contact_sent", descricao: `Contato aprovado e enviado para ${user.companyName || user.name}.`, entidadeTipo: "relationship_contact_approval", entidadeId: approval.id, metadata: { userId: user.id, action: decision.nextAction, reason: decision.reason, metaMessageId: sent.metaMessageId } });
+    } catch (auditError) {
+      console.error("[relationship-radar] falha ao registrar auditoria do contato", auditError?.message);
+    }
     return approval;
   } catch (error) {
     await approval.update({ status: "failed", errorCode: "send_uncertain", metadata: { ...(approval.metadata || {}), error: String(error?.message || error).slice(0, 300) } });
