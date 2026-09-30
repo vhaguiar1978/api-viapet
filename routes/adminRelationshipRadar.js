@@ -3,6 +3,7 @@ import adminMiddleware from "../middlewares/admin.js";
 import Users from "../models/Users.js";
 import RelationshipRadarSetting from "../models/RelationshipRadarSetting.js";
 import RelationshipMission from "../models/RelationshipMission.js";
+import RelationshipContactApproval from "../models/RelationshipContactApproval.js";
 import { RADAR_DEFAULTS } from "../service/relationshipRadarRules.js";
 import { assessRelationshipUsers } from "../service/relationshipRadarData.js";
 import { logActivity } from "../service/activityLogger.js";
@@ -10,6 +11,8 @@ import AiKnowledge from "../models/AiKnowledge.js";
 import Subscription from "../models/Subscription.js";
 import PaymentHistory from "../models/PaymentHistory.js";
 import { previewRelationshipResponse } from "../service/relationshipAssistantPreview.js";
+import { approveRelationshipContact } from "../service/relationshipContactApproval.js";
+import { getConnectionByCompany } from "../service/whatsappOfficial/whatsappConnectionService.js";
 
 const router = express.Router();
 router.use("/admin/relationship-radar", adminMiddleware);
@@ -24,6 +27,15 @@ router.get("/admin/relationship-radar/settings", async (_req, res) => {
   catch (error) { return res.status(500).json({ message: "Não foi possível carregar as regras do Radar.", error: error.message }); }
 });
 
+router.get("/admin/relationship-radar/readiness", async (_req, res) => {
+  try {
+    const companyId = String(process.env.VIAPET_WHATSAPP_COMPANY_ID || "").trim();
+    const templateConfigured = Boolean(String(process.env.VIAPET_WHATSAPP_REACTIVATION_TEMPLATE || "").trim());
+    const sender = companyId ? await getConnectionByCompany(companyId) : null;
+    return res.json({ data: { whatsappConnected: Boolean(sender?.connection?.phoneNumberId && sender?.accessToken), templateConfigured, ready: Boolean(sender?.connection?.phoneNumberId && sender?.accessToken && templateConfigured) } });
+  } catch (_error) { return res.json({ data: { whatsappConnected: false, templateConfigured: false, ready: false } }); }
+});
+
 router.put("/admin/relationship-radar/settings", async (req, res) => {
   try {
     const { row, settings } = await getSettings();
@@ -35,7 +47,8 @@ router.put("/admin/relationship-radar/settings", async (req, res) => {
       contactStart: String(req.body.contactStart ?? settings.contactStart).slice(0, 5),
       contactEnd: String(req.body.contactEnd ?? settings.contactEnd).slice(0, 5),
       instructions: String(req.body.instructions ?? settings.instructions).slice(0, 4000),
-      mode: "observe" };
+      dailyContactLimit: Math.min(25, Math.max(0, Number(req.body.dailyContactLimit ?? settings.dailyContactLimit) || 0)),
+      mode: req.body.mode === "approval" ? "approval" : "observe" };
     await row.update({ settings: next, updatedBy: req.user.id });
     return res.json({ data: next });
   } catch (error) { return res.status(500).json({ message: "Não foi possível salvar as regras do Radar.", error: error.message }); }
@@ -62,6 +75,30 @@ router.get("/admin/relationship-radar/missions", async (_req, res) => {
     const missions = await RelationshipMission.findAll({ where: { systemId: "VIAPET" }, order: [["createdAt", "DESC"]], limit: 50 });
     return res.json({ data: missions });
   } catch (error) { return res.status(500).json({ message: "Não foi possível listar as missões.", error: error.message }); }
+});
+
+router.get("/admin/relationship-radar/approvals", async (_req, res) => {
+  try {
+    const approvals = await RelationshipContactApproval.findAll({ where: { systemId: "VIAPET" }, order: [["createdAt", "DESC"]], limit: 100 });
+    const ids = [...new Set(approvals.map((item) => item.userId))];
+    const users = ids.length ? await Users.findAll({ where: { id: ids }, attributes: ["id", "name", "companyName"] }) : [];
+    const names = new Map(users.map((user) => [String(user.id), user.companyName || user.name]));
+    return res.json({ data: approvals.map((item) => ({ ...item.toJSON(), customerName: names.get(String(item.userId)) || "Cliente indisponível" })) });
+  } catch (error) { return res.status(500).json({ message: "Não foi possível listar as aprovações.", error: error.message }); }
+});
+
+router.post("/admin/relationship-radar/approvals/:id/approve", async (req, res) => {
+  try { return res.json({ data: await approveRelationshipContact({ approvalId: req.params.id, adminUserId: req.user.id, req }) }); }
+  catch (error) { return res.status(error.status || 500).json({ message: error.message }); }
+});
+
+router.post("/admin/relationship-radar/approvals/:id/reject", async (req, res) => {
+  try {
+    const [changed] = await RelationshipContactApproval.update({ status: "rejected", reviewedBy: req.user.id, reviewedAt: new Date() }, { where: { id: req.params.id, systemId: "VIAPET", status: "pending" } });
+    if (!changed) return res.status(409).json({ message: "Contato não encontrado ou já revisado." });
+    await logActivity({ req, modulo: "relationship_radar", acao: "contact_rejected", descricao: "Contato da missão recusado pelo administrador.", entidadeTipo: "relationship_contact_approval", entidadeId: req.params.id });
+    return res.json({ data: { id: req.params.id, status: "rejected" } });
+  } catch (error) { return res.status(500).json({ message: "Não foi possível recusar o contato.", error: error.message }); }
 });
 
 router.post("/admin/relationship-radar/simulate", async (req, res) => {
@@ -92,6 +129,10 @@ router.post("/admin/relationship-radar/missions", async (req, res) => {
     const { settings } = await getSettings();
     const results = await assessRelationshipUsers(users, settings);
     const mission = await RelationshipMission.create({ systemId: "VIAPET", name, instruction, userIds, results, status: "observed", createdBy: req.user.id, analyzedAt: new Date() });
+    if (settings.mode === "approval") {
+      const candidates = results.filter((row) => row.signals?.contactAuthorized && !row.signals?.optedOut && !row.signals?.humanActive && !row.signals?.confirmedPayment && ["offer_help", "evaluate_reactivation"].includes(row.nextAction));
+      if (candidates.length) await RelationshipContactApproval.bulkCreate(candidates.map((row) => ({ systemId: "VIAPET", missionId: mission.id, userId: row.id, action: row.nextAction, reason: row.reason, status: "pending" })));
+    }
     await logActivity({ req, modulo: "relationship_radar", acao: "mission_analyzed", descricao: `Missão ${name}: ${results.length} clientes analisados sem envio.`, entidadeTipo: "relationship_mission", entidadeId: mission.id, metadata: { userIds, decisions: results.map((row) => ({ userId: row.id, state: row.state, nextAction: row.nextAction, reason: row.reason })) } });
     return res.status(201).json({ data: mission });
   } catch (error) { return res.status(500).json({ message: "Não foi possível analisar a missão.", error: error.message }); }

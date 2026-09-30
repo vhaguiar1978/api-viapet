@@ -6,9 +6,28 @@ export const RADAR_DEFAULTS = Object.freeze({
   contactStart: "09:00",
   contactEnd: "18:00",
   maxAttempts: 3,
+  dailyContactLimit: 0,
   minHoursBetweenContacts: 72,
   instructions: "Ajude o cliente a usar o ViaPet antes de oferecer uma assinatura.",
 });
+
+const ACTIONABLE_CONTACTS = new Set(["offer_help", "evaluate_reactivation"]);
+
+export function checkRelationshipApproval({ decision, settings, now = new Date(), sentToday = 0, lastContactAt = null, attempts = 0, senderReady = false }) {
+  if (settings.mode !== "approval") return "modo_sem_aprovacao";
+  if (!ACTIONABLE_CONTACTS.has(decision.nextAction)) return "acao_nao_aplicavel";
+  if (!decision.signals.contactAuthorized || decision.signals.optedOut) return "sem_consentimento";
+  if (decision.signals.humanActive) return "atendimento_humano";
+  if (decision.signals.confirmedPayment) return "pagamento_confirmado";
+  if (!senderReady) return "whatsapp_nao_configurado";
+  if (Number(settings.dailyContactLimit || 0) <= sentToday) return "limite_diario";
+  if (Number(attempts) >= Number(settings.maxAttempts || 3)) return "limite_tentativas";
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: "America/Sao_Paulo", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(now).filter((part) => part.type !== "literal").map((part) => [part.type, part.value]));
+  const time = `${parts.hour}:${parts.minute}`;
+  if (time < settings.contactStart || time >= settings.contactEnd) return "fora_do_horario";
+  if (lastContactAt && now.getTime() - new Date(lastContactAt).getTime() < Number(settings.minHoursBetweenContacts || 72) * 3600000) return "intervalo_minimo";
+  return null;
+}
 
 function localDay(value) {
   const parts = new Intl.DateTimeFormat("en-US", { timeZone: "America/Sao_Paulo", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date(value));
@@ -47,7 +66,7 @@ export function evaluateRelationship({ user, activities = [], subscription = nul
   const completed = recent.filter((item) => item.modulo !== "auth" && item.modulo !== "navegacao" && /created|completed|confirmado|success/i.test(String(item.acao || ""))).length;
   const activityCount = recent.length;
   const earlyDifficulty = agendaViews >= 3 && completed === 0 && inactiveDays < Number(settings.inactivityThresholdDays || 3);
-  const signals = { inactiveOperationalDays: inactiveDays, recentActivityCount: activityCount, agendaViews, completedActions: completed, confirmedPayment: hasConfirmedPayment(subscription, payment), humanActive: isHuman(conversation), optedOut: isOptOut(consent), sellerAssigned: Boolean(sellerId) };
+  const signals = { inactiveOperationalDays: inactiveDays, recentActivityCount: activityCount, agendaViews, completedActions: completed, confirmedPayment: hasConfirmedPayment(subscription, payment), humanActive: isHuman(conversation), optedOut: isOptOut(consent), contactAuthorized: consent?.consentStatus === "granted" && !consent?.optOutAt, sellerAssigned: Boolean(sellerId) };
   let score = Math.max(0, Math.min(100, 55 + Math.min(25, completed * 5) + Math.min(10, activityCount * 2) - Math.min(40, inactiveDays * 9) - (earlyDifficulty ? 20 : 0)));
   let state = "configurando"; let nextAction = "observe"; let reason = "Cliente em acompanhamento; ainda não há motivo para contato.";
   if (signals.optedOut) { state = "sem_contato"; nextAction = "none"; reason = "Cliente pediu para não receber contatos."; }

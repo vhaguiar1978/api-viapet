@@ -660,7 +660,7 @@ export async function createOrUpdateConsent({ userId, consentStatus = "granted",
 export async function startInactiveConversation({ adminUserId, userId }) {
   const settings = await getAdminWhatsappIaSettings();
   const relationshipSettings = await RelationshipRadarSetting.findOne({ where: { systemId: "VIAPET" } });
-  if (!['approval', 'automatic'].includes(relationshipSettings?.settings?.mode)) throw new Error("A Assistente está no modo Somente observar. Nenhum contato pode ser iniciado.");
+  if (relationshipSettings?.settings?.mode !== "automatic") throw new Error("Contatos manuais devem ser aprovados pelo Radar de relacionamento. Nenhum contato foi iniciado.");
   const user = await Users.findByPk(userId);
   if (!user) throw new Error("Usuario nao encontrado");
   const organizationId = user.establishment || user.id;
