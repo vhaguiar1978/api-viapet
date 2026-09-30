@@ -13,6 +13,7 @@ import InactiveUserAutomation from "../models/InactiveUserAutomation.js";
 import AiKnowledge from "../models/AiKnowledge.js";
 import WhatsappConsent from "../models/WhatsappConsent.js";
 import AiUsageLog from "../models/AiUsageLog.js";
+import RelationshipRadarSetting from "../models/RelationshipRadarSetting.js";
 import { sendTemplateMessage, sendTextMessage } from "./whatsappOfficial/whatsappSendService.js";
 import { normalizePhone } from "./whatsappOfficial/phone.js";
 import { openaiChat, OPENAI_DEFAULT_MODEL } from "./openaiClient.js";
@@ -288,6 +289,10 @@ export async function scanInactiveUsers({ days = DEFAULT_INACTIVITY_DAYS } = {})
 
 export async function processDueInactiveAutomations({ limit = 30 } = {}) {
   const settings = await getAdminWhatsappIaSettings();
+  const relationshipSettings = await RelationshipRadarSetting.findOne({ where: { systemId: "VIAPET" } });
+  if (relationshipSettings?.settings?.mode !== "automatic") {
+    return { processed: 0, sent: 0, blocked: 0, skipped: 0, reason: "relationship_observe_mode" };
+  }
   if (settings.automationEnabled !== true) {
     return { processed: 0, sent: 0, blocked: 0, skipped: 0, reason: "automation_disabled" };
   }
@@ -654,6 +659,8 @@ export async function createOrUpdateConsent({ userId, consentStatus = "granted",
 
 export async function startInactiveConversation({ adminUserId, userId }) {
   const settings = await getAdminWhatsappIaSettings();
+  const relationshipSettings = await RelationshipRadarSetting.findOne({ where: { systemId: "VIAPET" } });
+  if (!['approval', 'automatic'].includes(relationshipSettings?.settings?.mode)) throw new Error("A Assistente está no modo Somente observar. Nenhum contato pode ser iniciado.");
   const user = await Users.findByPk(userId);
   if (!user) throw new Error("Usuario nao encontrado");
   const organizationId = user.establishment || user.id;
