@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { countOperationalDays, evaluateRelationship, RADAR_DEFAULTS } from "../service/relationshipRadarRules.js";
+import { countOperationalDays, evaluateRelationship, scopeRelationshipRecords, RADAR_DEFAULTS } from "../service/relationshipRadarRules.js";
 
 const now = new Date("2026-10-06T12:00:00Z");
 const user = { createdAt: "2026-10-01T12:00:00Z", lastAccess: "2026-10-05T12:00:00Z" };
@@ -36,4 +36,13 @@ test("atendimento humano e opt-out prevalecem sobre inatividade", () => {
 test("três dias operacionais sem acesso entram em avaliação, sem envio", () => {
   const result = evaluateRelationship({ ...context, user: { ...user, lastAccess: "2026-09-30T12:00:00Z" } });
   assert.equal(result.nextAction, "evaluate_reactivation"); assert.equal(result.canSend, false);
+});
+
+test("consentimento e conversa de outra empresa não entram na decisão", () => {
+  const users = [{ id: "cliente-1", establishment: "empresa-certa" }];
+  const rows = [
+    { userId: "cliente-1", organizationId: "empresa-errada", consentStatus: "granted" },
+    { userId: "cliente-1", organizationId: "empresa-certa", consentStatus: "pending" },
+  ];
+  assert.deepEqual(scopeRelationshipRecords(rows, users), [rows[1]]);
 });

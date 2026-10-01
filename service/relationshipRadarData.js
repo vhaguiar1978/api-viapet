@@ -5,7 +5,7 @@ import PaymentHistory from "../models/PaymentHistory.js";
 import WhatsappConsent from "../models/WhatsappConsent.js";
 import WhatsappIaConversation from "../models/WhatsappIaConversation.js";
 import SellerCustomer from "../models/SellerCustomer.js";
-import { evaluateRelationship } from "./relationshipRadarRules.js";
+import { evaluateRelationship, scopeRelationshipRecords } from "./relationshipRadarRules.js";
 
 export async function assessRelationshipUsers(users, settings, now = new Date()) {
   if (!users.length) return [];
@@ -24,8 +24,8 @@ export async function assessRelationshipUsers(users, settings, now = new Date())
   for (const activity of activities) { const key = String(activity.user_id); const list = activityBy.get(key) || []; list.push(activity); activityBy.set(key, list); }
   const subscriptionsBy = latestBy(subscriptions, "user_id");
   const paymentsBy = latestBy(payments, "user_id");
-  const consentsBy = latestBy(consents, "userId");
-  const conversationsBy = latestBy(conversations, "userId");
+  const consentsBy = latestBy(scopeRelationshipRecords(consents, users), "userId");
+  const conversationsBy = latestBy(scopeRelationshipRecords(conversations, users), "userId");
   const sellersBy = latestBy(sellers, "userId");
   return users.map((user) => {
     const id = String(user.id);

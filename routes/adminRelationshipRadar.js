@@ -61,7 +61,7 @@ router.get("/admin/relationship-radar", async (req, res) => {
     const { settings } = await getSettings();
     const { count, rows: users } = await Users.findAndCountAll({
       where: { role: "proprietario", status: true },
-      attributes: ["id", "name", "companyName", "createdAt", "lastAccess", "plan"],
+      attributes: ["id", "establishment", "name", "companyName", "createdAt", "lastAccess", "plan"],
       order: [["createdAt", "DESC"]], limit, offset: (page - 1) * limit,
     });
     if (!users.length) return res.json({ data: [], total: count, page, settings });
@@ -124,7 +124,7 @@ router.post("/admin/relationship-radar/missions", async (req, res) => {
     const name = String(req.body.name || "").trim().slice(0, 160);
     const instruction = String(req.body.instruction || "").trim().slice(0, 4000);
     if (!name || !instruction || !userIds.length || userIds.length > 25 || userIds.some((id) => !/^[0-9a-f-]{36}$/i.test(id))) return res.status(400).json({ message: "Informe nome, instrução e até 25 clientes válidos." });
-    const users = await Users.findAll({ where: { id: userIds, role: "proprietario", status: true }, attributes: ["id", "name", "companyName", "createdAt", "lastAccess", "plan"] });
+    const users = await Users.findAll({ where: { id: userIds, role: "proprietario", status: true }, attributes: ["id", "establishment", "name", "companyName", "createdAt", "lastAccess", "plan"] });
     if (users.length !== userIds.length) return res.status(400).json({ message: "Há clientes inválidos ou indisponíveis na seleção." });
     const { settings } = await getSettings();
     const results = await assessRelationshipUsers(users, settings);
