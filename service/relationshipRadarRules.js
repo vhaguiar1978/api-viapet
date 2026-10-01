@@ -29,6 +29,11 @@ export function checkRelationshipApproval({ decision, settings, now = new Date()
   return null;
 }
 
+export function scopeRelationshipRecords(rows, users) {
+  const organizationByUser = new Map(users.map((user) => [String(user.id), String(user.establishment || user.id)]));
+  return rows.filter((row) => organizationByUser.get(String(row.userId)) === String(row.organizationId));
+}
+
 function localDay(value) {
   const parts = new Intl.DateTimeFormat("en-US", { timeZone: "America/Sao_Paulo", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date(value));
   const fields = Object.fromEntries(parts.filter((part) => part.type !== "literal").map((part) => [part.type, part.value]));
