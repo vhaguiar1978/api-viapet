@@ -1791,6 +1791,8 @@ router.get("/finance/list", authenticate, async (req, res) => {
       where[Op.or] = [
         { date: dateRange },
         { dueDate: dateRange },
+        { paidAt: dateRange },
+        { createdAt: dateRange },
       ];
     }
 
