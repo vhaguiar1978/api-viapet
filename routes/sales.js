@@ -162,8 +162,16 @@ router.post("/sales", auth, async (req, res) => {
 // Rota para listar todas as vendas
 router.get("/sales", auth, async (req, res) => {
   try {
+    const { startDate, endDate } = req.query;
+    const where = { usersId: req.user.establishment };
+    if (startDate || endDate) {
+      const createdAt = {};
+      if (startDate) createdAt[Op.gte] = new Date(`${startDate}T00:00:00.000Z`);
+      if (endDate) createdAt[Op.lte] = new Date(`${endDate}T23:59:59.999Z`);
+      where.createdAt = createdAt;
+    }
     const sales = await Sales.findAll({
-      where: { usersId: req.user.establishment },
+      where,
       include: [
         {
           model: Custumers,
@@ -177,28 +185,27 @@ router.get("/sales", auth, async (req, res) => {
       order: [["createdAt", "DESC"]],
     });
 
-    // Buscar os nomes dos produtos para cada venda
-    const salesWithProducts = await Promise.all(
-      sales.map(async (sale) => {
-        const saleJSON = sale.toJSON();
-        saleJSON.SaleItems = await Promise.all(
-          saleJSON.SaleItems.map(async (item) => {
-            const product = await Products.findOne({
-              where: {
-                id: item.productId,
-                usersId: req.user.establishment,
-              },
-              attributes: ["name"],
-            });
-            return {
-              ...item,
-              productName: product ? product.name : null,
-            };
-          }),
-        );
-        return saleJSON;
-      }),
-    );
+    // Carrega os produtos em uma única consulta. Antes havia uma consulta por
+    // item de venda, o que deixava relatórios mensais progressivamente lentos.
+    const serializedSales = sales.map((sale) => sale.toJSON());
+    const productIds = Array.from(new Set(
+      serializedSales.flatMap((sale) => sale.SaleItems || []).map((item) => item.productId).filter(Boolean),
+    ));
+    const products = productIds.length
+      ? await Products.findAll({
+          where: { id: { [Op.in]: productIds }, usersId: req.user.establishment },
+          attributes: ["id", "name"],
+          raw: true,
+        })
+      : [];
+    const productNames = new Map(products.map((product) => [String(product.id), product.name]));
+    const salesWithProducts = serializedSales.map((sale) => ({
+      ...sale,
+      SaleItems: (sale.SaleItems || []).map((item) => ({
+        ...item,
+        productName: productNames.get(String(item.productId)) || null,
+      })),
+    }));
 
     return res.status(200).json({
       message: "Vendas encontradas com sucesso",
