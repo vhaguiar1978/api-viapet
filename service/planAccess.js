@@ -80,8 +80,14 @@ function readManualAccess(accessControl, planFeatures) {
   const configured = Array.isArray(accessControl.features)
     ? accessControl.features.map(String)
     : [];
+  // Manual access can contain grouped feature IDs from older/admin setups.
+  // Expand those IDs before checking route-level entitlements (for example,
+  // the `cadastros` permission must authorize the `clientes` route).
+  const configuredFeatures = new Set(
+    configured.flatMap((feature) => FEATURE_EXPANSIONS[feature] || [feature]),
+  );
   const features = configured.length
-    ? planFeatures.filter((feature) => configured.includes(feature))
+    ? planFeatures.filter((feature) => configuredFeatures.has(feature))
     : planFeatures;
   return { blocked: false, reason: "", features };
 }
