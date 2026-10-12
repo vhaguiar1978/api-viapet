@@ -47,7 +47,12 @@ export function getSubscriptionPlanId(subscription) {
 }
 
 function expandPlanFeatures(plan) {
-  const features = new Set(["configuracoes"]);
+  // Tutor/pet/service registration is a core workflow in every public plan.
+  // Keep it available even if persisted plan settings predate this feature map.
+  const features = new Set([
+    ...FEATURE_EXPANSIONS.cadastros,
+    "configuracoes",
+  ]);
   for (const item of plan?.features || []) {
     if (!item?.included || item?.status === "soon") continue;
     for (const feature of FEATURE_EXPANSIONS[item.key] || []) {
