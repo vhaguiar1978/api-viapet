@@ -16,7 +16,10 @@ const ROUTE_FEATURES = [
   [/^\/agenda(?:\/|$)/, "agenda"],
   [/^\/(?:products|product|addProduct|editProduct|deleteproduct)(?:\/|$)/, "cadastros"],
   [/^\/services(?:\/|$)/, "cadastros"],
-  [/^\/(?:customers|customer-data|custumer|client)(?:\/|$)/, "clientes"],
+  // Restrict these matches to actual customer resources. A broad `/client`
+  // prefix also catches helper endpoints such as `/client-appointments`.
+  [/^\/(?:customers|customer-data|custumer)(?:\/|$)/, "clientes"],
+  [/^\/client(?:\/|$)/, "clientes"],
   [/^\/(?:pets|pet)(?:\/|$)/, "pets"],
 ];
 
