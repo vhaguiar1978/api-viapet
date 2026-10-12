@@ -7,7 +7,6 @@ import Users from "../../models/Users.js";
 import Settings from "../../models/Settings.js";
 import Subscription from "../../models/Subscription.js";
 import { ensureDefaultMedicalCatalog } from "../../service/defaultMedicalCatalog.js";
-import { getOrCreateBillingSettings } from "../../service/billingAccess.js";
 import {
   REGISTRATION_STATUS, auditRegistration, consumeVerification, enforceRegistrationLimits,
   isDisposableEmail, issueVerification, normalizePhone, resolveRegistrationContext, verifyCaptcha,
@@ -33,7 +32,7 @@ async function provisionActiveAccount(user, requestedPlan = "essential") {
   if (!existingSettings) await Settings.create({ usersId: user.id, storeName: user.companyName || user.name, intervalClinic: 30, intervalAesthetics: 30, openingTime: "08:00", closingTime: "18:00", breakStartTime: "12:00", breakEndTime: "13:00", notifyClient: true, themeColor: "#e4572e", textColor: "#1F2937" });
   const existingSubscription = await Subscription.findOne({ where: { user_id: user.id } });
   if (!existingSubscription) {
-    const billing = await getOrCreateBillingSettings(); const trialDays = Math.max(1, Number(billing?.trialDays || 30));
+    const trialDays = 30;
     const start = new Date(); const end = new Date(Date.now() + trialDays * 86400000);
     await Subscription.create({ user_id: user.id, plan_type: "trial", status: "active", amount: 0, currency: "BRL", trial_start: start, trial_end: end, billing_cycle_start: end, next_billing_date: end, notes: `Trial criado após identidade confirmada. Plano escolhido: ${requestedPlan}.` });
     user.expirationDate = end;

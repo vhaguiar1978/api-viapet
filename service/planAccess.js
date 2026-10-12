@@ -62,6 +62,18 @@ function expandPlanFeatures(plan) {
   return [...features];
 }
 
+function expandTrialFeatures() {
+  // During the signup trial, all currently available product features are
+  // enabled. AI remains an explicit paid add-on, and fiscal is not yet live.
+  return [
+    ...new Set(
+      Object.entries(FEATURE_EXPANSIONS)
+        .filter(([key]) => key !== "ia")
+        .flatMap(([, features]) => features),
+    ),
+  ];
+}
+
 function readManualAccess(accessControl, planFeatures) {
   if (!accessControl) return planFeatures;
   const now = new Date();
@@ -140,12 +152,19 @@ export async function resolvePlanAccess(userOrId) {
   const plans = normalizePublicPlans(settings?.publicPlans);
   const planId = getSubscriptionPlanId(subscription);
   const plan = plans.find((item) => item.id === planId) || plans[0];
-  const planFeatures = expandPlanFeatures(plan);
+  const isActiveTrial =
+    String(subscription?.plan_type || "").toLowerCase() === "trial" &&
+    String(subscription?.status || "").toLowerCase() === "active" &&
+    subscription?.trial_end &&
+    new Date(subscription.trial_end).getTime() >= Date.now();
+  const planFeatures = isActiveTrial
+    ? expandTrialFeatures()
+    : expandPlanFeatures(plan);
   const manualAccess = readManualAccess(accessControl, planFeatures);
 
   return {
-    planId: plan?.id || planId,
-    planName: plan?.name || "Plano ViaPet",
+    planId: isActiveTrial ? "trial" : plan?.id || planId,
+    planName: isActiveTrial ? "Acesso completo por 30 dias" : plan?.name || "Plano ViaPet",
     features: manualAccess.features,
     planFeatures,
     blocked: manualAccess.blocked,
