@@ -4,6 +4,7 @@ import auth from "../middlewares/auth.js";
 import { Op } from "sequelize";
 import Pets from "../models/Pets.js";
 import Sequelize from "sequelize";
+import Belongings from "../models/Belongings.js";
 import Appointment from "../models/Appointment.js";
 import Services from "../models/Services.js";
 import Sales from "../models/Sales.js";
@@ -11,7 +12,9 @@ import SaleItem from "../models/SaleItem.js";
 import Product from "../models/Products.js";
 import AppointmentItem from "../models/AppointmentItem.js";
 import AppointmentPayment from "../models/AppointmentPayment.js";
+import AppointmentStatusHistory from "../models/AppointmentStatusHistory.js";
 import Finance from "../models/Finance.js";
+import ReconciliationMatch from "../models/ReconciliationMatch.js";
 import sequelize from "../database/config.js";
 import { logActivity } from "../service/activityLogger.js";
 import {
@@ -21,6 +24,13 @@ import {
 } from "../service/appointmentFinance.js";
 import { isSaleOutstanding } from "../service/saleDebtRules.js";
 const router = express.Router();
+
+function getAppointmentFinanceIds(appointments = [], payments = []) {
+  return [...new Set([
+    ...appointments.map((appointment) => appointment.financeId),
+    ...payments.map((payment) => payment.financeId),
+  ].filter(Boolean).map(Number))];
+}
 
 function isAppointmentFinanceReference(reference) {
   const normalizedReference = String(reference || "").trim().toLowerCase();
@@ -402,7 +412,6 @@ router.get("/customers/search", auth, async (req, res) => {
 // Coloque esta rota ANTES de qualquer rota que use /customers/:id
 router.delete("/customers/batch", auth, async (req, res) => {
   try {
-    console.log("Received data:", req.body);
     const { customerIds } = req.body;
 
     if (
@@ -415,68 +424,127 @@ router.delete("/customers/batch", auth, async (req, res) => {
       });
     }
 
-    // Extrai apenas os IDs dos objetos de cliente
-    const ids = customerIds.map((customer) => customer.id);
+    const establishmentId = req.user.establishment;
+    const ids = [...new Set(customerIds.map((customer) => String(customer?.id || "")).filter(Boolean))];
+    if (!ids.length) return res.status(400).json({ message: "Lista de IDs de clientes inválida" });
 
-    // Verifica se todos os clientes pertencem ao estabelecimento
-    const customers = await Custumers.findAll({
-      where: {
-        id: ids,
-        usersId: req.user.establishment,
-      },
-    });
-
-    if (customers.length === 0) {
-      return res.status(404).json({
-        message: "Nenhum cliente encontrado para exclusão",
+    const transaction = await sequelize.transaction();
+    let deletedCount = 0;
+    try {
+      const customers = await Custumers.findAll({
+        where: { id: { [Op.in]: ids }, usersId: establishmentId },
+        attributes: ["id"],
+        transaction,
       });
-    }
+      const ownedCustomerIds = customers.map((customer) => customer.id);
+      if (ownedCustomerIds.length !== ids.length) {
+        await transaction.rollback();
+        return res.status(404).json({ message: "Um ou mais tutores não foram encontrados" });
+      }
 
-    // Remove na ordem correta para respeitar as constraints de chave estrangeira
-
-    // 1. Remove os itens de venda primeiro
-    await SaleItem.destroy({
-      where: {
-        saleId: {
-          [Op.in]: Sequelize.literal(
-            `(SELECT id FROM sales WHERE custumerId IN (${ids
-              .map((id) => `'${id}'`)
-              .join(",")}))`
-          ),
+      const pets = await Pets.findAll({
+        where: { custumerId: { [Op.in]: ownedCustomerIds }, usersId: establishmentId },
+        attributes: ["id"], transaction,
+      });
+      const petIds = pets.map((pet) => pet.id);
+      const appointments = await Appointment.findAll({
+        where: {
+          usersId: establishmentId,
+          [Op.or]: [
+            { customerId: { [Op.in]: ownedCustomerIds } },
+            ...(petIds.length ? [{ petId: { [Op.in]: petIds } }] : []),
+          ],
         },
-      },
-    });
+        attributes: ["id", "financeId"], transaction,
+      });
+      const appointmentIds = appointments.map((appointment) => appointment.id);
+      const sales = await Sales.findAll({
+        where: {
+          usersId: establishmentId,
+          [Op.or]: [
+            { custumerId: { [Op.in]: ownedCustomerIds } },
+            ...(appointmentIds.length ? [{ appointmentId: { [Op.in]: appointmentIds } }] : []),
+          ],
+        },
+        attributes: ["id"], transaction,
+      });
+      const saleIds = sales.map((sale) => sale.id);
+      const appointmentPayments = appointmentIds.length
+        ? await AppointmentPayment.findAll({
+            where: { appointmentId: { [Op.in]: appointmentIds }, usersId: establishmentId },
+            attributes: ["financeId"], transaction,
+          })
+        : [];
+      const appointmentFinanceIds = getAppointmentFinanceIds(appointments, appointmentPayments);
+      const relatedFinanceRows = appointmentIds.length || saleIds.length
+        ? await Finance.findAll({
+            where: {
+              usersId: establishmentId,
+              [Op.or]: [
+                ...(saleIds.length ? [{ reference: { [Op.in]: saleIds.map(String) } }] : []),
+                ...appointments.map((appointment) => ({ reference: `appointment:${appointment.id}` })),
+                ...(appointmentIds.length ? [
+                  { reference: { [Op.in]: appointmentIds.map((id) => `appointment_balance:${id}`) } },
+                  { reference: { [Op.in]: appointmentIds.map((id) => `appointment_free:${id}`) } },
+                ] : []),
+              ],
+            },
+            attributes: ["id"], transaction,
+          })
+        : [];
+      const financeIds = [...new Set([
+        ...appointmentFinanceIds,
+        ...relatedFinanceRows.map((finance) => Number(finance.id)),
+      ])];
 
-    // 2. Remove as vendas
-    await Sales.destroy({
-      where: {
-        custumerId: ids,
-      },
-    });
-
-    // 3. Remove os agendamentos
-    await Appointment.destroy({
-      where: {
-        customerId: ids,
-        usersId: req.user.establishment,
-      },
-    });
-
-    // 4. Remove os pets
-    await Pets.destroy({
-      where: {
-        custumerId: ids,
-        usersId: req.user.establishment,
-      },
-    });
-
-    // 5. Finalmente, remove os clientes
-    const deletedCount = await Custumers.destroy({
-      where: {
-        id: ids,
-        usersId: req.user.establishment,
-      },
-    });
+      if (saleIds.length) {
+        await SaleItem.destroy({
+          where: { saleId: { [Op.in]: saleIds }, usersId: establishmentId }, transaction,
+        });
+      }
+      if (financeIds.length) {
+        await ReconciliationMatch.destroy({
+          where: { financeId: { [Op.in]: financeIds }, usersId: establishmentId }, transaction,
+        });
+      }
+      if (appointmentIds.length) {
+        await AppointmentStatusHistory.destroy({
+          where: { appointmentId: { [Op.in]: appointmentIds }, usersId: establishmentId }, transaction,
+        });
+        await AppointmentPayment.destroy({
+          where: { appointmentId: { [Op.in]: appointmentIds }, usersId: establishmentId }, transaction,
+        });
+        await AppointmentItem.destroy({
+          where: { appointmentId: { [Op.in]: appointmentIds }, usersId: establishmentId }, transaction,
+        });
+        await Appointment.destroy({
+          where: { id: { [Op.in]: appointmentIds }, usersId: establishmentId }, transaction,
+        });
+      }
+      if (financeIds.length) {
+        await Finance.destroy({
+          where: { id: { [Op.in]: financeIds }, usersId: establishmentId }, transaction,
+        });
+      }
+      if (saleIds.length) {
+        await Sales.destroy({
+          where: { id: { [Op.in]: saleIds }, usersId: establishmentId }, transaction,
+        });
+      }
+      if (petIds.length) {
+        await Belongings.destroy({ where: { petId: { [Op.in]: petIds } }, transaction });
+        await Pets.destroy({
+          where: { id: { [Op.in]: petIds }, usersId: establishmentId }, transaction,
+        });
+      }
+      deletedCount = await Custumers.destroy({
+        where: { id: { [Op.in]: ownedCustomerIds }, usersId: establishmentId }, transaction,
+      });
+      await transaction.commit();
+    } catch (error) {
+      await transaction.rollback();
+      throw error;
+    }
 
     return res.status(200).json({
       success: true,
