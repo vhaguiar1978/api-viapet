@@ -53,6 +53,41 @@ function getMissingRequiredFields(payload, requiredFields) {
   });
 }
 
+async function findAppointmentDuplicate({
+  establishmentId,
+  petId,
+  serviceId,
+  date,
+  time,
+  excludeId = "",
+  transaction,
+}) {
+  const where = {
+    usersId: establishmentId,
+    petId,
+    serviceId,
+    date,
+    time,
+    status: { [Op.notIn]: ["cancelado", "cancelada", "canceled", "cancelled"] },
+  };
+  if (excludeId) where.id = { [Op.ne]: excludeId };
+
+  return Appointment.findOne({
+    where,
+    attributes: ["id", "date", "time", "packageGroupId", "packageNumber", "packageMax"],
+    transaction,
+    ...(transaction ? { lock: transaction.LOCK.UPDATE } : {}),
+  });
+}
+
+function duplicateAppointmentResponse(res, duplicate) {
+  return res.status(409).json({
+    code: "APPOINTMENT_DUPLICATE",
+    message: "Este banho ja esta lancado para o mesmo pet, data e horario.",
+    data: { appointmentId: duplicate.id, date: duplicate.date, time: duplicate.time },
+  });
+}
+
 function isComandaManagedFinanceReference(reference) {
   return /^appointment_(payment:|balance:|free:)/.test(String(reference || ""));
 }
@@ -336,11 +371,25 @@ router.post("/appointments", auth, async (req, res) => {
         usersId: req.user.establishment,
       },
       transaction,
+      lock: transaction.LOCK.UPDATE,
     });
 
     if (!pet) {
       await transaction.rollback();
       return res.status(404).json({ message: "Pet não encontrado" });
+    }
+
+    const duplicate = await findAppointmentDuplicate({
+      establishmentId: req.user.establishment,
+      petId,
+      serviceId,
+      date,
+      time,
+      transaction,
+    });
+    if (duplicate) {
+      await transaction.rollback();
+      return duplicateAppointmentResponse(res, duplicate);
     }
 
     // Busca o cliente para enviar mensagem
@@ -1161,6 +1210,16 @@ router.put("/appointments/:id", auth, async (req, res) => {
       return res.status(404).json({ message: "Agendamento nao encontrado" });
     }
 
+    const duplicate = await findAppointmentDuplicate({
+      establishmentId: req.user.establishment,
+      petId: petId || appointment.petId,
+      serviceId: serviceId || appointment.serviceId,
+      date: date || appointment.date,
+      time: time || appointment.time,
+      excludeId: appointment.id,
+    });
+    if (duplicate) return duplicateAppointmentResponse(res, duplicate);
+
     const linkedFinance = appointment.financeId
       ? await Finance.findByPk(appointment.financeId)
       : null;
@@ -1679,11 +1738,41 @@ router.post("/appointments/package", auth, async (req, res) => {
         usersId: req.user.establishment,
       },
       transaction,
+      lock: transaction.LOCK.UPDATE,
     });
 
     if (!pet) {
       await transaction.rollback();
       return res.status(404).json({ message: "Pet não encontrado" });
+    }
+
+    const requestedSlots = new Set();
+    for (const occurrence of dates) {
+      const occurrenceDate = String(occurrence?.date || "").slice(0, 10);
+      const occurrenceTime = String(occurrence?.time || "").slice(0, 5);
+      const slotKey = `${occurrenceDate}|${occurrenceTime}`;
+      if (requestedSlots.has(slotKey)) {
+        await transaction.rollback();
+        return res.status(409).json({
+          code: "APPOINTMENT_DUPLICATE",
+          message: "O pacotinho possui duas sessoes do mesmo pet na mesma data e horario.",
+          data: { date: occurrenceDate, time: occurrenceTime },
+        });
+      }
+      requestedSlots.add(slotKey);
+
+      const duplicate = await findAppointmentDuplicate({
+        establishmentId: req.user.establishment,
+        petId,
+        serviceId,
+        date: occurrenceDate,
+        time: occurrenceTime,
+        transaction,
+      });
+      if (duplicate) {
+        await transaction.rollback();
+        return duplicateAppointmentResponse(res, duplicate);
+      }
     }
 
     // Buscar serviço para mensagem
