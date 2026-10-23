@@ -63,20 +63,22 @@ router.post("/seller-auth/login", async (req, res) => { const seller = await Sel
 
 router.get("/seller-dashboard", sellerAuth, async (req, res) => { const sellerId = req.seller.id;
   const [links, commissions] = await Promise.all([SellerCustomer.findAll({ where: { sellerId } }), Commission.findAll({ where: { sellerId } })]);
-  const userIds = links.map((x) => x.userId); const users = userIds.length ? await Users.findAll({ where: { id: { [Op.in]: userIds } }, attributes: ["id", "name", "companyName", "email", "createdAt", "plan", "expirationDate"] }) : [];
+  const userIds = links.map((x) => x.userId); const users = userIds.length ? await Users.findAll({ where: { id: { [Op.in]: userIds } }, attributes: ["id", "name", "companyName", "email", "phone", "createdAt", "plan", "expirationDate"] }) : [];
   const [subs, addons, clientAddons] = await Promise.all([
     userIds.length ? Subscription.findAll({ where: { user_id: { [Op.in]: userIds } }, order: [["created_at", "DESC"]] }) : [],
     Addon.findAll({ where: { active: true }, order: [["sort_order", "ASC"], ["name", "ASC"]] }),
     userIds.length ? ClientAddon.findAll({ where: { client_user_id: { [Op.in]: userIds } } }) : [],
   ]);
   const subMap = new Map(); for (const sub of subs) if (!subMap.has(sub.user_id)) subMap.set(sub.user_id, sub);
+  const linkMap = new Map(links.map((link) => [link.userId, link]));
   const clientAddonMap = new Map(); for (const item of clientAddons) { const list = clientAddonMap.get(item.client_user_id) || []; list.push(item); clientAddonMap.set(item.client_user_id, list); }
   const amountBy = (status) => commissions.filter((x) => status.includes(x.status)).reduce((sum, x) => sum + Number(x.commissionAmount), 0);
   return res.json({ ok: true, data: { seller: sellerDto(req.seller), link: `${process.env.FRONTEND_URL || "https://viapet.app"}/cadastro?ref=${req.seller.code}`,
     metrics: { customers: links.length, active: users.filter((x) => x.plan).length, trial: subs.filter((x) => x.plan_type === "trial" && x.status === "active").length,
       pending: amountBy(["pending"]), approved: amountBy(["approved"]), paid: amountBy(["paid"]) },
     catalog: addons,
-    customers: users.map((x) => ({ ...x.toJSON(), subscription: subMap.get(x.id) || null,
+    customers: users.map((x) => ({ ...x.toJSON(), attributedAt: linkMap.get(x.id)?.attributedAt || linkMap.get(x.id)?.createdAt || null,
+      subscription: subMap.get(x.id) || null,
       products: addons.map((addon) => { const owned = (clientAddonMap.get(x.id) || []).find((item) => item.addon_id === addon.id); return { id: addon.id, key: addon.key, name: addon.name, description: addon.description,
         catalogPrice: addon.default_amount, contracted: owned?.status === "active" || owned?.status === "trial", status: owned?.status || "available", price: owned?.amount_override ?? addon.default_amount }; }) })), commissions } }); });
 router.get("/seller-dashboard/qr", sellerAuth, async (req, res) => { const link = `${process.env.FRONTEND_URL || "https://viapet.app"}/cadastro?ref=${req.seller.code}`;
