@@ -80,6 +80,8 @@ import {
   activityErrorHandler,
 } from "./middlewares/activityCapture.js";
 import { planFeatureAccess } from "./middlewares/planFeatureAccess.js";
+import systemHealthRouter from "./routes/systemHealth.js";
+import { runGuardianProbe, startSystemGuardian } from "./service/systemGuardian.js";
 import net from "node:net";
 process.env.TZ = "America/Sao_Paulo";
 const app = express();
@@ -131,30 +133,12 @@ app.use(
 app.get("/health", (_req, res) => {
   res.status(200).json({ ok: true, service: "api-viapet" });
 });
+app.use(systemHealthRouter);
 
-// Endpoint de diagnóstico DB — ajuda a depurar env vars inválidos no Render
+// Compatibilidade com o diagnostico antigo, agora sem expor configuracao interna.
 app.get("/api/db-status", async (_req, res) => {
-  const rawDbUrl = process.env.DATABASE_URL || "";
-  const dbUrlSafe = rawDbUrl
-    ? rawDbUrl.replace(/\/\/[^@]+@/, "//***:***@").substring(0, 60) + "..."
-    : "(não definido)";
-
-  const info = {
-    NODE_ENV: process.env.NODE_ENV,
-    hasDatabaseUrl: Boolean(rawDbUrl && rawDbUrl !== "undefined" && rawDbUrl !== "null"),
-    DATABASE_URL_safe: dbUrlSafe,
-    DB_HOST: process.env.DB_HOST || "(não definido)",
-    DB_NAME: process.env.DB_NAME || "(não definido)",
-    SUPABASE_POOLER_HOST: process.env.SUPABASE_POOLER_HOST || "(não definido)",
-    DB_DIALECT: process.env.DB_DIALECT || "(não definido)",
-  };
-
-  try {
-    await sequelize.authenticate();
-    return res.json({ ok: true, db: "conectado", config: info });
-  } catch (err) {
-    return res.status(500).json({ ok: false, db: "erro", error: err.message, config: info });
-  }
+  const result = await runGuardianProbe({ allowRecovery: false });
+  return res.status(result.ok ? 200 : 503).json(result);
 });
 app.use("/uploads", express.static("uploads"));
 app.use(attachActivityHelper);
@@ -1152,6 +1136,7 @@ app.listen(PORT, () => {
   console.log("📡 Rotas de subscription corrigidas - RESTART");
   console.log("🔗 Ambiente: ", process.env.NODE_ENV);
   console.log("🔗 API_URL: ", process.env.API_URL);
+  startSystemGuardian();
 
   // Cron de automacoes CRM — roda a cada 5 minutos
   if (process.env.DISABLE_CRM_RESPONSE_QUEUE !== "true") {

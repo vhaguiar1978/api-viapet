@@ -1,0 +1,48 @@
+name: Guardiao ViaPet
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: viapet-guardian
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Verificar frontend, API, banco, login e Agenda
+        id: check
+        continue-on-error: true
+        env:
+          GUARDIAN_APP_URL: https://app.viapet.app
+          GUARDIAN_API_URL: https://api.viapet.app
+          GUARDIAN_TEST_EMAIL: ${{ secrets.GUARDIAN_TEST_EMAIL }}
+          GUARDIAN_TEST_PASSWORD: ${{ secrets.GUARDIAN_TEST_PASSWORD }}
+          GUARDIAN_ALERT_WEBHOOK_URL: ${{ secrets.GUARDIAN_ALERT_WEBHOOK_URL }}
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: node scripts/guardian-check.js
+      - name: Abrir incidente quando a recuperacao falhar
+        if: steps.check.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          existing=$(gh issue list --state open --search "[Guardiao] indisponibilidade" --json number --jq '.[0].number // empty')
+          if [ -z "$existing" ]; then
+            gh issue create --title "[Guardiao] indisponibilidade detectada" --body "O monitor automatico detectou falha no ViaPet e tentou a recuperacao segura. Consulte este workflow e os logs do Render/Supabase."
+          else
+            gh issue comment "$existing" --body "Nova falha detectada em $(date -u +'%Y-%m-%d %H:%M:%S UTC'). A recuperacao automatica foi acionada."
+          fi
+          exit 1
+
