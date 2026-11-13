@@ -8,7 +8,7 @@ async function request(url, options = {}, timeoutMs = 20000) {
   const response = await fetch(url, { ...options, signal: AbortSignal.timeout(timeoutMs) });
   const text = await response.text();
   let body = null;
-  try { body = JSON.parse(text); } catch { body = text.slice(0, 300); }
+  try { body = JSON.parse(text); } catch { body = text; }
   return { ok: response.ok, status: response.status, latencyMs: Date.now() - startedAt, body };
 }
 
