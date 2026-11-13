@@ -138,7 +138,11 @@ app.use(systemHealthRouter);
 // Compatibilidade com o diagnostico antigo, agora sem expor configuracao interna.
 app.get("/api/db-status", async (_req, res) => {
   const result = await runGuardianProbe({ allowRecovery: false });
-  return res.status(result.ok ? 200 : 503).json(result);
+  const { lastError: _lastError, ...safeResult } = result;
+  return res.status(result.ok ? 200 : 503).json({
+    ...safeResult,
+    ...(result.ok ? {} : { errorCode: "DEPENDENCY_UNAVAILABLE" }),
+  });
 });
 app.use("/uploads", express.static("uploads"));
 app.use(attachActivityHelper);

@@ -10,7 +10,11 @@ router.get("/health/live", (_req, res) => {
 
 router.get("/health/ready", async (_req, res) => {
   const result = await runGuardianProbe({ allowRecovery: false });
-  res.status(result.ok ? 200 : 503).json(result);
+  const { lastError: _lastError, ...safeResult } = result;
+  res.status(result.ok ? 200 : 503).json({
+    ...safeResult,
+    ...(result.ok ? {} : { errorCode: "DEPENDENCY_UNAVAILABLE" }),
+  });
 });
 
 router.get("/admin/system-health", adminMiddleware, (_req, res) => {

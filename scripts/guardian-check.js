@@ -43,6 +43,15 @@ async function runChecks() {
     ]);
     if (!account.ok) throw new Error(`synthetic_account_${account.status}`);
     if (!agenda.ok && agenda.status !== 404) throw new Error(`synthetic_agenda_${agenda.status}`);
+  } else {
+    // Mesmo sem credenciais tecnicas, confirma que o fluxo de login consulta
+    // o banco e devolve a negativa esperada, em vez de 5xx/timeout.
+    const loginProbe = await request(`${API_URL}/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "guardian-probe@invalid.viapet", password: "invalid-probe" }),
+    }, 30000);
+    if (loginProbe.status !== 401) throw new Error(`login_path_${loginProbe.status}`);
   }
   return { app, ready };
 }
