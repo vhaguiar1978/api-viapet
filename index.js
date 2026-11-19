@@ -1,4 +1,5 @@
 import express from "express";
+import compression from "compression";
 import bodyParser from "body-parser";
 import { DataTypes } from "sequelize";
 import "./config/env.js"; // Carregar configurações de ambiente
@@ -86,6 +87,7 @@ import net from "node:net";
 process.env.TZ = "America/Sao_Paulo";
 const app = express();
 app.set("trust proxy", 1);
+app.use(compression({ threshold: 1024 }));
 
 function sanitizeForwardedForHeader(value) {
   if (typeof value !== "string") return undefined;
@@ -116,7 +118,9 @@ app.use(
   bodyParser.json({
     limit: "10mb",
     verify: (req, _res, buf) => {
-      req.rawBody = buf;
+      if (req.originalUrl?.startsWith("/api/webhooks/whatsapp")) {
+        req.rawBody = buf;
+      }
     },
   })
 );
@@ -144,7 +148,7 @@ app.get("/api/db-status", async (_req, res) => {
     ...(result.ok ? {} : { errorCode: "DEPENDENCY_UNAVAILABLE" }),
   });
 });
-app.use("/uploads", express.static("uploads"));
+app.use("/uploads", express.static("uploads", { maxAge: "7d", immutable: true }));
 app.use(attachActivityHelper);
 app.use(loginRouter);
 app.use(loginFuncRouter);
